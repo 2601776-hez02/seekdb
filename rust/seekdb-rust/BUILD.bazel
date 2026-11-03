@@ -19,6 +19,7 @@ rust_static_library(
         "//rust/local",
         "//rust/logger",
         "//rust/sql-nio:sql_nio",
+        "//rust/sql-parser:sql_parser",
         "//rust/regex-engine:regex_engine",
         "//rust/uuid-generator:uuid_generator",
     ] + select({

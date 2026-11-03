@@ -18,6 +18,7 @@ logger = { path = "../logger" }
 config = { path = "../config" }
 local = { path = "../local" }
 in-process = { path = "../in-process" }
+sql-parser = { path = "../sql-parser" }
 regex-engine = { path = "../regex-engine" }
 uuid-generator = { path = "../uuid-generator" }
 

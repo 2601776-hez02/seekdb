@@ -15,7 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
-#include "sql/parser/ob_item_type_str.h"
+#include "query/engine/expr/ob_item_type_str.h"
 #include "sql/resolver/expr/ob_raw_expr_print_visitor.h"
 namespace oceanbase
 {

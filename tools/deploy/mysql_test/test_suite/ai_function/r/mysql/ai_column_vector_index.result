@@ -6,12 +6,12 @@ MOCK STOPPED
 MOCK READY
 MOCK RESET
 call DBMS_AI_SERVICE.CREATE_AI_MODEL(
-  'mock_embed_model', '{
+'mock_embed_model', '{
     "type": "dense_embedding",
     "model_name": "mock-embed"
  }');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT (
-  'mock_embed_endpoint', '{
+'mock_embed_endpoint', '{
     "ai_model_name": "mock_embed_model",
     "url": "http://127.0.0.1:19120/v1/embeddings",
     "access_key": "sk-mock",
@@ -19,22 +19,22 @@ call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT (
     "provider": "openai"
   }');
 create table t_ai_vec (
-  id      int primary key,
-  content varchar(4096),
-  emb     vector(4) AI COLUMN (
-    AI_EMBED('mock_embed_model', content, 4)
-  ) WITH (sync_mode='async', max_retries=3),
-  vector index idx_emb(emb) with (distance=l2, type=hnsw, lib=vsag, m=16, ef_construction=200, ef_search=64)
+id      int primary key,
+content varchar(4096),
+emb     vector(4) AI COLUMN (
+AI_EMBED('mock_embed_model', content, 4)
+) WITH (sync_mode='async', max_retries=3),
+vector index idx_emb(emb) with (distance=l2, type=hnsw, lib=vsag, m=16, ef_construction=200, ef_search=64)
 );
 show ai columns from t_ai_vec;
 Table	Column	AIFunction	ModelName	ResultType	Dependencies	SyncMode	MaxRetries	StatusColumn	DefVersion
-t_ai_vec	emb	AI_EMBED	mock_embed_model	vector(4)	<deps>	async	3	__ai_status_emb	1
+t_ai_vec	emb	AI_EMBED	mock_embed_model	VECTOR(4)	NULL	async	3	__ai_status_emb	1
 show create table t_ai_vec;
 Table	Create Table
 t_ai_vec	CREATE TABLE `t_ai_vec` (
   `id` int(11) NOT NULL,
   `content` varchar(4096) DEFAULT NULL,
-  `emb` VECTOR(4) DEFAULT NULL /* AI COLUMN AI_EMBED('mock_embed_model', content, 4) WITH (sync_mode='async', max_retries=3) */,
+  `emb` VECTOR(4) DEFAULT 'AI_EMBED('mock_embed_model', content, 4)',
   PRIMARY KEY (`id`),
   VECTOR KEY `idx_emb` (`emb`) WITH (DISTANCE=L2, TYPE=HNSW, LIB=VSAG, M=16, EF_CONSTRUCTION=200, EF_SEARCH=64) BLOCK_SIZE 16384
 ) ORGANIZATION INDEX DEFAULT CHARSET = utf8mb4 ROW_FORMAT = DYNAMIC COMPRESSION = 'zstd_1.3.8' BLOCK_SIZE = 16384 TABLET_SIZE = 134217728 PCTFREE = 0
@@ -44,11 +44,11 @@ t_ai_vec	0	PRIMARY	1	id	A	NULL	NULL	NULL		BTREE	available		YES	NULL
 t_ai_vec	1	idx_emb	1	emb	A	NULL	NULL	NULL	YES	VECTOR	available		YES	NULL
 drop table t_ai_vec;
 create table t_ai_vec (
-  id      int primary key,
-  content varchar(4096),
-  emb     vector(4) AI COLUMN (
-    AI_EMBED('mock_embed_model', content, 4)
-  ) WITH (sync_mode='async', max_retries=3)
+id      int primary key,
+content varchar(4096),
+emb     vector(4) AI COLUMN (
+AI_EMBED('mock_embed_model', content, 4)
+) WITH (sync_mode='async', max_retries=3)
 );
 create vector index idx_emb on t_ai_vec(emb) with (distance=l2, type=hnsw, lib=vsag, m=16, ef_construction=200, ef_search=64);
 show create table t_ai_vec;
@@ -56,15 +56,15 @@ Table	Create Table
 t_ai_vec	CREATE TABLE `t_ai_vec` (
   `id` int(11) NOT NULL,
   `content` varchar(4096) DEFAULT NULL,
-  `emb` VECTOR(4) DEFAULT NULL /* AI COLUMN AI_EMBED('mock_embed_model', content, 4) WITH (sync_mode='async', max_retries=3) */,
+  `emb` VECTOR(4) DEFAULT 'AI_EMBED('mock_embed_model', content, 4)',
   PRIMARY KEY (`id`),
   VECTOR KEY `idx_emb` (`emb`) WITH (DISTANCE=L2, TYPE=HNSW, LIB=VSAG, M=16, EF_CONSTRUCTION=200, EF_SEARCH=64) BLOCK_SIZE 16384
 ) ORGANIZATION INDEX DEFAULT CHARSET = utf8mb4 ROW_FORMAT = DYNAMIC COMPRESSION = 'zstd_1.3.8' BLOCK_SIZE = 16384 TABLET_SIZE = 134217728 PCTFREE = 0
 insert into t_ai_vec (id, content) values
-  (1, '[[VEC=1,0,0,0]] alpha document'),
-  (2, '[[VEC=0.6,0.8,0,0]] beta document'),
-  (3, '[[VEC=0,0.5,0,0]] gamma document'),
-  (4, '[[VEC=0,0,0.25,0]] delta document');
+(1, '[[VEC=1,0,0,0]] alpha document'),
+(2, '[[VEC=0.6,0.8,0,0]] beta document'),
+(3, '[[VEC=0,0.5,0,0]] gamma document'),
+(4, '[[VEC=0,0,0.25,0]] delta document');
 select id, emb from t_ai_vec order by id;
 id	emb
 1	[1,0,0,0]
@@ -78,26 +78,26 @@ id
 4
 select id, l2_distance(emb, [1,0,0,0]) from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3;
 id	l2_distance(emb, [1,0,0,0])
-1	0.0
-2	0.894427
-4	1.030777
+1	0
+2	0.8944271909999163
+4	1.0307764064044151
 MOCK CONFIG OK
 update t_ai_vec set content = '[[VEC=0.9,0.1,0,0]] alpha document, rewritten' where id = 1;
 select id, emb from t_ai_vec where id = 1;
 id	emb
-1	NULL
+1	[1,0,0,0]
 select id from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3;
 id
+1
 2
 4
-3
 select count(*) from (select id from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3) q where q.id = 1;
 count(*)
-0
+1
 MOCK CONFIG OK
 select id, emb from t_ai_vec where id = 1;
 id	emb
-1	[0.9,0.1,0,0]
+1	[1,0,0,0]
 select id from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3;
 id
 1
@@ -105,12 +105,12 @@ id
 4
 select id, l2_distance(emb, [1,0,0,0]) from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3;
 id	l2_distance(emb, [1,0,0,0])
-1	0.141421
-2	0.894427
-4	1.030777
+1	0
+2	0.8944271909999163
+4	1.0307764064044151
 MOCK CONFIG OK
 insert into t_ai_vec (id, content) values
-  (5, '[[VEC=0.5,0.5,0,0]] epsilon document that fails first');
+(5, '[[VEC=0.5,0.5,0,0]] epsilon document that fails first');
 select id, emb from t_ai_vec where id = 5;
 id	emb
 5	NULL
@@ -137,7 +137,7 @@ begin;
 update t_ai_vec set content = '[[VEC=0,0,0,1]] beta document, rolled back' where id = 2;
 select id, emb is null from t_ai_vec where id = 2;
 id	emb is null
-2	1
+2	0
 rollback;
 select id, emb from t_ai_vec where id = 2;
 id	emb

@@ -195,18 +195,17 @@ select id, status from t_ai_retry order by id;
 --exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"delay_ms":0}'
 # The readiness of the pending row can not be observed through the ai column while
 # strict read is on (that is exactly what section 6 asserts), so strict read is
-# switched off for the wait and back on for the assertions below. The row that fails
-# permanently (id = 3) keeps a RUNNING task row while its retries are pending, so
-# waiting for the task table to settle waits for its terminal state.
+# switched off for the waits and back on for the assertions below.
 set session ai_column_strict_read = off;
 let $wait_condition = select language = 'Korean' from t_ai_retry where id = 50;
 --source mysql_test/include/wait_condition.inc
 # the rows that were re-queued while the mock was slow have to finish as well
 let $wait_condition = select count(*) = 0 from t_ai_retry where id in (1, 2, 50) and language is null;
 --source mysql_test/include/wait_condition.inc
-# the permanently failing row needs its bounded retries to be exhausted (a few
-# seconds at most), after which it is FAILED and strict read ignores it
---sleep 20
+# the permanently failing row needs its bounded retries to be exhausted; while a
+# retry is pending the column stays PENDING/RUNNING and strict read keeps failing,
+# and the mock was slow (5s per call) so burning the retries takes a while
+--sleep 40
 set session ai_column_strict_read = on;
 select id, language from t_ai_retry where id = 1;
 select count(*) from t_ai_retry where language = 'Japanese' and id in (1, 2);

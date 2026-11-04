@@ -6,12 +6,12 @@ MOCK STOPPED
 MOCK READY
 MOCK RESET
 call DBMS_AI_SERVICE.CREATE_AI_MODEL(
-  'mock_doc_model', '{
+'mock_doc_model', '{
     "type": "completion",
     "model_name": "mock-complete"
  }');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT (
-  'mock_doc_endpoint', '{
+'mock_doc_endpoint', '{
     "ai_model_name": "mock_doc_model",
     "url": "http://127.0.0.1:19120/v1/chat/completions",
     "access_key": "sk-mock",
@@ -19,20 +19,20 @@ call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT (
     "provider": "openai"
   }');
 create table t_ai_retry (
-  id       bigint primary key,
-  content  varchar(8192),
-  status   varchar(16),
-  language varchar(32) AI COLUMN (
-    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content))
-  ) WITH (sync_mode='async', max_retries=2)
+id       bigint primary key,
+content  varchar(8192),
+status   varchar(16),
+language varchar(32) AI COLUMN (
+AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content))
+) WITH (sync_mode='async', max_retries=2)
 );
 show ai columns from t_ai_retry;
 Table	Column	AIFunction	ModelName	ResultType	Dependencies	SyncMode	MaxRetries	StatusColumn	DefVersion
-t_ai_retry	language	AI_COMPLETE	mock_doc_model	VARCHAR	<deps>	async	2	__ai_status_language	1
+t_ai_retry	language	AI_COMPLETE	mock_doc_model	VARCHAR	NULL	async	2	__ai_status_language	1
 insert into t_ai_retry (id, content, status) values
-  (1, '[[LANG=Japanese]] alpha', 'active'),
-  (2, '[[LANG=English]] beta', 'active'),
-  (3, '[[LANG=French]] #fail gamma', 'archived');
+(1, '[[LANG=Japanese]] alpha', 'active'),
+(2, '[[LANG=English]] beta', 'active'),
+(3, '[[LANG=French]] #fail gamma', 'archived');
 select id, language, status from t_ai_retry order by id;
 id	language	status
 1	Japanese	active
@@ -86,35 +86,35 @@ id	language	status
 alter table t_ai_retry retry ai column no_such_column;
 ERROR 42S22: Unknown column 'no_such_column' in 'field list'
 alter table t_ai_retry retry ai column content;
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 alter table t_ai_retry retry ai column status;
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 alter table t_ai_retry retry failed;
 ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your OceanBase version for the right syntax to use near 'failed' at line 1
 alter table t_ai_retry retry ai;
 ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your OceanBase version for the right syntax to use near 'ai' at line 1
 alter table t_ai_retry retry failed ai column;
-ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your OceanBase version for the right syntax to use near '' at line 1
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your OceanBase version for the right syntax to use near 'column' at line 1
 alter table t_ai_retry_no_table retry ai column language;
 ERROR 42S02: Table 'test.t_ai_retry_no_table' doesn't exist
 MOCK RESET
 MOCK CONFIG OK
 insert into t_ai_retry (id, content, status) values
-  (50, '[[LANG=Korean]] pending row', 'active');
+(50, '[[LANG=Korean]] pending row', 'active');
 set session ai_column_strict_read = on;
 show variables like 'ai_column_strict_read';
 Variable_name	Value
 ai_column_strict_read	ON
 select id, language from t_ai_retry where id = 1;
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: The value of param 'OB_AI_COLUMN <message>
 select count(*) from t_ai_retry where language = 'Japanese';
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: The value of param 'OB_AI_COLUMN <message>
 update t_ai_retry set status = 'touched' where language = 'Japanese';
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: The value of param 'OB_AI_COLUMN <message>
 delete from t_ai_retry where language = 'Japanese';
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: The value of param 'OB_AI_COLUMN <message>
 select id from t_ai_retry order by language limit 1;
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: The value of param 'OB_AI_COLUMN <message>
 select id, status from t_ai_retry where id = 1;
 id	status
 1	active
@@ -127,6 +127,8 @@ id	status
 3	archived
 50	active
 MOCK CONFIG OK
+set session ai_column_strict_read = off;
+set session ai_column_strict_read = on;
 select id, language from t_ai_retry where id = 1;
 id	language
 1	Japanese

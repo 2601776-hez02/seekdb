@@ -1386,6 +1386,10 @@ int ObAIColumnWorker::publish_row_(ObInnerSQLConnection &conn,
       if (item.retry_count_ > max_retry_count) {
         max_retry_count = item.retry_count_;
       }
+      // a retryable failure puts the column back to PENDING in the same statement:
+      // a row must never be left in RUNNING, otherwise a lost in-memory retry state
+      // (restart, definition refresh) strands it forever.
+      should_publish = true;
       LOG_WARN("[AI_COLUMN_WORKER] ai column generation failed",
                K(table.table_id_), K(row.row_key_), K(def.column_id_),
                K(item.retry_count_), K(def.max_retries_), K(item.err_msg_));
@@ -1436,6 +1440,23 @@ int ObAIColumnWorker::publish_row_(ObInnerSQLConnection &conn,
                                    def.status_column_name_.length(),
                                    def.status_column_name_.ptr(),
                                    ObAIColumnStatus::FAILED))) {
+        } else {
+          first = false;
+        }
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < items.count(); ++i) {
+        const ObAIColumnWorkItem &item = items.at(i);
+        if (item.ok_ || item.exhausted_) {
+          continue;
+        }
+        // a retryable failure: keep the (stale) value and the source version, but
+        // make the row claimable again so that a lost retry state can not strand it
+        const ObAIColumnDef &def = table.columns_.at(item.col_index_);
+        if (OB_FAIL(sql.append_fmt("%s`%.*s` = %d",
+                                   first ? "" : ", ",
+                                   def.status_column_name_.length(),
+                                   def.status_column_name_.ptr(),
+                                   ObAIColumnStatus::PENDING))) {
         } else {
           first = false;
         }

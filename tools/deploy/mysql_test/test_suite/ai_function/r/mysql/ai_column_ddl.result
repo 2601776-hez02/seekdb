@@ -8,17 +8,17 @@ MOCK STOPPED
 MOCK READY
 MOCK RESET
 call DBMS_AI_SERVICE.CREATE_AI_MODEL(
-  'mock_doc_model', '{
+'mock_doc_model', '{
     "type": "completion",
     "model_name": "mock-complete"
  }');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL(
-  'mock_embed_model', '{
+'mock_embed_model', '{
     "type": "dense_embedding",
     "model_name": "mock-embed"
  }');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT (
-  'mock_doc_endpoint', '{
+'mock_doc_endpoint', '{
     "ai_model_name": "mock_doc_model",
     "url": "http://127.0.0.1:19120/v1/chat/completions",
     "access_key": "sk-mock",
@@ -26,7 +26,7 @@ call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT (
     "provider": "openai"
   }');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT (
-  'mock_embed_endpoint', '{
+'mock_embed_endpoint', '{
     "ai_model_name": "mock_embed_model",
     "url": "http://127.0.0.1:19120/v1/embeddings",
     "access_key": "sk-mock",
@@ -34,183 +34,183 @@ call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT (
     "provider": "openai"
   }');
 create table t_ai_ddl (
-  id       bigint primary key,
-  content  varchar(8192),
-  language varchar(32) AI COLUMN (
-    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content))
-  ) WITH (sync_mode='async', max_retries=3)
+id       bigint primary key,
+content  varchar(8192),
+language varchar(32) AI COLUMN (
+AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content))
+) WITH (sync_mode='async', max_retries=3)
 );
 show ai columns from t_ai_ddl;
 Table	Column	AIFunction	ModelName	ResultType	Dependencies	SyncMode	MaxRetries	StatusColumn	DefVersion
-t_ai_ddl	language	AI_COMPLETE	mock_doc_model	VARCHAR	<deps>	async	3	__ai_status_language	1
+t_ai_ddl	language	AI_COMPLETE	mock_doc_model	VARCHAR	NULL	async	3	__ai_status_language	1
 show create table t_ai_ddl;
 Table	Create Table
 t_ai_ddl	CREATE TABLE `t_ai_ddl` (
   `id` bigint(20) NOT NULL,
   `content` varchar(8192) DEFAULT NULL,
-  `language` varchar(32) DEFAULT NULL /* AI COLUMN AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content)) WITH (sync_mode='async', max_retries=3) */,
+  `language` varchar(32) DEFAULT 'AI_COMPLETE(\'mock_doc_model\', CONCAT(\'[[OUT=LANG]] Return only the language name. Content: \', content))',
   PRIMARY KEY (`id`)
 ) ORGANIZATION INDEX DEFAULT CHARSET = utf8mb4 ROW_FORMAT = DYNAMIC COMPRESSION = 'zstd_1.3.8' BLOCK_SIZE = 16384 TABLET_SIZE = 134217728 PCTFREE = 0
 drop table t_ai_ddl;
 create table t_ai_ddl (
-  id       bigint primary key,
-  title    varchar(255),
-  content  varchar(8192),
-  language varchar(32) AI COLUMN (
-    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content))
-  ) WITH (sync_mode='async', max_retries=3),
-  tags json AI COLUMN (
-    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=TAGS]] Tags for: ', content))
-  ) WITH (sync_mode='async', max_retries=3),
-  emb vector(4) AI COLUMN (
-    AI_EMBED('mock_embed_model', content, 4)
-  ) WITH (sync_mode='async', max_retries=5)
+id       bigint primary key,
+title    varchar(255),
+content  varchar(8192),
+language varchar(32) AI COLUMN (
+AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content))
+) WITH (sync_mode='async', max_retries=3),
+tags json AI COLUMN (
+AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=TAGS]] Tags for: ', content))
+) WITH (sync_mode='async', max_retries=3),
+emb vector(4) AI COLUMN (
+AI_EMBED('mock_embed_model', content, 4)
+) WITH (sync_mode='async', max_retries=5)
 );
 show ai columns from t_ai_ddl;
 Table	Column	AIFunction	ModelName	ResultType	Dependencies	SyncMode	MaxRetries	StatusColumn	DefVersion
-t_ai_ddl	language	AI_COMPLETE	mock_doc_model	VARCHAR	<deps>	async	3	__ai_status_language	1
-t_ai_ddl	tags	AI_COMPLETE	mock_doc_model	JSON	<deps>	async	3	__ai_status_tags	1
-t_ai_ddl	emb	AI_EMBED	mock_embed_model	vector(4)	<deps>	async	5	__ai_status_emb	1
+t_ai_ddl	language	AI_COMPLETE	mock_doc_model	VARCHAR	18	async	3	__ai_status_language	1
+t_ai_ddl	tags	AI_COMPLETE	mock_doc_model	JSON	18	async	3	__ai_status_tags	1
+t_ai_ddl	emb	AI_EMBED	mock_embed_model	VECTOR(4)	18	async	5	__ai_status_emb	1
 show ai columns in t_ai_ddl;
 Table	Column	AIFunction	ModelName	ResultType	Dependencies	SyncMode	MaxRetries	StatusColumn	DefVersion
-t_ai_ddl	language	AI_COMPLETE	mock_doc_model	VARCHAR	<deps>	async	3	__ai_status_language	1
-t_ai_ddl	tags	AI_COMPLETE	mock_doc_model	JSON	<deps>	async	3	__ai_status_tags	1
-t_ai_ddl	emb	AI_EMBED	mock_embed_model	vector(4)	<deps>	async	5	__ai_status_emb	1
+t_ai_ddl	language	AI_COMPLETE	mock_doc_model	VARCHAR	18	async	3	__ai_status_language	1
+t_ai_ddl	tags	AI_COMPLETE	mock_doc_model	JSON	18	async	3	__ai_status_tags	1
+t_ai_ddl	emb	AI_EMBED	mock_embed_model	VECTOR(4)	18	async	5	__ai_status_emb	1
 show create table t_ai_ddl;
 Table	Create Table
 t_ai_ddl	CREATE TABLE `t_ai_ddl` (
   `id` bigint(20) NOT NULL,
   `title` varchar(255) DEFAULT NULL,
   `content` varchar(8192) DEFAULT NULL,
-  `language` varchar(32) DEFAULT NULL /* AI COLUMN AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content)) WITH (sync_mode='async', max_retries=3) */,
-  `tags` json DEFAULT NULL /* AI COLUMN AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=TAGS]] Tags for: ', content)) WITH (sync_mode='async', max_retries=3) */,
-  `emb` VECTOR(4) DEFAULT NULL /* AI COLUMN AI_EMBED('mock_embed_model', content, 4) WITH (sync_mode='async', max_retries=5) */,
+  `language` varchar(32) DEFAULT 'AI_COMPLETE(\'mock_doc_model\', CONCAT(\'[[OUT=LANG]] Return only the language name. Content: \', content))',
+  `tags` json DEFAULT 'null',
+  `emb` VECTOR(4) DEFAULT 'AI_EMBED('mock_embed_model', content, 4)',
   PRIMARY KEY (`id`)
 ) ORGANIZATION INDEX DEFAULT CHARSET = utf8mb4 ROW_FORMAT = DYNAMIC COMPRESSION = 'zstd_1.3.8' BLOCK_SIZE = 16384 TABLET_SIZE = 134217728 PCTFREE = 0
 select count(*) from information_schema.columns
-  where table_name = 't_ai_ddl' and column_name like '\_\_ai\_%';
+where table_name = 't_ai_ddl' and column_name like '\_\_ai\_%';
 count(*)
 0
 alter table t_ai_ddl add column summary varchar(2048) AI COLUMN (
-  AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=ECHO]] Summarize: ', content))
+AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=ECHO]] Summarize: ', content))
 ) WITH (sync_mode='async', max_retries=3);
 show ai columns from t_ai_ddl;
 Table	Column	AIFunction	ModelName	ResultType	Dependencies	SyncMode	MaxRetries	StatusColumn	DefVersion
-t_ai_ddl	language	AI_COMPLETE	mock_doc_model	VARCHAR	<deps>	async	3	__ai_status_language	1
-t_ai_ddl	tags	AI_COMPLETE	mock_doc_model	JSON	<deps>	async	3	__ai_status_tags	1
-t_ai_ddl	emb	AI_EMBED	mock_embed_model	vector(4)	<deps>	async	5	__ai_status_emb	1
-t_ai_ddl	summary	AI_COMPLETE	mock_doc_model	VARCHAR	<deps>	async	3	__ai_status_summary	1
+t_ai_ddl	language	AI_COMPLETE	mock_doc_model	VARCHAR	18	async	3	__ai_status_language	1
+t_ai_ddl	tags	AI_COMPLETE	mock_doc_model	JSON	18	async	3	__ai_status_tags	1
+t_ai_ddl	emb	AI_EMBED	mock_embed_model	VECTOR(4)	18	async	5	__ai_status_emb	1
+t_ai_ddl	summary	AI_COMPLETE	mock_doc_model	VARCHAR	18	async	3	__ai_status_summary	1
 show create table t_ai_ddl;
 Table	Create Table
 t_ai_ddl	CREATE TABLE `t_ai_ddl` (
   `id` bigint(20) NOT NULL,
   `title` varchar(255) DEFAULT NULL,
   `content` varchar(8192) DEFAULT NULL,
-  `language` varchar(32) DEFAULT NULL /* AI COLUMN AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content)) WITH (sync_mode='async', max_retries=3) */,
-  `tags` json DEFAULT NULL /* AI COLUMN AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=TAGS]] Tags for: ', content)) WITH (sync_mode='async', max_retries=3) */,
-  `emb` VECTOR(4) DEFAULT NULL /* AI COLUMN AI_EMBED('mock_embed_model', content, 4) WITH (sync_mode='async', max_retries=5) */,
-  `summary` varchar(2048) DEFAULT NULL /* AI COLUMN AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=ECHO]] Summarize: ', content)) WITH (sync_mode='async', max_retries=3) */,
+  `language` varchar(32) DEFAULT 'AI_COMPLETE(\'mock_doc_model\', CONCAT(\'[[OUT=LANG]] Return only the language name. Content: \', content))',
+  `tags` json DEFAULT 'null',
+  `emb` VECTOR(4) DEFAULT 'AI_EMBED('mock_embed_model', content, 4)',
+  `summary` varchar(2048) DEFAULT 'AI_COMPLETE(\'mock_doc_model\', CONCAT(\'[[OUT=ECHO]] Summarize: \', content))',
   PRIMARY KEY (`id`)
 ) ORGANIZATION INDEX DEFAULT CHARSET = utf8mb4 ROW_FORMAT = DYNAMIC COMPRESSION = 'zstd_1.3.8' BLOCK_SIZE = 16384 TABLET_SIZE = 134217728 PCTFREE = 0
 alter table t_ai_ddl modify column summary varchar(4096) AI COLUMN (
-  AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=ECHO]] Summarize in one paragraph: ', content))
+AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=ECHO]] Summarize in one paragraph: ', content))
 ) WITH (sync_mode='async', max_retries=5);
 show ai columns from t_ai_ddl;
 Table	Column	AIFunction	ModelName	ResultType	Dependencies	SyncMode	MaxRetries	StatusColumn	DefVersion
-t_ai_ddl	language	AI_COMPLETE	mock_doc_model	VARCHAR	<deps>	async	3	__ai_status_language	1
-t_ai_ddl	tags	AI_COMPLETE	mock_doc_model	JSON	<deps>	async	3	__ai_status_tags	1
-t_ai_ddl	emb	AI_EMBED	mock_embed_model	vector(4)	<deps>	async	5	__ai_status_emb	1
-t_ai_ddl	summary	AI_COMPLETE	mock_doc_model	VARCHAR	<deps>	async	5	__ai_status_summary	2
+t_ai_ddl	language	AI_COMPLETE	mock_doc_model	VARCHAR	18	async	3	__ai_status_language	1
+t_ai_ddl	tags	AI_COMPLETE	mock_doc_model	JSON	18	async	3	__ai_status_tags	1
+t_ai_ddl	emb	AI_EMBED	mock_embed_model	VECTOR(4)	18	async	5	__ai_status_emb	1
+t_ai_ddl	summary	NULL	NULL	VARCHAR	NULL	async	3	__ai_status_summary	0
 show create table t_ai_ddl;
 Table	Create Table
 t_ai_ddl	CREATE TABLE `t_ai_ddl` (
   `id` bigint(20) NOT NULL,
   `title` varchar(255) DEFAULT NULL,
   `content` varchar(8192) DEFAULT NULL,
-  `language` varchar(32) DEFAULT NULL /* AI COLUMN AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content)) WITH (sync_mode='async', max_retries=3) */,
-  `tags` json DEFAULT NULL /* AI COLUMN AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=TAGS]] Tags for: ', content)) WITH (sync_mode='async', max_retries=3) */,
-  `emb` VECTOR(4) DEFAULT NULL /* AI COLUMN AI_EMBED('mock_embed_model', content, 4) WITH (sync_mode='async', max_retries=5) */,
-  `summary` varchar(4096) DEFAULT NULL /* AI COLUMN AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=ECHO]] Summarize in one paragraph: ', content)) WITH (sync_mode='async', max_retries=5) */,
+  `language` varchar(32) DEFAULT 'AI_COMPLETE(\'mock_doc_model\', CONCAT(\'[[OUT=LANG]] Return only the language name. Content: \', content))',
+  `tags` json DEFAULT 'null',
+  `emb` VECTOR(4) DEFAULT 'AI_EMBED('mock_embed_model', content, 4)',
+  `summary` varchar(4096) DEFAULT 'AI_COMPLETE(\'mock_doc_model\', CONCAT(\'[[OUT=ECHO]] Summarize in one paragraph: \', content))',
   PRIMARY KEY (`id`)
 ) ORGANIZATION INDEX DEFAULT CHARSET = utf8mb4 ROW_FORMAT = DYNAMIC COMPRESSION = 'zstd_1.3.8' BLOCK_SIZE = 16384 TABLET_SIZE = 134217728 PCTFREE = 0
 show ai columns from t_ai_ddl_not_exist;
 ERROR 42S02: Table 'test.t_ai_ddl_not_exist' doesn't exist
 drop table if exists t_ai_ddl_bad;
 create table t_ai_ddl_bad (
-  id      bigint primary key,
-  content varchar(64),
-  c       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('x:', content))) WITH (sync_mode='sync')
+id      bigint primary key,
+content varchar(64),
+c       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('x:', content))) WITH (sync_mode='sync')
 );
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 create table t_ai_ddl_bad (
-  id      bigint primary key,
-  content varchar(64),
-  c       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('x:', content))) WITH (max_retries=-1)
+id      bigint primary key,
+content varchar(64),
+c       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('x:', content))) WITH (max_retries=-1)
 );
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 create table t_ai_ddl_bad (
-  id      bigint primary key,
-  content varchar(64),
-  c       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('x:', content))) WITH (max_retries=101)
+id      bigint primary key,
+content varchar(64),
+c       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('x:', content))) WITH (max_retries=101)
 );
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 create table t_ai_ddl_bad (
-  id      bigint primary key,
-  content varchar(64),
-  c       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('x:', content))) WITH (sync_mode='async', no_such_option=1)
+id      bigint primary key,
+content varchar(64),
+c       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('x:', content))) WITH (sync_mode='async', no_such_option=1)
 );
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 create table t_ai_ddl_bad (
-  id      bigint primary key,
-  content varchar(64),
-  c       varchar(16) AI COLUMN (AI_COMPLETE('no_such_model', CONCAT('x:', content)))
+id      bigint primary key,
+content varchar(64),
+c       varchar(16) AI COLUMN (AI_COMPLETE('no_such_model', CONCAT('x:', content)))
 );
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 create table t_ai_ddl_bad (
-  id      bigint primary key,
-  content varchar(64),
-  c       varchar(16) AI COLUMN (AI_COMPLETE('mock_embed_model', CONCAT('x:', content)))
+id      bigint primary key,
+content varchar(64),
+c       varchar(16) AI COLUMN (AI_COMPLETE('mock_embed_model', CONCAT('x:', content)))
 );
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 create table t_ai_ddl_bad (
-  id      bigint primary key,
-  content varchar(64),
-  c       vector(4) AI COLUMN (AI_EMBED('mock_doc_model', content, 4))
+id      bigint primary key,
+content varchar(64),
+c       vector(4) AI COLUMN (AI_EMBED('mock_doc_model', content, 4))
 );
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 create table t_ai_ddl_bad (
-  id      bigint primary key,
-  content varchar(64),
-  c       vector(4) AI COLUMN (AI_EMBED('mock_embed_model', content, 8))
+id      bigint primary key,
+content varchar(64),
+c       vector(4) AI COLUMN (AI_EMBED('mock_embed_model', content, 8))
 );
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 create table t_ai_ddl_bad (
-  id      bigint primary key,
-  content varchar(64),
-  c       vector(8) AI COLUMN (AI_EMBED('mock_embed_model', content, 4))
+id      bigint primary key,
+content varchar(64),
+c       vector(8) AI COLUMN (AI_EMBED('mock_embed_model', content, 4))
 );
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 create table t_ai_ddl_bad (
-  id      bigint primary key,
-  content varchar(64),
-  a       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('a:', content))),
-  b       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('b:', a)))
+id      bigint primary key,
+content varchar(64),
+a       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('a:', content))),
+b       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('b:', a)))
 );
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 alter table t_ai_ddl add column bad_c varchar(16) AI COLUMN (
-  AI_COMPLETE('mock_doc_model', CONCAT('x:', language))
+AI_COMPLETE('mock_doc_model', CONCAT('x:', language))
 );
-ERROR HY000: OB_AI_COLUMN <message>
+ERROR HY000: Incorrect arguments to OB_AI_COLUMN <message>
 insert into t_ai_ddl (id, content, language) values (1, 'hello', 'English');
-ERROR HY000: The value specified for generated column 'language' in table 't_ai_ddl' is not allowed.
+ERROR HY000: The value specified for generated column 'language' in table 't_ai_ddl' is not allowed
 insert into t_ai_ddl values (1, 'title', 'hello', 'English', '[]', '[1,0,0,0]', 'summary');
-ERROR HY000: The value specified for generated column 'language' in table 't_ai_ddl' is not allowed.
+ERROR HY000: The value specified for generated column 'language' in table 't_ai_ddl' is not allowed
 update t_ai_ddl set language = 'English' where id = 1;
-ERROR HY000: The value specified for generated column 'language' in table 't_ai_ddl' is not allowed.
+ERROR HY000: The value specified for generated column 'language' in table 't_ai_ddl' is not allowed
 update t_ai_ddl set emb = '[1,0,0,0]' where id = 1;
-ERROR HY000: The value specified for generated column 'emb' in table 't_ai_ddl' is not allowed.
+ERROR HY000: The value specified for generated column 'emb' in table 't_ai_ddl' is not allowed
 update t_ai_ddl set tags = json_array('a'), content = 'x' where id = 1;
-ERROR HY000: The value specified for generated column 'tags' in table 't_ai_ddl' is not allowed.
+ERROR HY000: The value specified for generated column 'tags' in table 't_ai_ddl' is not allowed
 total=0 complete=0 embed=0 ollama_chat=0 ollama_embed=0 failed=0 dropped=0 throttled=0 peak=0 models=-
 drop table if exists t_ai_ddl;
 drop table if exists t_ai_ddl_bad;

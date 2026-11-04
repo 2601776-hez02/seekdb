@@ -28,6 +28,7 @@
 #include "sql/optimizer/ob_log_update.h"
 #include "sql/optimizer/ob_log_insert.h"
 #include "sql/optimizer/ob_log_expr_values.h"
+#include "sql/resolver/expr/ob_raw_expr_util.h"
 #include "sql/optimizer/ob_log_function_table.h"
 #include "sql/optimizer/ob_log_json_table.h"
 #include "sql/optimizer/ob_log_values.h"
@@ -5728,7 +5729,26 @@ static int collect_ai_column_check_targets(const ObDMLStmt &stmt,
   ObSEArray<ObColumnRefRawExpr*, 8> column_exprs;
   ObSEArray<uint64_t, 4> checked_table_ids;
   ObSEArray<uint64_t, 4> checked_column_ids;
-  if (OB_FAIL(stmt.get_column_exprs(column_exprs))) {
+  const bool is_update = stmt.is_update_stmt();
+  if (is_update || stmt.is_delete_stmt()) {
+    // An update/delete fetches every column of its target table to build the old
+    // row; that is not a read of the ai column by the statement. Only the
+    // statement's own expressions can read it: the conditions (WHERE) and, for an
+    // update, the assigned values.
+    ObSEArray<ObRawExpr*, 16> cond_columns;
+    if (OB_FAIL(ObRawExprUtils::extract_column_exprs(stmt.get_condition_exprs(),
+                                                     cond_columns))) {
+      LOG_WARN("failed to extract condition column exprs", K(ret));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < cond_columns.count(); ++i) {
+      if (OB_ISNULL(cond_columns.at(i))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(column_exprs.push_back(
+                   static_cast<ObColumnRefRawExpr *>(cond_columns.at(i))))) {
+        LOG_WARN("failed to collect condition column expr", K(ret));
+      }
+    }
+  } else if (OB_FAIL(stmt.get_column_exprs(column_exprs))) {
     LOG_WARN("failed to get stmt column exprs", K(ret));
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < column_exprs.count(); ++i) {

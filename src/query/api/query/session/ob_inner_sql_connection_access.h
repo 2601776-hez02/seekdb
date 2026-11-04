@@ -59,6 +59,11 @@ public:
       sql::ObSQLSessionInfo *session,
       common::sqlclient::ObISQLConnectionGuard &connection);
 
+  // Create a connection with its own inner session: hidden columns are visible to it
+  // and it does not disturb the session of the caller.
+  static int create_connection_with_owned_session(
+      common::sqlclient::ObISQLConnectionGuard &connection);
+
   static sql::ObSQLSessionInfo *get_session(
       common::sqlclient::ObISQLConnection *connection);
 

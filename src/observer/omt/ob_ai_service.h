@@ -169,7 +169,7 @@ public:
   static const int64_t DEFAULT_DEF_REFRESH_INTERVAL_US = 2 * 1000 * 1000; // 2s
   static const int64_t DEFAULT_BATCH_SIZE = 32;
   static const int64_t BACKOFF_BASE_US = 200 * 1000;         // 200ms
-  static const int64_t BACKOFF_MAX_US = 30 * 1000 * 1000;    // 30s
+  static const int64_t BACKOFF_MAX_US = 2 * 1000 * 1000;     // 2s
   static const int64_t SHORT_STMT_TIMEOUT_US = 30 * 1000 * 1000;
   static const int64_t EVAL_STMT_TIMEOUT_US = 10 * 60 * 1000 * 1000;
 
@@ -183,6 +183,11 @@ public:
   void wait();
   void destroy();
   virtual void do_work() override;
+  // logservice::ObILocalLogHandler (via ObServerThreadHelper): leader/follower
+  // hooks. The worker runs on every replica but only ever picks up work through
+  // the __all_ai_column_task lease columns, so switching role is a no-op.
+  virtual int activate() override;
+  virtual void deactivate() override;
 
   void set_idle_interval_us(const int64_t us)
   {
@@ -240,7 +245,7 @@ private:
                           const common::ObString &row_key,
                           ObAIColumnWorkItem &item,
                           bool &row_gone);
-  int set_type_hint_(ObInnerSQLConnection &conn, const common::ObString &type_hint);
+  static int set_type_hint_(ObInnerSQLConnection &conn, const common::ObString &type_hint);
 
   // ---- publish ----
   int publish_row_(ObInnerSQLConnection &conn,
@@ -266,7 +271,7 @@ private:
   // ---- __all_ai_column_task ----
   int insert_task_row_(ObInnerSQLConnection &conn,
                        const ObAIColumnTargetTable &table,
-                       const common::ObAIColumnCandidate &row,
+                       const ObAIColumnCandidate &row,
                        const common::ObIArray<ObAIColumnWorkItem> &items,
                        const char *request_id,
                        int64_t &task_id);
@@ -291,7 +296,9 @@ private:
                               const common::ObString &db_name,
                               const common::ObString &table_name) const;
   int append_text_literal_(const common::ObString &value, common::ObSqlString &sql) const;
-  int append_obj_literal_(const common::ObObj &obj, common::ObSqlString &sql);
+  int append_obj_literal_(const common::ObObj &obj,
+                          const common::ObObjPrintParams &print_params,
+                          common::ObSqlString &sql);
   int build_claim_sql_(const ObAIColumnTargetTable &table,
                        const ObAIColumnCandidate &row,
                        const common::ObIArray<int64_t> &group,

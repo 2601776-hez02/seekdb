@@ -146,7 +146,7 @@ drop table if exists t_ai_ddl_bad;
 
 # only sync_mode='async' is supported
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 create table t_ai_ddl_bad (
   id      bigint primary key,
   content varchar(64),
@@ -155,21 +155,21 @@ create table t_ai_ddl_bad (
 
 # max_retries is an integer in [0, 100]
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 create table t_ai_ddl_bad (
   id      bigint primary key,
   content varchar(64),
   c       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('x:', content))) WITH (max_retries=-1)
 );
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 create table t_ai_ddl_bad (
   id      bigint primary key,
   content varchar(64),
   c       varchar(16) AI COLUMN (AI_COMPLETE('mock_doc_model', CONCAT('x:', content))) WITH (max_retries=101)
 );
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 create table t_ai_ddl_bad (
   id      bigint primary key,
   content varchar(64),
@@ -180,7 +180,7 @@ create table t_ai_ddl_bad (
 # 7. unknown model
 # ---------------------------------------------------------------------------
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 create table t_ai_ddl_bad (
   id      bigint primary key,
   content varchar(64),
@@ -192,7 +192,7 @@ create table t_ai_ddl_bad (
 # ---------------------------------------------------------------------------
 # completion function on an embedding model
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 create table t_ai_ddl_bad (
   id      bigint primary key,
   content varchar(64),
@@ -200,7 +200,7 @@ create table t_ai_ddl_bad (
 );
 # embedding function on a completion model
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 create table t_ai_ddl_bad (
   id      bigint primary key,
   content varchar(64),
@@ -211,14 +211,14 @@ create table t_ai_ddl_bad (
 # 9. AI_EMBED dimension against the declared VECTOR(N)
 # ---------------------------------------------------------------------------
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 create table t_ai_ddl_bad (
   id      bigint primary key,
   content varchar(64),
   c       vector(4) AI COLUMN (AI_EMBED('mock_embed_model', content, 8))
 );
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 create table t_ai_ddl_bad (
   id      bigint primary key,
   content varchar(64),
@@ -229,7 +229,7 @@ create table t_ai_ddl_bad (
 # 10. an AI column may not depend on another AI column
 # ---------------------------------------------------------------------------
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 create table t_ai_ddl_bad (
   id      bigint primary key,
   content varchar(64),
@@ -238,7 +238,7 @@ create table t_ai_ddl_bad (
 );
 # the same rule through ALTER TABLE ... ADD COLUMN
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 alter table t_ai_ddl add column bad_c varchar(16) AI COLUMN (
   AI_COMPLETE('mock_doc_model', CONCAT('x:', language))
 );
@@ -247,15 +247,15 @@ alter table t_ai_ddl add column bad_c varchar(16) AI COLUMN (
 # 11. a user statement may not assign an AI column
 #    (OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN = 5290, reused on purpose)
 # ---------------------------------------------------------------------------
---error 5290
+--error 3105
 insert into t_ai_ddl (id, content, language) values (1, 'hello', 'English');
---error 5290
+--error 3105
 insert into t_ai_ddl values (1, 'title', 'hello', 'English', '[]', '[1,0,0,0]', 'summary');
---error 5290
+--error 3105
 update t_ai_ddl set language = 'English' where id = 1;
---error 5290
+--error 3105
 update t_ai_ddl set emb = '[1,0,0,0]' where id = 1;
---error 5290
+--error 3105
 update t_ai_ddl set tags = json_array('a'), content = 'x' where id = 1;
 
 # NOTE: a legal INSERT (ordinary columns only) is covered by ai_column_t1_dml.test.

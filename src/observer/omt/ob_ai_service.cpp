@@ -54,6 +54,42 @@ namespace observer
 
 namespace
 {
+
+// Result type hints of an AI column, appended to the final prompt by AI_COMPLETE.
+// They are identical to the ones ObDDLResolver writes into the ai spec at DDL time;
+// the runtime column schema does not carry the spec, so the worker recomputes the
+// hint from the declared result type.
+const char *const AI_TYPE_HINT_STRING =
+    "Return only the value, no explanation, no quotes.";
+const char *const AI_TYPE_HINT_JSON =
+    "Return a valid JSON document only, no explanation, no markdown.";
+const char *const AI_TYPE_HINT_NUMBER =
+    "Return only the number, no explanation, no units.";
+const char *const AI_TYPE_HINT_DATETIME =
+    "Return only the date or datetime value, no explanation.";
+
+void get_ai_column_type_hint_(const ObColumnSchemaV2 &column, ObString &type_hint)
+{
+  type_hint.reset();
+  if (column.is_json()) {
+    type_hint = ObString::make_string(AI_TYPE_HINT_JSON);
+  } else if (column.is_string_type() || ob_is_text_tc(column.get_data_type())) {
+    type_hint = ObString::make_string(AI_TYPE_HINT_STRING);
+  } else if (ObIntTC == column.get_data_type_class()
+             || ObUIntTC == column.get_data_type_class()
+             || ObNumberTC == column.get_data_type_class()
+             || ObFloatTC == column.get_data_type_class()
+             || ObDoubleTC == column.get_data_type_class()
+             || ObDecimalIntTC == column.get_data_type_class()) {
+    type_hint = ObString::make_string(AI_TYPE_HINT_NUMBER);
+  } else if (ObDateTimeTC == column.get_data_type_class()
+             || ObDateTC == column.get_data_type_class()
+             || ObTimeTC == column.get_data_type_class()
+             || ObOTimestampTC == column.get_data_type_class()
+             || ObMySQLDateTimeTC == column.get_data_type_class()) {
+    type_hint = ObString::make_string(AI_TYPE_HINT_DATETIME);
+  }
+}
 // __all_ai_column column names (contract 1.7).  tenant_id is intentionally not
 // used: seekdb is a single-tenant server and its inner tables (see
 // __all_ai_model_endpoint) carry no tenant_id column.
@@ -252,6 +288,19 @@ void ObAIColumnWorker::destroy()
     recovered_ = false;
     LOG_INFO("[AI_COLUMN_WORKER] destroyed");
   }
+}
+
+int ObAIColumnWorker::activate()
+{
+  // see the declaration: task ownership is guarded by the __all_ai_column_task
+  // lease columns, so a role change does not start or stop the thread.
+  LOG_INFO("[AI_COLUMN_WORKER] activate");
+  return OB_SUCCESS;
+}
+
+void ObAIColumnWorker::deactivate()
+{
+  LOG_INFO("[AI_COLUMN_WORKER] deactivate");
 }
 
 void ObAIColumnWorker::do_work()
@@ -513,6 +562,7 @@ int ObAIColumnWorker::refresh_definitions_(ObInnerSQLConnection &conn)
             ObString column_name;
             ObString expr;
             ObString dependencies;
+            ObString ai_function;
             ObObj obj;
             if (OB_FAIL(result->get_int(COL_TABLE_ID, table_id_i64))) {
             } else if (OB_FAIL(result->get_int(COL_COLUMN_ID, column_id_i64))) {
@@ -521,7 +571,8 @@ int ObAIColumnWorker::refresh_definitions_(ObInnerSQLConnection &conn)
             } else if (OB_FAIL(result->get_int(COL_STATUS_COLUMN_ID, status_column_id))) {
             } else if (OB_FAIL(result->get_int(COL_SRCVER_COLUMN_ID, srcver_column_id))) {
             } else if (OB_FAIL(result->get_int(COL_DEF_VERSION, def_version))) {
-            } else if (OB_FAIL(result->get_int(COL_AI_FUNCTION, func_type))) {
+            } else if (OB_FAIL(result->get_obj(COL_AI_FUNCTION, obj))) {
+            } else if (OB_FAIL(read_column_text_(obj, ai_function))) {
             } else if (OB_FAIL(result->get_obj(COL_DATABASE_NAME, obj))) {
             } else if (OB_FAIL(read_column_text_(obj, db_name))) {
             } else if (OB_FAIL(result->get_obj(COL_TABLE_NAME, obj))) {
@@ -532,6 +583,18 @@ int ObAIColumnWorker::refresh_definitions_(ObInnerSQLConnection &conn)
             } else if (OB_FAIL(read_column_text_(obj, expr))) {
             } else if (OB_FAIL(result->get_obj(COL_DEPENDENCIES, obj))) {
             } else if (OB_FAIL(read_column_text_(obj, dependencies))) {
+            } else {
+              // __all_ai_column.ai_function is the function NAME ('AI_COMPLETE' etc),
+              // not the numeric ObAIColumnFuncType
+              if (0 == ai_function.case_compare(OB_AI_COLUMN_FUNC_COMPLETE)) {
+                func_type = ObAIColumnFuncType::COMPLETE;
+              } else if (0 == ai_function.case_compare(OB_AI_COLUMN_FUNC_EMBED)) {
+                func_type = ObAIColumnFuncType::EMBED;
+              } else if (0 == ai_function.case_compare(OB_AI_COLUMN_FUNC_RERANK)) {
+                func_type = ObAIColumnFuncType::RERANK;
+              } else {
+                func_type = ObAIColumnFuncType::INVALID;
+              }
             }
             if (OB_SUCC(ret)) {
               table_id = static_cast<uint64_t>(table_id_i64);
@@ -681,13 +744,6 @@ int ObAIColumnWorker::refresh_table_schema_(ObAIColumnTargetTable &table)
         def.is_json_ = ai_column->is_json();
         def.is_vector_ = false;
         def.vector_dim_ = 0;
-        // the result type hint belongs to the column definition (design 7.1); it is
-        // empty for a VECTOR result column
-        if (OB_FAIL(deep_copy_str_(def_allocator_,
-                                   ai_column->get_ai_spec().type_hint_,
-                                   def.type_hint_))) {
-          LOG_WARN("fail to copy ai column type hint", KR(ret), K(def.column_id_));
-        }
         const ObIArray<ObString> &extend_type_info = ai_column->get_extended_type_info();
         if (extend_type_info.count() == 1 && extend_type_info.at(0).prefix_match("VECTOR(")) {
           int64_t dim = 0;
@@ -698,6 +754,25 @@ int ObAIColumnWorker::refresh_table_schema_(ObAIColumnTargetTable &table)
           } else {
             LOG_WARN_RET(tmp_ret, "[AI_COLUMN_WORKER] fail to parse vector dimension",
                          K(tmp_ret), K(extend_type_info.at(0)));
+          }
+        }
+        // the result type hint belongs to the column definition (design 7.1); it is
+        // empty for a VECTOR result column. The ai spec is only a catalog level copy
+        // (it is not part of the runtime column schema), so the hint is recomputed
+        // from the declared result type when the spec does not carry it.
+        if (def.is_vector_) {
+          def.type_hint_.reset();
+        } else if (!ai_column->get_ai_spec().type_hint_.empty()) {
+          if (OB_FAIL(deep_copy_str_(def_allocator_,
+                                     ai_column->get_ai_spec().type_hint_,
+                                     def.type_hint_))) {
+            LOG_WARN("fail to copy ai column type hint", KR(ret), K(def.column_id_));
+          }
+        } else {
+          ObString hint;
+          get_ai_column_type_hint_(*ai_column, hint);
+          if (OB_FAIL(deep_copy_str_(def_allocator_, hint, def.type_hint_))) {
+            LOG_WARN("fail to copy the computed ai column type hint", KR(ret), K(def.column_id_));
           }
         }
       }
@@ -755,7 +830,9 @@ int ObAIColumnWorker::append_text_literal_(const ObString &value, ObSqlString &s
   return ret;
 }
 
-int ObAIColumnWorker::append_obj_literal_(const ObObj &obj, ObSqlString &sql)
+int ObAIColumnWorker::append_obj_literal_(const ObObj &obj,
+                                          const ObObjPrintParams &print_params,
+                                          ObSqlString &sql)
 {
   int ret = OB_SUCCESS;
   int64_t buf_len = 128;
@@ -764,7 +841,7 @@ int ObAIColumnWorker::append_obj_literal_(const ObObj &obj, ObSqlString &sql)
   if (OB_ISNULL(buf)) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("fail to allocate literal buffer", KR(ret));
-  } else if (OB_FAIL(obj.print_sql_literal(buf, buf_len, pos, round_allocator_))) {
+  } else if (OB_FAIL(obj.print_sql_literal(buf, buf_len, pos, print_params))) {
     LOG_WARN("fail to print sql literal", KR(ret), K(obj));
   } else if (OB_FAIL(sql.append(buf, pos))) {
   }
@@ -777,25 +854,32 @@ int ObAIColumnWorker::collect_candidates_(ObInnerSQLConnection &conn,
 {
   int ret = OB_SUCCESS;
   ObSqlString sql;
+  ObSqlString select_list;
+  bool first_item = true;
   if (table.columns_.empty() || table.pk_column_names_.empty()) {
     // nothing to do for this table
   } else if (OB_FAIL(sql.assign("SELECT "))) {
   }
   // primary key columns, then one (status, srcver) pair per AI column
   for (int64_t i = 0; OB_SUCC(ret) && i < table.pk_column_names_.count(); ++i) {
-    if (OB_FAIL(append_ident_(sql, table.pk_column_names_.at(i)))) {
-    } else if (OB_FAIL(sql.append(", "))) {
+    if (!first_item && OB_FAIL(select_list.append(", "))) {
+    } else if (OB_FAIL(append_ident_(select_list, table.pk_column_names_.at(i)))) {
+    } else {
+      first_item = false;
     }
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < table.columns_.count(); ++i) {
     const ObAIColumnDef &def = table.columns_.at(i);
-    if (OB_FAIL(append_ident_(sql, def.status_column_name_))) {
-    } else if (OB_FAIL(sql.append(", "))) {
-    } else if (OB_FAIL(append_ident_(sql, def.srcver_column_name_))) {
-    } else if (OB_FAIL(sql.append(", "))) {
+    if (!first_item && OB_FAIL(select_list.append(", "))) {
+    } else if (OB_FAIL(append_ident_(select_list, def.status_column_name_))) {
+    } else if (OB_FAIL(select_list.append(", "))) {
+    } else if (OB_FAIL(append_ident_(select_list, def.srcver_column_name_))) {
+    } else {
+      first_item = false;
     }
   }
   if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(sql.append(select_list.string()))) {
   } else if (OB_FAIL(sql.append(" FROM "))) {
   } else if (OB_FAIL(append_qualified_table_(sql, table.db_name_, table.table_name_))) {
   } else if (OB_FAIL(sql.append(" WHERE "))) {
@@ -824,6 +908,7 @@ int ObAIColumnWorker::collect_candidates_(ObInnerSQLConnection &conn,
       } else {
         const int64_t pk_cnt = table.pk_column_names_.count();
         const int64_t column_cnt = table.columns_.count();
+        const ObObjPrintParams print_params = conn.get_session().create_obj_print_params();
         while (OB_SUCC(ret)) {
           int tmp_ret = result->next();
           if (OB_ITER_END == tmp_ret) {
@@ -841,7 +926,7 @@ int ObAIColumnWorker::collect_candidates_(ObInnerSQLConnection &conn,
               } else if (OB_FAIL(append_ident_(row_key, table.pk_column_names_.at(i)))) {
               } else if (OB_FAIL(row_key.append(" = "))) {
               } else if (OB_FAIL(result->get_obj(col_idx++, pk_value))) {
-              } else if (OB_FAIL(append_obj_literal_(pk_value, row_key))) {
+              } else if (OB_FAIL(append_obj_literal_(pk_value, print_params, row_key))) {
               }
             }
             for (int64_t i = 0; OB_SUCC(ret) && i < column_cnt; ++i) {
@@ -975,8 +1060,26 @@ int ObAIColumnWorker::claim_row_(ObInnerSQLConnection &conn,
     for (int64_t i = 0; OB_SUCC(ret) && i < group.count(); ++i) {
       ObAIColumnWorkItem item;
       item.col_index_ = group.at(i);
-      item.retry_count_ = 0;
+      // the attempts already consumed by this row/column/source version are kept in
+      // the backoff list, so a retry never restarts the retry budget
       item.srcver_ = row.srcvers_.at(group.at(i));
+      item.retry_count_ = -1;
+      {
+        const ObAIColumnDef &def = table.columns_.at(item.col_index_);
+        for (int64_t j = 0; j < backoffs_.count() && item.retry_count_ < 0; ++j) {
+          const ObAIColumnBackoff &backoff = backoffs_.at(j);
+          if (backoff.table_id_ == table.table_id_
+              && backoff.column_id_ == def.column_id_
+              && backoff.srcver_ == item.srcver_
+              && backoff.row_key_len_ == row.row_key_.length()
+              && 0 == MEMCMP(backoff.row_key_, row.row_key_.ptr(), row.row_key_.length())) {
+            item.retry_count_ = backoff.retry_count_;
+          }
+        }
+      }
+      if (item.retry_count_ < 0) {
+        item.retry_count_ = 0;
+      }
       if (OB_FAIL(items.push_back(item))) {
         LOG_WARN("fail to push claimed column", KR(ret), K(item.col_index_));
       }
@@ -1164,7 +1267,7 @@ int ObAIColumnWorker::evaluate_statement_(ObInnerSQLConnection &conn,
              K(table.columns_.count()));
   } else if (OB_FALSE_IT(def = &table.columns_.at(item.col_index_))) {
   } else if (OB_FAIL(set_type_hint_(conn, def->type_hint_))) {
-  } else if (OB_FAIL(sql.append_fmt("SELECT (`%.*s`) AS `ai_col_%ld` FROM ",
+  } else if (OB_FAIL(sql.append_fmt("SELECT (%.*s) AS `ai_col_%ld` FROM ",
                                     def->expr_.length(),
                                     def->expr_.ptr(),
                                     item.col_index_))) {
@@ -1194,7 +1297,7 @@ int ObAIColumnWorker::evaluate_statement_(ObInnerSQLConnection &conn,
         } else {
           ObObj value_obj;
           ObString text;
-          if (OB_FAIL(result->get_obj(0, value_obj))) {
+          if (OB_FAIL(result->get_obj(static_cast<int64_t>(0), value_obj))) {
             LOG_WARN("fail to read evaluated value", KR(ret));
           } else if (OB_FAIL(read_column_text_(value_obj, text))) {
             LOG_WARN("fail to read evaluated value text", KR(ret));
@@ -1293,7 +1396,9 @@ int ObAIColumnWorker::publish_row_(ObInnerSQLConnection &conn,
   } else {
     if (should_publish) {
       // one UPDATE publishes every value of the group together with the READY
-      // (and terminal FAILED) state; srcver is the version fence.
+      // (and terminal FAILED) state; srcver is the version fence. Assigning the
+      // hidden status column in the same statement is what identifies the engine's
+      // own writer to the resolver (see ObDMLResolver::check_basic_column_ai()).
       if (OB_FAIL(sql.assign("UPDATE "))) {
       } else if (OB_FAIL(append_qualified_table_(sql, table.db_name_, table.table_name_))) {
       } else if (OB_FAIL(sql.append(" SET "))) {

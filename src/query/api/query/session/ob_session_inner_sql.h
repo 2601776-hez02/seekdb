@@ -34,7 +34,9 @@ namespace query
 class ObSessionInnerSql final : public share::ObILockMetadataSession
 {
 public:
-  explicit ObSessionInnerSql(void *native_session);
+  // owned_session: run the statements on a connection with its own inner session, which
+  // is the only way to read hidden columns from here.
+  explicit ObSessionInnerSql(void *native_session, const bool owned_session = false);
   ObSessionInnerSql(const ObSessionInnerSql &) = delete;
   ObSessionInnerSql &operator=(const ObSessionInnerSql &) = delete;
   ~ObSessionInnerSql();
@@ -55,6 +57,7 @@ private:
   void *native_connection_;
   common::sqlclient::ObISQLConnectionGuard connection_guard_;
   bool owns_connection_;
+  bool owned_session_;
   int last_error_;
 };
 

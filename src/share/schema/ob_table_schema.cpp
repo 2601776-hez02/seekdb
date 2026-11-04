@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SHARE_SCHEMA
 #include "common/datum/ob_datum.h"
 #include "share/schema/ob_col_desc.h"  // ObColDesc complete type(previously hidden behind the ddl_common include chain)
+#include "share/schema/ob_column_schema.h"  // ObColumnSchemaV2 complete type for has_ai_column()
 #include "ob_table_schema.h"
 #include "lib/compress/ob_compressor_pool.h"
 #include "share/schema/ob_partition_array_utils.h"
@@ -4777,6 +4778,17 @@ int ObTableSchema::get_generated_column_ids(ObIArray<uint64_t> &column_ids) cons
     }
   }
   return ret;
+}
+
+// Defined here (not inline in the header) because ObColumnSchemaV2 is only
+// forward declared in ob_table_schema.h.
+bool ObTableSchema::has_ai_column() const
+{
+  bool found = false;
+  for (int64_t i = 0; !found && i < column_cnt_; ++i) {
+    found = (NULL != column_array_[i] && column_array_[i]->is_ai_column());
+  }
+  return found;
 }
 
 int ObTableSchema::is_real_unique_index_column(ObSchemaGetterGuard &schema_guard,

@@ -135,10 +135,13 @@ int ObDelUpdResolver::resolve_assignments(const ParseNode &parse_node,
         } else if (is_ai_column) {
           // AI COLUMN: an ai column is produced by the background worker, a user
           // statement must not write it, not even with the DEFAULT keyword.
+          // NB: OB_FAIL() assigns its statement to ret, so the error code must be
+          // set *after* the helper call.
+          const int tmp_ret = raise_ai_column_write_error(ref_expr->get_column_name(),
+                                                         ref_expr->get_table_name());
           ret = OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN;
-          if (OB_FAIL(raise_ai_column_write_error(ref_expr->get_column_name(),
-                                                 ref_expr->get_table_name()))) {
-            LOG_WARN("failed to raise ai column write error", K(ret));
+          if (OB_SUCCESS != tmp_ret) {
+            LOG_WARN("failed to raise ai column write error", K(tmp_ret));
           }
         } else {
           if (T_DEFAULT == expr->get_expr_type()) {
@@ -861,6 +864,8 @@ int ObDelUpdResolver::check_need_assignment(const common::ObIArray<ObAssignment>
       ObArray<uint64_t> dep_columns;
       if (OB_FAIL(ObDMLResolver::get_ai_dep_column_ids(column, dep_columns))) {
       }
+      LOG_WARN("[AI_COLUMN][DEBUG] ai dep check", K(column.get_column_name_str()),
+               "dep_cnt", dep_columns.count(), K(table_id));
       for (int64_t i = 0; OB_SUCC(ret) && !exist && i < dep_columns.count(); ++i) {
         if (OB_FAIL(ObResolverUtils::check_whether_assigned(stmt, assigns, table_id, dep_columns.at(i), exist))) {
         }
@@ -2575,11 +2580,16 @@ int ObDelUpdResolver::resolve_insert_values(const ParseNode *node,
               // AI COLUMN: the value list must map one to one onto the table
               // columns, so a value in an ai column position is an explicit write
               // of the ai column and is rejected exactly like an explicit column
-              // list insert does.
+              // list insert does. OB_FAIL() assigns its statement to ret, so the
+              // error code is set after the helper call.
+              const ObString &ai_table_name = table_info.table_name_.empty()
+                                            ? column_expr->get_table_name()
+                                            : table_info.table_name_;
+              const int tmp_ret = raise_ai_column_write_error(column_expr->get_column_name(),
+                                                             ai_table_name);
               ret = OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN;
-              if (OB_FAIL(raise_ai_column_write_error(column_expr->get_column_name(),
-                                                     column_expr->get_table_name()))) {
-                LOG_WARN("failed to raise ai column write error", K(ret));
+              if (OB_SUCCESS != tmp_ret) {
+                LOG_WARN("failed to raise ai column write error", K(tmp_ret));
               }
             } else if (T_DEFAULT == expr->get_expr_type()) {
               ColumnItem *column_item = NULL;

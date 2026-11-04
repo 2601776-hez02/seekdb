@@ -940,6 +940,11 @@ private:
   static bool check_is_match_index_type(
       const schema::ObIndexType type1, const schema::ObIndexType type2);
   static int is_int_val(const ObString &str, bool &is_int);
+public:
+  // Convert an embedding result such as "[0.1,0.2,0.3]" into the float32 binary
+  // vector representation, validating the declared dimension. Public because the
+  // background AI column worker validates model output with the same rules as the
+  // AI_EMBED expression.
   static int cast_vector_array_str_to_float_array_binary(
       ObIAllocator &allocator,
       const ObString &vector_array_str,

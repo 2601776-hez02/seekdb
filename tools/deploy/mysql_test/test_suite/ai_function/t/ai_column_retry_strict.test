@@ -132,13 +132,13 @@ select id, language, status from t_ai_retry order by id;
 # ---------------------------------------------------------------------------
 # 5. illegal RETRY syntax
 # ---------------------------------------------------------------------------
---error 5217
+--error 1054
 alter table t_ai_retry retry ai column no_such_column;
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 alter table t_ai_retry retry ai column content;
 --replace_regex /OB_AI_COLUMN.*/OB_AI_COLUMN <message>/
---error 4002
+--error 1210
 alter table t_ai_retry retry ai column status;
 --error 1064
 alter table t_ai_retry retry failed;
@@ -193,8 +193,18 @@ select id, status from t_ai_retry order by id;
 # 7. once every referenced row is ready, the same statements succeed again
 # ---------------------------------------------------------------------------
 --exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"delay_ms":0}'
+# The readiness of the pending row can not be observed through the ai column while
+# strict read is on (that is exactly what section 6 asserts), so strict read is
+# switched off for the wait and back on for the assertions below. The row that fails
+# permanently (id = 3) keeps a RUNNING task row while its retries are pending, so
+# waiting for the task table to settle waits for its terminal state.
+set session ai_column_strict_read = off;
 let $wait_condition = select language = 'Korean' from t_ai_retry where id = 50;
 --source mysql_test/include/wait_condition.inc
+# the permanently failing row needs its bounded retries to be exhausted (a few
+# seconds at most), after which it is FAILED and strict read ignores it
+--sleep 10
+set session ai_column_strict_read = on;
 select id, language from t_ai_retry where id = 1;
 select count(*) from t_ai_retry where language = 'Japanese' and id in (1, 2);
 update t_ai_retry set status = 'touched' where language = 'Japanese' and id = 1;

@@ -5770,8 +5770,40 @@ int ObDMLResolver::check_basic_column_ai(const ObColumnRefRawExpr *col_expr,
       LOG_WARN("failed to get column schema", K(ret), K(base_table_id), K(base_column_id));
     } else if (OB_ISNULL(column_schema)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (column_schema->is_ai_column()) {
-      is_ai_column = true;
+    } else if (!column_schema->is_ai_column()) {
+      // an ordinary column, nothing to check
+    } else {
+      // AI COLUMN: the value is produced by the background worker and published by a
+      // statement that assigns the hidden status companion column of the ai column as
+      // well (in the same transaction as the value). A user statement cannot name a
+      // hidden column, so such a statement can only come from the engine itself and is
+      // accepted; every other assignment of an ai column is rejected. The companion
+      // column is looked up by name in the table schema: the column ids of the ai spec
+      // are only a catalog level copy and are not part of the runtime column schema.
+      const ObTableSchema *table_schema = NULL;
+      const ObColumnSchemaV2 *status_column_schema = NULL;
+      const ColumnItem *status_column_item = NULL;
+      char status_column_name[common::OB_MAX_COLUMN_NAME_LENGTH] = {'\0'};
+      const int64_t name_len = snprintf(status_column_name, sizeof(status_column_name), "%s%.*s",
+                                        OB_AI_COLUMN_STATUS_COLUMN_PREFIX,
+                                        column_schema->get_column_name_str().length(),
+                                        column_schema->get_column_name_str().ptr());
+      if (OB_UNLIKELY(name_len <= 0 || name_len >= static_cast<int64_t>(sizeof(status_column_name)))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("ai column status column name is too long", K(ret), K(name_len));
+      } else if (OB_FAIL(schema_checker_->get_table_schema(base_table_id, table_schema))) {
+        LOG_WARN("failed to get the ai column table schema", K(ret), K(base_table_id));
+      } else if (OB_ISNULL(table_schema)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        status_column_schema = table_schema->get_column_schema(
+            ObString(static_cast<int32_t>(name_len), status_column_name));
+        if (OB_NOT_NULL(status_column_schema)) {
+          status_column_item = dml_stmt->get_column_item_by_id(col_expr->get_table_id(),
+                                                               status_column_schema->get_column_id());
+        }
+        is_ai_column = (NULL == status_column_item);
+      }
     }
   }
   return ret;

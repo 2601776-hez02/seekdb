@@ -462,7 +462,10 @@ int ObResultSet::check_ai_column_strict_read(ObPhysicalPlan &plan)
   } else if (targets.empty()) {
     // the code generator did not record any target, nothing to check
   } else {
-    query::ObSessionInnerSql inner_sql(&my_session_);
+    // the readiness check reads the hidden status companion column, which is only
+    // visible to an inner statement: run it on the SPI connection of this session
+    // so that it keeps the session's transaction and snapshot.
+    query::ObSessionInnerSql inner_sql(&my_session_, true /*spi*/);
     if (OB_UNLIKELY(!inner_sql.is_valid())) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("invalid session inner sql", K(ret), K(my_session_.get_server_sid()));
@@ -500,8 +503,10 @@ int ObResultSet::check_ai_column_ready(query::ObSessionInnerSql &inner_sql,
   // see OB_AI_COLUMN_STATUS_COLUMN_PREFIX in share/schema/ob_column_schema.h.
   // A row is "not ready" when the status column is NULL (never generated, e.g. a
   // row that predates the ai column), 0 (invalid), 1 (pending) or 4 (running).
-  if (OB_FAIL(sql.assign_fmt("SELECT 1 FROM `%.*s`.`%.*s` "
+  if (OB_FAIL(sql.assign_fmt("SELECT `%s%.*s` AS `ai_status` FROM `%.*s`.`%.*s` "
                              "WHERE `%s%.*s` IS NULL OR `%s%.*s` IN (0, 1, 4) LIMIT 1",
+                             OB_AI_COLUMN_STATUS_COLUMN_PREFIX,
+                             column_name.length(), column_name.ptr(),
                              database_name.length(), database_name.ptr(),
                              table_name.length(), table_name.ptr(),
                              OB_AI_COLUMN_STATUS_COLUMN_PREFIX,
@@ -526,7 +531,12 @@ int ObResultSet::check_ai_column_ready(query::ObSessionInnerSql &inner_sql,
         }
       } else {
         // the first not ready row, the statement must fail
+        int64_t not_ready_status = -1;
+        int get_ret = result->get_int("ai_status", not_ready_status);
         ObSqlString message;
+        if (OB_SUCCESS != get_ret) {
+          LOG_WARN("failed to read the ai column status of the not ready row", K(get_ret));
+        }
         if (OB_FAIL(message.assign_fmt("OB_AI_COLUMN: ai column '%.*s' of table '%.*s.%.*s' is not ready",
                                        column_name.length(), column_name.ptr(),
                                        database_name.length(), database_name.ptr(),
@@ -536,7 +546,8 @@ int ObResultSet::check_ai_column_ready(query::ObSessionInnerSql &inner_sql,
           ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
           LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID,
                          static_cast<int32_t>(message.length()), message.ptr());
-          LOG_WARN("ai column strict read failed", K(ret), "message", message.ptr());
+          LOG_WARN("ai column strict read failed", K(ret), "message", message.ptr(),
+                   K(not_ready_status));
         }
       }
     }

@@ -699,7 +699,7 @@ int ObInnerSQLConnection::do_query(sqlclient::ObIExecutor &executor, ObInnerSQLR
                  && OB_FAIL(sql_modifier_->modify(res.result_set()))) {
         LOG_WARN("fail modify sql", K(res.result_set().get_statement_name()), K(ret));
       } else if (res.sql_ctx().is_prepare_stage_) {
-        // PS prepare stage: skip result set open â€” prepare only parses SQL
+        // PS prepare stage: skip result set open â€?prepare only parses SQL
         // and populates ps cache, no physical plan is generated yet.
         // Opening the result set would attempt to execute/prefetch, which
         // fails with OB_NOT_INIT because there is no physical plan.
@@ -1489,6 +1489,13 @@ int ObInnerSQLConnectionAccess::create_spi_connection_with_external_session(
 {
   return observer::ObInnerSQLConnection::
       create_spi_connection_with_external_session(session, connection);
+}
+
+int ObInnerSQLConnectionAccess::create_connection_with_owned_session(
+    common::sqlclient::ObISQLConnectionGuard &connection)
+{
+  return observer::ObInnerSQLConnection::create_connection_with_owned_session(
+      false /*use_static_engine*/, 0 /*group_id*/, connection);
 }
 
 sql::ObSQLSessionInfo *ObInnerSQLConnectionAccess::get_session(

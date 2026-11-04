@@ -31,11 +31,12 @@ namespace oceanbase
 namespace query
 {
 
-ObSessionInnerSql::ObSessionInnerSql(void *native_session)
+ObSessionInnerSql::ObSessionInnerSql(void *native_session, const bool owned_session)
   : native_session_(native_session),
     native_connection_(nullptr),
     connection_guard_(),
     owns_connection_(false),
+    owned_session_(owned_session),
     last_error_(common::OB_SUCCESS)
 {}
 
@@ -64,12 +65,14 @@ int ObSessionInnerSql::open_()
   if (nullptr != native_connection_) {
   } else if (OB_ISNULL(session)) {
     ret = common::OB_NOT_INIT;
-  } else if (nullptr != session->get_inner_conn()) {
+  } else if (!owned_session_ && nullptr != session->get_inner_conn()) {
     native_connection_ = session->get_inner_conn();
-  } else if (OB_FAIL(
-                 ObInnerSQLConnectionAccess::
-                     create_connection_with_external_session(
-                         session, connection_guard_))) {
+  } else if (owned_session_
+             && OB_FAIL(ObInnerSQLConnectionAccess::
+                 create_connection_with_owned_session(connection_guard_))) {
+  } else if (!owned_session_
+             && OB_FAIL(ObInnerSQLConnectionAccess::
+                 create_connection_with_external_session(session, connection_guard_))) {
   } else if (OB_ISNULL(native_connection_ = connection_guard_.get_ptr())) {
     ret = common::OB_ERR_UNEXPECTED;
   } else {

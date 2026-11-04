@@ -6346,7 +6346,31 @@ int ObSchemaRetrieveUtils::cascaded_generated_column(ObTableSchema &table_schema
   ObItemType root_expr_type = T_INVALID;
   ObArray<ObString> columns_names;
   ObColumnSchemaV2 *col_schema = NULL;
-  if (column.is_generated_column()) {
+  // AI COLUMN: the dependency columns of an ai column are recovered from the stored
+  // expression text exactly like the ones of a generated column, the resolver needs
+  // them to invalidate the result when a dependency is updated. Only a stored ai
+  // function call is a definition: a json ai column keeps its own json default in
+  // the default value slot, so its expression is not there.
+  const bool is_ai_column = column.is_ai_column();
+  bool has_ai_expr = !is_ai_column;
+  if (is_ai_column) {
+    const ObObj &expr_obj = column.get_cur_default_value().is_null()
+                          ? column.get_orig_default_value()
+                          : column.get_cur_default_value();
+    const char *ai_names[] = {OB_AI_COLUMN_FUNC_COMPLETE,
+                              OB_AI_COLUMN_FUNC_EMBED,
+                              OB_AI_COLUMN_FUNC_RERANK};
+    ObString expr_str;
+    if (expr_obj.is_string_type()
+        && OB_SUCCESS == expr_obj.get_string(expr_str)) {
+      for (int64_t i = 0; !has_ai_expr && i < 3; ++i) {
+        const int64_t name_len = static_cast<int64_t>(strlen(ai_names[i]));
+        has_ai_expr = expr_str.length() > name_len
+                      && 0 == STRNCASECMP(expr_str.ptr(), ai_names[i], name_len);
+      }
+    }
+  }
+  if (has_ai_expr && (column.is_generated_column() || is_ai_column)) {
     if (column.get_cur_default_value().is_null()) {
       if (OB_FAIL(column.get_orig_default_value().get_string(col_def))) {
       }

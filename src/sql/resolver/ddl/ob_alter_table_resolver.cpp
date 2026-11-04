@@ -37,6 +37,12 @@ namespace sql
 {
 namespace
 {
+// AI COLUMN: the hidden companion columns of an AI column added by ALTER TABLE get
+// their real column ids in the rootserver (add_new_column_to_table_schema), so the
+// resolver only needs placeholder ids that are accepted by
+// ObDDLResolver::build_ai_column_hidden_columns.
+const uint64_t AI_HIDDEN_COLUMN_ID_PLACEHOLDER = 1;
+
 // AI COLUMN: helpers of ALTER TABLE <t> RETRY [FAILED] AI COLUMN <c> [WHERE <cond>]
 //
 // The WHERE clause of that action is not consumed by the resolver as an
@@ -952,7 +958,7 @@ int ObAlterTableResolver::resolve_retry_ai_column(const ParseNode &action_node)
       SQL_RESV_LOG(WARN, "invalid where clause of retry ai column", KR(ret));
     } else {
       bool found = false;
-      if (OB_FAIL(find_where_clause_text(get_params().cur_sql_, found, where_cond))) {
+      if (OB_FAIL(find_where_clause_text(params_.cur_sql_, found, where_cond))) {
         SQL_RESV_LOG(WARN, "fail to extract the retry ai column condition", KR(ret));
       } else if (OB_UNLIKELY(!found)) {
         // the parse tree has a condition but the statement text does not contain
@@ -3649,19 +3655,37 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
         } else if (OB_FAIL(fill_column_schema_according_stat(stat, alter_column_schema))) {
         } else if (OB_FAIL(set_column_collation(alter_column_schema))) {
         }
-        // AI column: validate the definition. The hidden companion columns and the
-        // column ids of the ai spec are filled in rootserver, where the column id of
-        // the new column is assigned.
+        // AI column: validate the definition. The two hidden companion columns are
+        // added to the alter statement right after the AI column so that the regular
+        // add-column flow creates them (they need __all_column rows too); their column
+        // ids are assigned in rootserver, which only records them in the ai spec
+        // because they are the two columns following this one.
+        ObSEArray<ObColumnSchemaV2, 2> ai_hidden_cols;
+        bool is_ai_column = false;
         if (OB_SUCC(ret)) {
           const ParseNode *ai_node = ObDDLResolver::find_ai_column_node(*node.children_[i]);
           if (NULL == ai_node) {
             // not an AI column
           } else if (OB_FAIL(ObDDLResolver::resolve_ai_column_attribute(
-                       alter_column_schema, *ai_node, *table_schema_, resolved_cols,
+                       alter_column_schema, *ai_node,
+                       // ObResolverUtils::resolve_generated_column_expr only reads the
+                       // table schema, but takes it by non-const reference.
+                       *const_cast<share::schema::ObTableSchema *>(table_schema_), resolved_cols,
                        *allocator_, session_info_, schema_checker_))) {
             SQL_RESV_LOG(WARN, "fail to resolve ai column attribute", K(ret));
           } else if (OB_FAIL(alter_column_schema.set_orig_default_value(
                        alter_column_schema.get_cur_default_value()))) {
+          } else if (OB_FAIL(ObDDLResolver::build_ai_column_hidden_columns(
+                       alter_column_schema,
+                       // placeholder ids: add_new_column_to_table_schema assigns
+                       // the real ones (the next two column ids) and rewrites the spec
+                       AI_HIDDEN_COLUMN_ID_PLACEHOLDER,
+                       AI_HIDDEN_COLUMN_ID_PLACEHOLDER + 1,
+                       *allocator_,
+                       ai_hidden_cols))) {
+            SQL_RESV_LOG(WARN, "fail to build ai column hidden columns", K(ret));
+          } else {
+            is_ai_column = true;
           }
         }
 
@@ -3696,6 +3720,16 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
         if (OB_SUCC(ret)) {
           if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
           } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
+          }
+        }
+        // AI column: the two hidden companion columns follow the AI column
+        for (int64_t j = 0; OB_SUCC(ret) && is_ai_column && j < ai_hidden_cols.count(); ++j) {
+          AlterColumnSchema hidden_column;
+          if (OB_FAIL(hidden_column.assign(ai_hidden_cols.at(j)))) {
+            SQL_RESV_LOG(WARN, "fail to copy ai column hidden column", K(ret));
+          } else if (FALSE_IT(hidden_column.alter_type_ = OB_DDL_ADD_COLUMN)) {
+          } else if (OB_FAIL(alter_table_stmt->add_column(hidden_column))) {
+            SQL_RESV_LOG(WARN, "fail to add ai column hidden column", K(ret));
           }
         }
       }
@@ -4325,7 +4359,10 @@ int ObAlterTableResolver::resolve_modify_column(const ParseNode &node,
             LOG_USER_ERROR(OB_NOT_SUPPORTED,
                 "OB_AI_COLUMN: changing an ordinary column into an AI column is");
           } else if (OB_FAIL(ObDDLResolver::resolve_ai_column_attribute(
-                       alter_column_schema, *ai_node, *table_schema_, resolved_cols,
+                       alter_column_schema, *ai_node,
+                       // ObResolverUtils::resolve_generated_column_expr only reads the
+                       // table schema, but takes it by non-const reference.
+                       *const_cast<share::schema::ObTableSchema *>(table_schema_), resolved_cols,
                        *allocator_, session_info_, schema_checker_))) {
             SQL_RESV_LOG(WARN, "fail to resolve ai column attribute", K(ret));
           } else {

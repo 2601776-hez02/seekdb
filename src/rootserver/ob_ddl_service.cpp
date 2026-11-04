@@ -7772,25 +7772,16 @@ int ObDDLService::add_new_column_to_table_schema(
       alter_column_schema.set_index_position(0);
       alter_column_schema.set_not_part_key();
       alter_column_schema.set_table_id(new_table_schema.get_table_id());
-      // AI column: create the two hidden companion columns, their column ids must
-      // follow the column id of the AI column itself
+      // AI column: the two hidden companion columns are ordinary ADD COLUMN entries of
+      // this statement that follow the AI column (the resolver appended them), so they
+      // get the next two column ids here. Only the column ids of the ai spec have to be
+      // recorded, the columns themselves are created by the regular add-column flow.
       if (alter_column_schema.is_ai_column()) {
-        common::ObSEArray<ObColumnSchemaV2, 2> ai_hidden_cols;
-        const uint64_t status_column_id = ++max_used_column_id;
-        const uint64_t srcver_column_id = ++max_used_column_id;
-        if (OB_FAIL(ObDDLResolver::build_ai_column_hidden_columns(alter_column_schema,
-                                                                  status_column_id,
-                                                                  srcver_column_id,
-                                                                  allocator,
-                                                                  ai_hidden_cols))) {
-          LOG_WARN("fail to build ai column hidden columns", K(ret), K(alter_column_schema));
-        }
-        for (int64_t i = 0; OB_SUCC(ret) && i < ai_hidden_cols.count(); ++i) {
-          ObColumnSchemaV2 &hidden_col = ai_hidden_cols.at(i);
-          hidden_col.set_table_id(new_table_schema.get_table_id());
-          if (OB_FAIL(new_table_schema.add_column(hidden_col))) {
-            LOG_WARN("fail to add ai column hidden column", K(ret), K(hidden_col));
-          }
+        ObAIColumnSpec ai_spec = alter_column_schema.get_ai_spec();
+        ai_spec.status_column_id_ = max_used_column_id + 1;
+        ai_spec.srcver_column_id_ = max_used_column_id + 2;
+        if (OB_FAIL(alter_column_schema.set_ai_spec(ai_spec))) {
+          LOG_WARN("fail to set ai column spec", K(ret), K(alter_column_schema));
         }
       }
       new_table_schema.set_max_used_column_id(max_used_column_id);
@@ -12436,7 +12427,22 @@ namespace
 // The observer worker owns the full state machine; rootserver only needs the two
 // values it writes (PENDING on retry, FAILED to filter "RETRY FAILED").
 const int32_t AI_RETRY_STATUS_PENDING = 1;
+const int32_t AI_RETRY_STATUS_READY = 2;
 const int32_t AI_RETRY_STATUS_FAILED = 3;
+
+// Symbolic value of the status pseudo column in a RETRY ... WHERE condition.
+int64_t ai_column_status_code(const common::ObString &value)
+{
+  int64_t code = 0;
+  if (0 == value.case_compare("PENDING")) {
+    code = AI_RETRY_STATUS_PENDING;
+  } else if (0 == value.case_compare("READY")) {
+    code = AI_RETRY_STATUS_READY;
+  } else if (0 == value.case_compare("FAILED")) {
+    code = AI_RETRY_STATUS_FAILED;
+  }
+  return code;
+}
 
 // Append a single quoted SQL text literal ('...' with the canonical escaping).
 int append_ai_retry_string_literal(const common::ObString &value,
@@ -12502,6 +12508,7 @@ int ObDDLService::rewrite_ai_column_retry_where_cond(const common::ObString &whe
   const int64_t len = where_cond.length();
   int64_t i = 0;
   char prev_significant = 0;
+  bool status_pseudo_pending = false;
   rewritten.reset();
   if (OB_UNLIKELY(ai_column_name.empty())) {
     ret = OB_INVALID_ARGUMENT;
@@ -12509,6 +12516,54 @@ int ObDDLService::rewrite_ai_column_retry_where_cond(const common::ObString &whe
   }
   while (OB_SUCC(ret) && i < len) {
     const char c = p[i];
+    if (status_pseudo_pending) {
+      // The status pseudo column was just emitted. Its values are the symbolic names
+      // PENDING/READY/FAILED, the status column itself is numeric, so a following
+      // `= '<name>'` comparison is rewritten to `= <code>`.
+      status_pseudo_pending = false;
+      while (i < len && is_ai_retry_blank(p[i])) {
+        if (OB_FAIL(rewritten.append(p + i, 1))) {
+        }
+        ++i;
+      }
+      if (OB_SUCC(ret) && i + 1 < len && '=' == p[i] && '=' != p[i + 1]) {
+        if (OB_FAIL(rewritten.append(p + i, 1))) {
+        } else {
+          prev_significant = '=';
+          ++i;
+        }
+        while (OB_SUCC(ret) && i < len && is_ai_retry_blank(p[i])) {
+          if (OB_FAIL(rewritten.append(p + i, 1))) {
+          }
+          ++i;
+        }
+        if (OB_SUCC(ret) && i < len && ('\'' == p[i] || '"' == p[i])) {
+          const char quote = p[i];
+          const int64_t quote_begin = i;
+          int64_t value_begin = 0;
+          ++i;
+          value_begin = i;
+          while (i < len && quote != p[i]) {
+            ++i;
+          }
+          if (OB_UNLIKELY(i >= len)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("unterminated literal in the retry condition", KR(ret), K(where_cond));
+          } else {
+            const ObString value(static_cast<int32_t>(i - value_begin), p + value_begin);
+            const int64_t status_code = ai_column_status_code(value);
+            ++i;  // the closing quote
+            if (status_code > 0) {
+              if (OB_FAIL(rewritten.append_fmt("%ld", status_code))) {
+              }
+            } else if (OB_FAIL(rewritten.append(p + quote_begin, i - quote_begin))) {
+            }
+            prev_significant = quote;
+          }
+        }
+      }
+      continue;
+    }
     if ('\'' == c || '"' == c || '`' == c) {
       const char quote = c;
       const int64_t quote_begin = i;
@@ -12555,6 +12610,8 @@ int ObDDLService::rewrite_ai_column_retry_where_cond(const common::ObString &whe
         }
         if (OB_FAIL(ret)) {
           LOG_WARN("fail to append the ai column status column", KR(ret), K(ai_column_name));
+        } else {
+          status_pseudo_pending = true;
         }
       } else if (OB_FAIL(rewritten.append(p + token_begin, token_len))) {
         LOG_WARN("fail to append an identifier of the retry condition", KR(ret));
@@ -12602,8 +12659,10 @@ int ObDDLService::retry_ai_column(const uint64_t table_id,
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid retry ai column argument", KR(ret), K(table_id), K(column_name));
   } else if (OB_FAIL(read_sql.assign_fmt(
-                 "SELECT database_name, table_name, column_name FROM %s "
-                 "WHERE table_id = %lu AND column_name = ",
+                 // database_name is written NULL by the DDL hooks (they only know the
+                 // database id), IFNULL keeps get_varchar from failing with 4152.
+                 "SELECT IFNULL(database_name, '') AS database_name, table_name, column_name "
+                 "FROM %s WHERE table_id = %lu AND column_name = ",
                  OB_ALL_AI_COLUMN_TNAME,
                  static_cast<unsigned long>(table_id)))) {
     LOG_WARN("fail to build ai column definition query", KR(ret));

@@ -4707,13 +4707,10 @@ int get_ai_column_result_type_str(const ObColumnSchemaV2 &column_schema,
   int ret = OB_SUCCESS;
   const ObIArray<ObString> &type_info = column_schema.get_extended_type_info();
   if (column_schema.is_collection() && type_info.count() > 0 && !type_info.at(0).empty()) {
-    if (OB_FAIL(result_type.append("%.*s",
-                                   type_info.at(0).length(),
-                                   type_info.at(0).ptr()))) {
+    if (OB_FAIL(result_type.append(type_info.at(0)))) {
       LOG_WARN("fail to append ai column result type", K(ret));
     }
-  } else if (OB_FAIL(result_type.append("%s",
-                                        ob_sql_type_str(column_schema.get_data_type())))) {
+  } else if (OB_FAIL(result_type.append(ob_sql_type_str(column_schema.get_data_type())))) {
     LOG_WARN("fail to append ai column result type", K(ret));
   }
   return ret;

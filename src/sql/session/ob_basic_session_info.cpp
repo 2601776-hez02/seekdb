@@ -3020,7 +3020,37 @@ int ObBasicSessionInfo::get_sql_quote_show_create(bool &sql_quote_show_create) c
 
 int ObBasicSessionInfo::get_ai_column_strict_read(bool &v) const
 {
-  return get_bool_sys_var(SYS_VAR_AI_COLUMN_STRICT_READ, v);
+  // Not get_bool_sys_var(): an inner SQL session (the AI column worker) only
+  // initializes the essential system variables, so the value object can still be
+  // NULL there and get_bool_sys_var() would fail with OB_OBJ_TYPE_ERROR.  A missing
+  // or non boolean value means "off", which is the default of the variable.
+  int ret = OB_SUCCESS;
+  ObBasicSysVar *sys_var = NULL;
+  v = false;
+  if (OB_FAIL(inner_get_sys_var(SYS_VAR_AI_COLUMN_STRICT_READ, sys_var))) {
+    LOG_WARN("fail to get ai column strict read sys var", K(ret));
+  } else if (OB_ISNULL(sys_var)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("ai column strict read sys var is null", K(ret));
+  } else {
+    const ObObj &value = sys_var->get_value();
+    if (value.is_null()) {
+      // not initialized in this session: use the default (off)
+    } else if (value.is_integer_type()) {
+      v = (0 != value.get_int());
+    } else if (ob_is_string_type(value.get_type())) {
+      ObString text;
+      if (OB_FAIL(value.get_string(text))) {
+        LOG_WARN("fail to read ai column strict read value", K(ret), K(value));
+      } else {
+        v = !(text.empty() || 0 == text.case_compare("0") || 0 == text.case_compare("off")
+              || 0 == text.case_compare("false"));
+      }
+    } else {
+      LOG_WARN("unexpected ai column strict read value type, treat as off", K(value));
+    }
+  }
+  return ret;
 }
 
 int ObBasicSessionInfo::get_ai_column_type_hint(common::ObString &type_hint) const

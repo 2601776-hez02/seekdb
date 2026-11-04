@@ -446,7 +446,8 @@ int ObDMLResolver::bind_file_table_function(const TableFunctionCall &call, Table
     if (OB_FAIL(params_.session_info_->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, enabled))) {
     } else if (!enabled) {
       ret = OB_NOT_SUPPORTED;
-      LOG_USER_ERROR(OB_NOT_SUPPORTED, "file SQL table functions, run SET enable_file_sql = true");
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "file SQL table functions");
+      FORWARD_USER_ERROR_MSG(ret, "file SQL table functions are disabled; run SET enable_file_sql = true");
     }
   }
 
@@ -586,7 +587,19 @@ int ObDMLResolver::bind_file_table_function(const TableFunctionCall &call, Table
     bool flag = false;
     int64_t int_value = 0;
     char character = 0;
-    if (name.case_compare("header") == 0) {
+    // header/delimiter/quote/escape/nullstr/skip_rows only describe CSV layout;
+    // accepting them for the other formats would silently do nothing.
+    const bool csv_only =
+        0 == name.case_compare("header") || 0 == name.case_compare("delim") ||
+        0 == name.case_compare("delimiter") || 0 == name.case_compare("sep") ||
+        0 == name.case_compare("quote") || 0 == name.case_compare("escape") ||
+        0 == name.case_compare("nullstr") || 0 == name.case_compare("null_string") ||
+        0 == name.case_compare("skip") || 0 == name.case_compare("skip_rows");
+    if (csv_only && FileFormat::CSV != options.format_) {
+      status = OB_INVALID_ARGUMENT;
+      FORWARD_USER_ERROR_MSG(status, "option '%.*s' is only supported by read_csv",
+                             name.length(), name.ptr());
+    } else if (name.case_compare("header") == 0) {
       status = option_to_bool(value, flag);
       options.header_ = flag;
     } else if (name.case_compare("delim") == 0 || name.case_compare("delimiter") == 0 ||
@@ -737,8 +750,15 @@ int ObDMLResolver::bind_file_table_function(const TableFunctionCall &call, Table
       ObAccuracy accuracy;
       meta.set_type(to_obj_type(columns[i].type_));
       if (ColumnType::VARCHAR == columns[i].type_) {
+        // A table function column is a plain character column: it needs a
+        // resolved collation (type *and* level) and a length that is legal for
+        // a column, otherwise resolving a reference to it fails with an
+        // internal error long before the scan is planned.
         meta.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
-        accuracy.set_length(static_cast<ObLength>(OB_MAX_VARCHAR_LENGTH));
+        meta.set_collation_level(CS_LEVEL_IMPLICIT);
+        accuracy.set_length(ObAccuracy::MAX_ACCURACY2[0][ObVarcharType].get_length());
+      } else if (ColumnType::BOOLEAN == columns[i].type_) {
+        accuracy.set_length(1);
       }
       ObString column_name;
       const ObString raw_name(static_cast<int32_t>(columns[i].name_.size()),

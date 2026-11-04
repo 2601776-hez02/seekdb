@@ -189,6 +189,11 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
   table_function_requires_all_columns_ = other.table_function_requires_all_columns_;
   OZ (function_argument_column_counts_.assign(other.function_argument_column_counts_));
   OZ (function_column_names_.assign(other.function_column_names_));
+  // The bind-time file snapshot must survive statement copies: plan generation
+  // hands the copied item to compile_file_table_options(), which reports an
+  // internal error when the snapshot is empty.  Like function_column_names_
+  // above this is a shallow copy of strings owned by the source statement.
+  file_sql_options_ = other.file_sql_options_;
   SampleInfo *buf = NULL;
   if (other.json_table_def_ != nullptr
       && OB_FAIL(deep_copy_json_table_def(*other.json_table_def_, expr_copier, allocator))) {

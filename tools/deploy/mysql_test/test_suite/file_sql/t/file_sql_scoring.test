@@ -79,13 +79,13 @@ SELECT COUNT(*) AS n FROM read_parquet('/tmp/seekdb_file_sql/basic.parquet') AS 
 --echo #
 --echo # 8. diagnostics: missing file, unknown option, bad option, arity
 --echo #
---error 1105,4027,1235
+--error 1017
 SELECT * FROM read_csv('/tmp/seekdb_file_sql/no_such_file.csv');
---error 1105,1235,1210,4027
+--error 1235
 SELECT * FROM read_csv('/tmp/seekdb_file_sql/basic.csv', sample_size = 100);
---error 1105,1235,1210,4027
+--error 1210
 SELECT * FROM read_csv('/tmp/seekdb_file_sql/basic.csv', nope = 1);
---error 1210,1064,1105
+--error 1582
 SELECT * FROM read_csv();
 
 SET SESSION enable_file_sql = 0;

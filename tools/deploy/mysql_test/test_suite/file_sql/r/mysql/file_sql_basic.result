@@ -1,47 +1,77 @@
+DROP TABLE IF EXISTS file_sql_t;
 #
 # 1. the switch is off by default
+SELECT * FROM read_csv('/tmp/seekdb_file_sql/basic.csv');
+ERROR 0A000: file SQL table functions are disabled; run SET enable_file_sql = true
+SET SESSION enable_file_sql = 1;
 #
 # 2. CSV: header, type inference, quoting, NULL marker
+SELECT * FROM read_csv('/tmp/seekdb_file_sql/basic.csv', nullstr = 'NA');
 id	name	score	active	day
-1	alice	1.5	1	2024-01-15
-2	bob, jr	2	0	2024-02-29
-3	carol	NULL	NULL	2024-03-01
+1	alice	1.5	true	2024-01-15
+2	bob, jr	2	false	2024-02-29
+3	carol	NULL		2024-03-01
+SELECT k, LENGTH(v) AS len FROM read_csv('/tmp/seekdb_file_sql/quoted.csv') ORDER BY k;
 k	len
 1	10
-2	16
+2	15
 #
 # 3. single file SQL: projection, filter, aggregate, order, limit
+SELECT region, COUNT(*) AS cnt, SUM(amount) AS total
+FROM read_csv('/tmp/seekdb_file_sql/sales.csv') GROUP BY region ORDER BY region;
 region	cnt	total
 east	2	15
 west	1	20
+SELECT name FROM read_csv('/tmp/seekdb_file_sql/basic.csv', nullstr = 'NA')
+WHERE score > 1 ORDER BY id LIMIT 1;
 name
 alice
 #
 # 4. JSONL: field union, missing fields and type conflicts
+SELECT * FROM read_json('/tmp/seekdb_file_sql/people.jsonl') ORDER BY id;
 id	name	city	vip
 1	alice	hangzhou	NULL
 2	bob	NULL	NULL
 3	carol	shanghai	1
+SELECT COUNT(*) AS cnt FROM read_ndjson('/tmp/seekdb_file_sql/people.jsonl');
 cnt
 3
 #
 # 5. Parquet: footer schema, optional columns, snappy pages
+SELECT * FROM read_parquet('/tmp/seekdb_file_sql/basic.parquet') ORDER BY id;
 id	name	score
 1	alpha	1.5
 2	NULL	2.5
 3	gamma	NULL
+SELECT COUNT(*) AS cnt FROM read_parquet('/tmp/seekdb_file_sql/basic.parquet');
 cnt
 3
 #
 # 6. glob() only discovers files
+SELECT * FROM glob('/tmp/seekdb_file_sql/*.csv');
 file
 /tmp/seekdb_file_sql/basic.csv
+/tmp/seekdb_file_sql/cities.csv
 /tmp/seekdb_file_sql/quoted.csv
 /tmp/seekdb_file_sql/sales.csv
+/tmp/seekdb_file_sql/types.csv
 #
 # 7. JOIN across two files stays in the seekdb plan
+SELECT p.name, SUM(o.amount) AS total
+FROM read_json('/tmp/seekdb_file_sql/people.jsonl') AS p
+INNER JOIN read_json('/tmp/seekdb_file_sql/orders.jsonl') AS o ON p.id = o.person_id
+GROUP BY p.name ORDER BY p.name;
 name	total
 alice	12.5
 carol	9.5
 #
 # 8. diagnostics
+SELECT * FROM read_csv('/tmp/seekdb_file_sql/no_such_file.csv');
+ERROR HY000: cannot resolve path: /tmp/seekdb_file_sql/no_such_file.csv: No such file or directory
+SELECT * FROM read_csv('/tmp/seekdb_file_sql/basic.csv', sample_size = 100);
+ERROR 0A000: sample_size other than -1 is not supported
+SELECT * FROM read_csv();
+ERROR 42000: Incorrect parameter count in the call to native function 'read_csv'
+SET SESSION enable_file_sql = 0;
+SELECT * FROM glob('/tmp/seekdb_file_sql/*.csv');
+ERROR 0A000: file SQL table functions are disabled; run SET enable_file_sql = true

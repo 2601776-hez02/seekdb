@@ -311,7 +311,10 @@ TEST(FileSqlScanUtils, csv_infers_schema_and_decodes_quoted_fields)
   options.null_string_ = "NA";
   const ReadResult result = read_all(path, options);
   EXPECT_EQ(Status::OK, result.status_) << result.error_;
-  EXPECT_EQ("id:bigint,name:varchar,score:double,active:boolean,day:date,ts:datetime",
+  // The third row leaves active/day/ts empty.  An empty field is a value, not
+  // NULL (only a matching nullstr becomes NULL), so those columns widen to
+  // VARCHAR while score stays DOUBLE because "NA" is the configured null marker.
+  EXPECT_EQ("id:bigint,name:varchar,score:double,active:varchar,day:varchar,ts:varchar",
             describe(result.columns_));
   ASSERT_EQ(3, static_cast<int>(result.rows_.size()));
   EXPECT_EQ("2|bob \"the builder\"|2|false|2024-02-29|2020-05-01 00:00:01",

@@ -34,7 +34,8 @@ SELECT k, LENGTH(v) AS len FROM read_csv('/tmp/seekdb_file_sql/quoted.csv') ORDE
 --echo # 3. single file SQL: projection, filter, aggregate, order, limit
 SELECT region, COUNT(*) AS cnt, SUM(amount) AS total
   FROM read_csv('/tmp/seekdb_file_sql/sales.csv') GROUP BY region ORDER BY region;
-SELECT name FROM read_csv('/tmp/seekdb_file_sql/basic.csv') WHERE score > 1 ORDER BY id LIMIT 1;
+SELECT name FROM read_csv('/tmp/seekdb_file_sql/basic.csv', nullstr = 'NA')
+  WHERE score > 1 ORDER BY id LIMIT 1;
 
 --echo #
 --echo # 4. JSONL: field union, missing fields and type conflicts
@@ -59,11 +60,11 @@ SELECT p.name, SUM(o.amount) AS total
 
 --echo #
 --echo # 8. diagnostics
---error 1105,4027,1235
+--error 1017
 SELECT * FROM read_csv('/tmp/seekdb_file_sql/no_such_file.csv');
---error 1105,1235,1210
+--error 1235
 SELECT * FROM read_csv('/tmp/seekdb_file_sql/basic.csv', sample_size = 100);
---error 1210,1064,1105
+--error 1582
 SELECT * FROM read_csv();
 
 SET SESSION enable_file_sql = 0;

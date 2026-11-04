@@ -26,6 +26,29 @@ using namespace oceanbase::pl;
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
 
+/*
+ * AI COLUMN parse nodes produced by sql_parser_mysql_mode.y (node layouts are
+ * documented in notes/module-parser.md of the ai-column workspace):
+ *
+ *   T_AI_COLUMN                   column attribute, children_[0] = the ai expression
+ *                                 (T_FUN_SYS node whose str_value_ keeps the expression
+ *                                 text, like a generated column expression),
+ *                                 children_[1] = T_AI_COLUMN_OPTIONS or NULL.
+ *   T_AI_COLUMN_OPTIONS           children_[i] = T_AI_COLUMN_OPTION, num_child_ = option count.
+ *   T_AI_COLUMN_OPTION            children_[0] = option name (T_IDENT),
+ *                                 children_[1] = option value (T_INT / T_VARCHAR).
+ *   T_SHOW_AI_COLUMNS             children_[0] = relation, children_[1] = T_FROM_LIST or NULL.
+ *   T_ALTER_TABLE_RETRY_AI_COLUMN children_[0] = column name, children_[1] = T_INT failed
+ *                                 flag (0/1), children_[2] = T_WHERE_CLAUSE or NULL.
+ *
+ * This file only splits and drives the parser, it does not dispatch on node types, so
+ * the nodes above need no handling here: they simply survive into the
+ * create_table_arg / alter_table_action parse trees handed to the resolvers, which
+ * consume them in ObDDLResolver::resolve_normal_column_attribute (T_AI_COLUMN),
+ * ObResolver::resolve (T_SHOW_AI_COLUMNS) and
+ * ObAlterTableResolver::resolve_action_list (T_ALTER_TABLE_RETRY_AI_COLUMN).
+ */
+
 ObParser::ObParser(common::ObIAllocator &allocator,
                    ObSQLMode mode,
                    ObCharsets4Parser charsets4parser)

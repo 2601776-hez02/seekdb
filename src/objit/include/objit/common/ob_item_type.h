@@ -2274,6 +2274,14 @@ typedef enum ObItemType
   T_FORK_DATABASE = 4917,
   T_DIFF_TABLE = 4918,
   T_MERGE_TABLE = 4919,
+
+  // ai column
+  T_AI_COLUMN = 5200,
+  T_AI_COLUMN_OPTIONS = 5201,
+  T_AI_COLUMN_OPTION = 5202,
+  T_SHOW_AI_COLUMNS = 5203,
+  T_ALTER_TABLE_RETRY_AI_COLUMN = 5204,
+
   T_MAX //Attention: add a new type before T_MAX
 } ObItemType;
 

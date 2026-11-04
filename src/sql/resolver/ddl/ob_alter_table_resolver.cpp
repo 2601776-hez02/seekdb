@@ -35,6 +35,132 @@ using namespace common;
 using namespace obcall;
 namespace sql
 {
+namespace
+{
+// AI COLUMN: helpers of ALTER TABLE <t> RETRY [FAILED] AI COLUMN <c> [WHERE <cond>]
+//
+// The WHERE clause of that action is not consumed by the resolver as an
+// expression: it is forwarded verbatim to the rootserver, which turns it into the
+// WHERE of the internal requeue UPDATE (ObDDLService::retry_ai_column).  The
+// parse tree does not carry the text (`opt_where` does not call dup_expr_string,
+// so T_WHERE_CLAUSE/expr only keep token positions in the parser build), hence
+// the raw text is cut out of the statement text kept in ObResolverParams.
+bool is_retry_ident_char(const char c)
+{
+  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+         || '_' == c || '$' == c || static_cast<unsigned char>(c) >= 0x80;
+}
+
+bool is_retry_ident_start(const char c)
+{
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || '_' == c || '$' == c
+         || static_cast<unsigned char>(c) >= 0x80;
+}
+
+// Locate the first top level WHERE keyword of the statement (single/double quoted
+// literals, backtick quoted identifiers, comments and parentheses are skipped) and
+// return the raw condition text that follows it, without trailing blanks nor the
+// trailing semicolon. `found` is false when the statement has no WHERE at all.
+int find_where_clause_text(const common::ObString &sql,
+                           bool &found,
+                           common::ObString &where_cond)
+{
+  int ret = OB_SUCCESS;
+  found = false;
+  where_cond.reset();
+  if (OB_UNLIKELY(sql.empty()) || OB_ISNULL(sql.ptr())) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "current statement text is empty", KR(ret));
+  } else {
+    const char *p = sql.ptr();
+    const int64_t len = sql.length();
+    int64_t i = 0;
+    int64_t paren_depth = 0;
+    int64_t cond_start = -1;
+    while (OB_SUCC(ret) && !found && i < len) {
+      const char c = p[i];
+      if ('\'' == c || '"' == c || '`' == c) {
+        const char quote = c;
+        bool closed = false;
+        ++i;
+        while (i < len && !closed) {
+          if ('\\' == p[i]) {
+            // backslash escape: the escaped byte can not close the literal
+            i += 2;
+          } else if (quote != p[i]) {
+            ++i;
+          } else if (i + 1 < len && quote == p[i + 1]) {
+            i += 2;  // doubled quote: an escaped quote inside the literal
+          } else {
+            ++i;
+            closed = true;
+          }
+        }
+        if (!closed) {
+          ret = OB_ERR_UNEXPECTED;
+          SQL_RESV_LOG(WARN, "unterminated literal in the statement", KR(ret));
+        }
+      } else if ('-' == c && i + 1 < len && '-' == p[i + 1]) {
+        while (i < len && '\n' != p[i]) {
+          ++i;
+        }
+      } else if ('#' == c) {
+        while (i < len && '\n' != p[i]) {
+          ++i;
+        }
+      } else if ('/' == c && i + 1 < len && '*' == p[i + 1]) {
+        i += 2;
+        while (i + 1 < len && !('/' == p[i] && '*' == p[i + 1])) {
+          ++i;
+        }
+        i = (i + 1 < len) ? i + 2 : len;
+      } else if ('(' == c) {
+        ++paren_depth;
+        ++i;
+      } else if (')' == c) {
+        --paren_depth;
+        ++i;
+      } else if (is_retry_ident_start(c)) {
+        const int64_t token_start = i;
+        while (i < len && is_retry_ident_char(p[i])) {
+          ++i;
+        }
+        if (0 == paren_depth && 5 == i - token_start
+            && ObCharset::case_insensitive_equal(
+                 common::ObString(static_cast<int32_t>(5), p + token_start),
+                 common::ObString::make_string("where"))) {
+          cond_start = i;
+          found = true;
+        }
+      } else {
+        ++i;
+      }
+    }
+    if (OB_SUCC(ret) && found) {
+      int64_t cond_end = len;
+      while (cond_end > cond_start
+             && (' ' == p[cond_end - 1] || '\t' == p[cond_end - 1]
+                 || '\n' == p[cond_end - 1] || '\r' == p[cond_end - 1]
+                 || ';' == p[cond_end - 1])) {
+        --cond_end;
+      }
+      while (cond_start < cond_end
+             && (' ' == p[cond_start] || '\t' == p[cond_start]
+                 || '\n' == p[cond_start] || '\r' == p[cond_start])) {
+        ++cond_start;
+      }
+      if (cond_start >= cond_end) {
+        ret = OB_ERR_UNEXPECTED;
+        SQL_RESV_LOG(WARN, "empty where clause of retry ai column", KR(ret));
+      } else {
+        where_cond.assign_ptr(p + cond_start, static_cast<int32_t>(cond_end - cond_start));
+      }
+    }
+  }
+  return ret;
+}
+}  // namespace
+
 ObAlterTableResolver::ObAlterTableResolver(ObResolverParams &params)
     : ObDDLResolver(params),
       table_schema_(NULL),
@@ -588,6 +714,13 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
             }
             break;
         }
+        case T_ALTER_TABLE_RETRY_AI_COLUMN: {
+            // AI COLUMN: not a schema change, only a row requeue request.
+            if (OB_FAIL(resolve_retry_ai_column(*action_node))) {
+              SQL_RESV_LOG(WARN, "fail to resolve retry ai column action", KR(ret));
+            }
+            break;
+        }
         default: {
             ret = OB_ERR_UNEXPECTED;
             SQL_RESV_LOG(WARN, "Unknown alter table action %d", K_(action_node->type), K(ret));
@@ -732,6 +865,18 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
     }
     if (OB_SUCC(ret) && OB_FAIL(check_alter_column_schemas_valid(*alter_table_stmt))) {
     }
+    // AI COLUMN: RETRY AI COLUMN only re-queues rows, it can not be mixed with a
+    // schema changing action of the same statement (the argument carries one AI
+    // action and the rootserver would dispatch it alone).
+    if (OB_SUCC(ret)
+        && alter_table_stmt->get_alter_table_arg().has_ai_column_retry_action()
+        && alter_table_stmt->get_alter_table_action_count() > 1) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED,
+          "OB_AI_COLUMN: RETRY AI COLUMN together with other alter table actions is");
+      SQL_RESV_LOG(WARN, "retry ai column with other alter table actions", KR(ret),
+                   K(alter_table_stmt->get_alter_table_action_count()));
+    }
 
     if (OB_SUCC(ret)) {
       ObAlterTableStmt *alter_table_stmt = get_alter_table_stmt();
@@ -745,6 +890,85 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
       }
     }
     } // end for heap_vars_2.
+  }
+  return ret;
+}
+
+// AI COLUMN: ALTER TABLE <t> RETRY [FAILED] AI COLUMN <c> [WHERE <cond>]
+//
+// Parse tree layout (notes/module-parser.md 3):
+//   children_[0] = T_IDENT  target column name
+//   children_[1] = T_INT    1 when the FAILED keyword was written, 0 otherwise
+//   children_[2] = T_WHERE_CLAUSE (children_[0] = condition expr) or NULL
+//
+// Nothing is added to the alter table schema: the action only marks the argument
+// so that ObDDLService::alter_table dispatches it to retry_ai_column instead of
+// the schema changing flow.
+int ObAlterTableResolver::resolve_retry_ai_column(const ParseNode &action_node)
+{
+  int ret = OB_SUCCESS;
+  ObAlterTableStmt *alter_table_stmt = get_alter_table_stmt();
+  const ParseNode *column_node = NULL;
+  const ParseNode *where_node = NULL;
+  if (OB_UNLIKELY(T_ALTER_TABLE_RETRY_AI_COLUMN != action_node.type_)
+      || OB_UNLIKELY(3 != action_node.num_child_) || OB_ISNULL(action_node.children_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid retry ai column parse tree", KR(ret),
+                 K(action_node.type_), K(action_node.num_child_));
+  } else if (OB_ISNULL(alter_table_stmt) || OB_ISNULL(table_schema_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "alter table stmt or table schema is null", KR(ret));
+  } else if (OB_ISNULL(column_node = action_node.children_[0])
+             || OB_ISNULL(action_node.children_[1])
+             || OB_UNLIKELY(T_IDENT != column_node->type_)
+             || OB_ISNULL(column_node->str_value_)
+             || OB_UNLIKELY(column_node->str_len_ <= 0)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid retry ai column name node", KR(ret));
+  } else {
+    const common::ObString column_name(static_cast<int32_t>(column_node->str_len_),
+                                       column_node->str_value_);
+    const bool only_failed = (1 == action_node.children_[1]->value_);
+    const share::schema::ObColumnSchemaV2 *column_schema = NULL;
+    common::ObString where_cond;
+    if (OB_ISNULL(column_schema = table_schema_->get_column_schema(column_name))) {
+      // same error the other column level alter table actions raise for a name
+      // that does not exist (1054 / 42S22, "Unknown column ... in 'field list'")
+      common::ObString scope_name = "field list";
+      ret = OB_ERR_BAD_FIELD_ERROR;
+      LOG_USER_ERROR(OB_ERR_BAD_FIELD_ERROR, column_name.length(), column_name.ptr(),
+                     scope_name.length(), scope_name.ptr());
+      SQL_RESV_LOG(WARN, "retry target column does not exist", KR(ret), K(column_name));
+    } else if (OB_UNLIKELY(!column_schema->is_ai_column())) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "OB_AI_COLUMN: RETRY requires an AI column");
+      SQL_RESV_LOG(WARN, "retry target is not an ai column", KR(ret), K(column_name));
+    } else if (OB_ISNULL(where_node = action_node.children_[2])) {
+      // no WHERE clause: every row of the AI column is re-queued
+    } else if (OB_UNLIKELY(T_WHERE_CLAUSE != where_node->type_)
+               || OB_UNLIKELY(where_node->num_child_ < 1) || OB_ISNULL(where_node->children_)
+               || OB_ISNULL(where_node->children_[0])) {
+      ret = OB_ERR_UNEXPECTED;
+      SQL_RESV_LOG(WARN, "invalid where clause of retry ai column", KR(ret));
+    } else {
+      bool found = false;
+      if (OB_FAIL(find_where_clause_text(get_params().cur_sql_, found, where_cond))) {
+        SQL_RESV_LOG(WARN, "fail to extract the retry ai column condition", KR(ret));
+      } else if (OB_UNLIKELY(!found)) {
+        // the parse tree has a condition but the statement text does not contain
+        // it, e.g. RETRY ... WHERE inside a prepared statement: retrying without
+        // the condition would touch every row, refuse instead.
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED,
+            "OB_AI_COLUMN: RETRY with a WHERE clause that can not be recovered from the statement text is");
+        SQL_RESV_LOG(WARN, "fail to locate the retry ai column condition", KR(ret));
+      }
+    }
+    if (OB_SUCC(ret)
+        && OB_FAIL(alter_table_stmt->get_alter_table_arg().set_ai_column_retry_action(
+                     column_name, only_failed, where_cond))) {
+      SQL_RESV_LOG(WARN, "fail to set the retry ai column action", KR(ret), K(column_name));
+    }
   }
   return ret;
 }
@@ -3425,6 +3649,21 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
         } else if (OB_FAIL(fill_column_schema_according_stat(stat, alter_column_schema))) {
         } else if (OB_FAIL(set_column_collation(alter_column_schema))) {
         }
+        // AI column: validate the definition. The hidden companion columns and the
+        // column ids of the ai spec are filled in rootserver, where the column id of
+        // the new column is assigned.
+        if (OB_SUCC(ret)) {
+          const ParseNode *ai_node = ObDDLResolver::find_ai_column_node(*node.children_[i]);
+          if (NULL == ai_node) {
+            // not an AI column
+          } else if (OB_FAIL(ObDDLResolver::resolve_ai_column_attribute(
+                       alter_column_schema, *ai_node, *table_schema_, resolved_cols,
+                       *allocator_, session_info_, schema_checker_))) {
+            SQL_RESV_LOG(WARN, "fail to resolve ai column attribute", K(ret));
+          } else if (OB_FAIL(alter_column_schema.set_orig_default_value(
+                       alter_column_schema.get_cur_default_value()))) {
+          }
+        }
 
         //do some check
         if (OB_SUCC(ret)) {
@@ -4065,6 +4304,41 @@ int ObAlterTableResolver::resolve_modify_column(const ParseNode &node,
           add_not_null_constraint_ |= stat.is_set_not_null_;
           if (OB_FAIL(alter_column_schema.set_origin_column_name(column_name))) {
           } else if (OB_FAIL(set_column_collation(alter_column_schema))) {
+          }
+        }
+        // AI column: validate the definition, keep the hidden companion columns and
+        // bump the definition version. Changing an AI column into an ordinary column
+        // (or the other way around) is not supported in v1.
+        if (OB_SUCC(ret)) {
+          const ParseNode *ai_node = ObDDLResolver::find_ai_column_node(*node.children_[i]);
+          if (OB_ISNULL(origin_col_schema)) {
+            ret = OB_ERR_UNEXPECTED;
+            SQL_RESV_LOG(WARN, "origin column schema is null", K(ret));
+          } else if (NULL == ai_node) {
+            if (origin_col_schema->is_ai_column()) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED,
+                  "OB_AI_COLUMN: dropping the AI column attribute of an AI column is");
+            }
+          } else if (!origin_col_schema->is_ai_column()) {
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED,
+                "OB_AI_COLUMN: changing an ordinary column into an AI column is");
+          } else if (OB_FAIL(ObDDLResolver::resolve_ai_column_attribute(
+                       alter_column_schema, *ai_node, *table_schema_, resolved_cols,
+                       *allocator_, session_info_, schema_checker_))) {
+            SQL_RESV_LOG(WARN, "fail to resolve ai column attribute", K(ret));
+          } else {
+            ObAIColumnSpec ai_spec = alter_column_schema.get_ai_spec();
+            const ObAIColumnSpec &origin_ai_spec = origin_col_schema->get_ai_spec();
+            ai_spec.status_column_id_ = origin_ai_spec.status_column_id_;
+            ai_spec.srcver_column_id_ = origin_ai_spec.srcver_column_id_;
+            ai_spec.def_version_ = origin_ai_spec.def_version_ + 1;
+            if (OB_FAIL(alter_column_schema.set_ai_spec(ai_spec))) {
+              SQL_RESV_LOG(WARN, "fail to set ai column spec", K(ret));
+            } else if (OB_FAIL(alter_column_schema.set_orig_default_value(
+                         alter_column_schema.get_cur_default_value()))) {
+            }
           }
         }
       }

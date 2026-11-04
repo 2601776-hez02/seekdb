@@ -1164,6 +1164,16 @@ public:
     INSTANT = 1,
     INPLACE = 2,
   };
+  // AI COLUMN: which AI column action this alter table statement carries.
+  // ALTER TABLE ... RETRY [FAILED] AI COLUMN <c> [WHERE <cond>] is not a schema
+  // change at all, it only re-queues rows of an existing AI column, so it needs
+  // its own action marker next to the schema-change flavoured ones.
+  enum AlterAIActionType
+  {
+    AI_COLUMN_ACTION_NONE = 0,
+    AI_COLUMN_ACTION_RETRY = 1,
+    AI_COLUMN_ACTION_MAX = 1000
+  };
   ObAlterTableArg():
       ObDDLArg(),
       session_id_(common::OB_INVALID_ID),
@@ -1195,7 +1205,11 @@ public:
       lock_session_id_(0),
       lock_session_create_ts_(0),
       lock_priority_(transaction::tablelock::ObTableLockPriority::NORMAL),
-      data_version_(0)
+      data_version_(0),
+      ai_action_(AI_COLUMN_ACTION_NONE),
+      ai_column_name_(),
+      ai_where_cond_(),
+      ai_only_failed_(false)
   {
   }
   virtual ~ObAlterTableArg()
@@ -1241,6 +1255,19 @@ public:
        && !is_convert_to_character_
        && alter_constraint_type_ ==  CONSTRAINT_NO_OPERATION;
   }
+  // AI COLUMN: ALTER TABLE ... RETRY [FAILED] AI COLUMN <c> [WHERE <cond>].
+  // Only the retry action is carried for now; the marker is what the rootserver
+  // dispatches on (see ObDDLService::alter_table).
+  inline bool has_ai_column_retry_action() const
+  { return AI_COLUMN_ACTION_RETRY == ai_action_; }
+  inline bool is_ai_column_retry_only_failed() const { return ai_only_failed_; }
+  inline const common::ObString &get_ai_column_name() const { return ai_column_name_; }
+  inline const common::ObString &get_ai_column_where_cond() const { return ai_where_cond_; }
+  // Deep copies the three inputs into allocator_ (the arg owns them, the parse
+  // tree buffer they come from can not be referenced after resolve).
+  int set_ai_column_retry_action(const common::ObString &column_name,
+                                 const bool only_failed,
+                                 const common::ObString &where_cond);
 
   TO_STRING_KV(K_(session_id),
                K_(alter_part_type),
@@ -1268,7 +1295,11 @@ public:
                K_(lock_session_id),
                K_(lock_session_create_ts),
                K_(lock_priority),
-               K_(data_version));
+               K_(data_version),
+               K_(ai_action),
+               K_(ai_column_name),
+               K_(ai_where_cond),
+               K_(ai_only_failed));
 private:
   int alloc_index_arg(const ObIndexArg::IndexActionType index_action_type, ObIndexArg *&index_arg);
 public:
@@ -1302,6 +1333,15 @@ public:
   int64_t lock_session_create_ts_;
   transaction::tablelock::ObTableLockPriority lock_priority_;
   uint64_t data_version_;
+  // AI COLUMN action (see AlterAIActionType): the action marker, the target AI
+  // column and the raw user condition of ALTER TABLE ... RETRY ... [WHERE ...].
+  // The condition still contains the unquoted `status` pseudo column, the
+  // rootserver rewrites it to the hidden status column before the internal
+  // UPDATE (ObDDLService::rewrite_ai_column_retry_where_cond).
+  AlterAIActionType ai_action_;
+  common::ObString ai_column_name_;
+  common::ObString ai_where_cond_;
+  bool ai_only_failed_;
   int serialize_index_args(char *buf, const int64_t data_len, int64_t &pos) const;
   int deserialize_index_args(const char *buf, const int64_t data_len, int64_t &pos);
   int64_t get_index_args_serialize_size() const;
@@ -3502,7 +3542,8 @@ public:
   ddl_type_(share::DDL_INVALID),
   task_id_(0),
   ddl_res_array_(),
-  ddl_need_retry_at_executor_(false)
+  ddl_need_retry_at_executor_(false),
+  affected_rows_(0)
   {}
   void reset();
   int assign(const ObAlterTableRes &other) {
@@ -3516,12 +3557,14 @@ public:
       ddl_type_ = other.ddl_type_;
       task_id_ = other.task_id_;
       ddl_need_retry_at_executor_ = other.ddl_need_retry_at_executor_;
+      affected_rows_ = other.affected_rows_;
     }
     return ret;
   }
 public:
   TO_STRING_KV(K_(index_table_id), K_(constriant_id), K_(schema_version),
-  K_(res_arg_array), K_(ddl_type), K_(task_id), K_(ddl_need_retry_at_executor));
+  K_(res_arg_array), K_(ddl_type), K_(task_id), K_(ddl_need_retry_at_executor),
+  K_(affected_rows));
   uint64_t index_table_id_;
   uint64_t constriant_id_;
   int64_t schema_version_;
@@ -3530,6 +3573,9 @@ public:
   int64_t task_id_;
   common::ObSArray<ObDDLRes> ddl_res_array_;
   bool ddl_need_retry_at_executor_;
+  // number of rows changed by the statement when it touches data without changing
+  // the schema: only ALTER TABLE ... RETRY AI COLUMN uses it so far.
+  int64_t affected_rows_;
 };
 
 struct ObDropDatabaseRes final

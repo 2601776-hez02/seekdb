@@ -158,6 +158,52 @@ public:
 
   virtual int alter_table(obcall::ObAlterTableArg &alter_table_arg,
                           obcall::ObAlterTableRes &res);
+  /**
+   * AI COLUMN: execution side of
+   *   ALTER TABLE <t> RETRY [FAILED] AI COLUMN <c> [WHERE <cond>]
+   * It re-generates the selected rows by requeueing them, i.e. it runs
+   *   UPDATE <db>.<t>
+   *      SET <c> = NULL, <status_c> = 1, <srcver_c> = <new monotonic seq>
+   *    WHERE (<cond>) [AND <status_c> = 3]
+   * where <status_c>/<srcver_c> are the hidden companion columns of the AI
+   * column and <cond> is the user condition with the `status` pseudo column
+   * already rewritten to <status_c> by the resolver.
+   *
+   * @param [in]  table_id      data table id
+   * @param [in]  database_name name of the database that owns the table. It must
+   *                            be resolved by the caller from the schema guard
+   *                            (table schema -> database id -> database schema):
+   *                            __all_ai_column.database_name is written empty by
+   *                            the DDL hooks, they only know the database id, so
+   *                            that metadata column is used as a fallback only.
+   * @param [in]  column_name   AI column name
+   * @param [in]  only_failed   true when the FAILED keyword was specified, the
+   *                            READY rows must then be left untouched
+   * @param [in]  where_cond    user condition text, empty when absent
+   * @param [out] affected_rows number of requeued rows
+   */
+  int retry_ai_column(const uint64_t table_id,
+                      const common::ObString &database_name,
+                      const common::ObString &column_name,
+                      const bool only_failed,
+                      const common::ObString &where_cond,
+                      int64_t &affected_rows);
+  /**
+   * AI COLUMN: rewrite the WHERE clause of ALTER TABLE ... RETRY [FAILED] AI
+   * COLUMN <c> [WHERE <cond>] before it becomes the WHERE of the internal
+   * requeue UPDATE. An unquoted `status` is the pseudo column holding the AI
+   * status of the row, so it is replaced by the hidden status column of the AI
+   * column (`OB_AI_COLUMN_STATUS_COLUMN_PREFIX` + <c>); a backtick quoted
+   * `status`, a qualified `t.status` and everything inside a literal or a
+   * comment are kept as written.
+   *
+   * @param [in]  where_cond     raw user condition, may be empty
+   * @param [in]  ai_column_name target AI column of the statement
+   * @param [out] rewritten      rewritten condition, empty when where_cond is
+   */
+  static int rewrite_ai_column_retry_where_cond(const common::ObString &where_cond,
+                                                const common::ObString &ai_column_name,
+                                                common::ObSqlString &rewritten);
   virtual int drop_table(const obcall::ObDropTableArg &drop_table_arg, const obcall::ObDDLRes &res);
   int check_table_exists(const obcall::ObTableItem &table_item,
                          const share::schema::ObTableType expected_table_type,

@@ -21,6 +21,7 @@
 #include "share/schema/ob_constraint.h"
 #include "share/schema/ob_partition_sql_helper.h"
 #include "share/ob_timezone_mgr.h"
+#include "common/object/ob_obj_type.h"
 
 namespace oceanbase
 {
@@ -722,6 +723,8 @@ int ObTableSqlService::drop_table(const ObTableSchema &table_schema,
   if (OB_SUCC(ret)) {
     // Drop all constraints while drop table and recyclebin is off.
     if (OB_FAIL(delete_constraint(sql_client, table_schema, new_schema_version))) {
+    } else if (OB_FAIL(delete_ai_column_meta_of_table(sql_client, table_id))) {
+      LOG_WARN("fail to delete ai column meta of the dropped table", K(ret), K(table_id));
     }
   }
 
@@ -888,6 +891,11 @@ int ObTableSqlService::insert_single_column(
   int ret = OB_SUCCESS;
   if (OB_FAIL(check_ddl_allowed(new_table_schema))) {
   } else if (OB_FAIL(add_single_column(sql_client, new_column_schema))) {
+  } else if (new_column_schema.is_ai_column()
+             && OB_FAIL(add_ai_column_meta(sql_client, new_table_schema,
+                                           ObString(),
+                                           new_column_schema))) {
+    LOG_WARN("fail to add ai column meta", K(ret), K(new_column_schema));
   }
   if (OB_SUCC(ret)) {
     if (new_column_schema.is_autoincrement()) {
@@ -934,6 +942,14 @@ int ObTableSqlService::update_single_column(
                             OB_ALL_COLUMN_TNAME, dml, affected_rows))) {
     } else if (affected_rows > 1) {
       ret = OB_ERR_UNEXPECTED;
+    }
+  }
+  // AI column: keep the metadata row of the AI column in sync with the definition
+  if (OB_SUCC(ret) && new_column_schema.is_ai_column()) {
+    if (OB_FAIL(add_ai_column_meta(sql_client, new_table_schema,
+                                   ObString(),
+                                   new_column_schema))) {
+      LOG_WARN("fail to update ai column meta", K(ret), K(new_column_schema));
     }
   }
 
@@ -2010,6 +2026,13 @@ int ObTableSqlService::delete_single_column(
     }
   }
 
+  // AI column: drop the metadata row of the dropped AI column
+  if (OB_SUCC(ret) && orig_column_schema.is_ai_column()) {
+    if (OB_FAIL(delete_ai_column_meta(sql_client, table_id, column_id))) {
+      LOG_WARN("fail to delete ai column meta", K(ret), K(table_id), K(column_id));
+    }
+  }
+
   int64_t affected_rows = 0;
   // mark delete in __all_column_history
   if (OB_SUCC(ret)) {
@@ -2151,6 +2174,8 @@ int ObTableSqlService::batch_create_table(ObIArray<ObTableSchema> &tables,
     } else if (FALSE_IT(time_guard.click("insert_all_table"))) {
     } else if (OB_FAIL(batch_add_columns_for_create_table(sql_client, tables))) {
     } else if (FALSE_IT(time_guard.click("insert_all_column"))) {
+    } else if (OB_FAIL(batch_add_ai_column_meta(sql_client, tables))) {
+    } else if (FALSE_IT(time_guard.click("insert_ai_column"))) {
     } else if (OB_FAIL(batch_add_constraints_for_create_table(sql_client, tables))) {
     } else if (FALSE_IT(time_guard.click("insert_all_cst"))) {
     } else if (OB_FAIL(batch_add_table_part_info(sql_client, tables))) {
@@ -4669,6 +4694,166 @@ int ObTableSqlService::update_view_columns(ObISQLClient &sql_client,
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(sql_client.write(column_history_sql.ptr(), affected_rows))) {
   } else if (affected_rows != table.get_column_count()) {
+  }
+  return ret;
+}
+
+// ---------------------------- AI column metadata ----------------------------
+namespace
+{
+int get_ai_column_result_type_str(const ObColumnSchemaV2 &column_schema,
+                                  common::ObSqlString &result_type)
+{
+  int ret = OB_SUCCESS;
+  const ObIArray<ObString> &type_info = column_schema.get_extended_type_info();
+  if (column_schema.is_collection() && type_info.count() > 0 && !type_info.at(0).empty()) {
+    if (OB_FAIL(result_type.append("%.*s",
+                                   type_info.at(0).length(),
+                                   type_info.at(0).ptr()))) {
+      LOG_WARN("fail to append ai column result type", K(ret));
+    }
+  } else if (OB_FAIL(result_type.append("%s",
+                                        ob_sql_type_str(column_schema.get_data_type())))) {
+    LOG_WARN("fail to append ai column result type", K(ret));
+  }
+  return ret;
+}
+
+int get_ai_column_dependencies_str(const ObAIColumnSpec &ai_spec,
+                                   common::ObSqlString &dependencies)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < ai_spec.dep_column_ids_.count(); ++i) {
+    if (OB_FAIL(dependencies.append_fmt("%s%lu",
+                                        0 == i ? "" : ",",
+                                        ai_spec.dep_column_ids_.at(i)))) {
+      LOG_WARN("fail to append ai column dependency", K(ret));
+    }
+  }
+  return ret;
+}
+}  // anonymous namespace
+
+int ObTableSqlService::add_ai_column_meta(common::ObISQLClient &sql_client,
+                                          const ObTableSchema &table_schema,
+                                          const common::ObString &database_name,
+                                          const ObColumnSchemaV2 &column_schema)
+{
+  int ret = OB_SUCCESS;
+  if (!column_schema.is_ai_column()) {
+    // nothing to do for an ordinary column
+  } else {
+    ObDMLSqlSplicer dml;
+    ObSqlString result_type;
+    ObSqlString dependencies;
+    ObString expr_str;
+    ObDMLExecHelper exec(sql_client);
+    const ObAIColumnSpec &ai_spec = column_schema.get_ai_spec();
+    int64_t affected_rows = 0;
+    if (OB_FAIL(get_ai_column_result_type_str(column_schema, result_type))) {
+    } else if (OB_FAIL(get_ai_column_dependencies_str(ai_spec, dependencies))) {
+    } else if (OB_FAIL(column_schema.get_cur_default_value().get_string(expr_str))) {
+      LOG_WARN("fail to get ai column expression text", K(ret), K(column_schema));
+    } else if (OB_FAIL(dml.add_pk_column("table_id", table_schema.get_table_id()))
+               || OB_FAIL(dml.add_pk_column("column_id", column_schema.get_column_id()))
+               || OB_FAIL(dml.add_column("database_name", ObHexEscapeSqlStr(database_name)))
+               || OB_FAIL(dml.add_column("table_name",
+                          ObHexEscapeSqlStr(table_schema.get_table_name_str())))
+               || OB_FAIL(dml.add_column("column_name",
+                          ObHexEscapeSqlStr(column_schema.get_column_name_str())))
+               || OB_FAIL(dml.add_column("ai_function", ObHexEscapeSqlStr(ai_spec.ai_function_)))
+               || OB_FAIL(dml.add_column("model_name", ObHexEscapeSqlStr(ai_spec.model_name_)))
+               || OB_FAIL(dml.add_column("expression", ObHexEscapeSqlStr(expr_str)))
+               || OB_FAIL(dml.add_column("result_type", ObHexEscapeSqlStr(result_type.string())))
+               || OB_FAIL(dml.add_column("dependencies", ObHexEscapeSqlStr(dependencies.string())))
+               || OB_FAIL(dml.add_column("sync_mode",
+                          static_cast<int64_t>(ai_spec.option_.sync_mode_)))
+               || OB_FAIL(dml.add_column("max_retries", ai_spec.option_.max_retries_))
+               || OB_FAIL(dml.add_column("status_column_id",
+                          static_cast<int64_t>(ai_spec.status_column_id_)))
+               || OB_FAIL(dml.add_column("srcver_column_id",
+                          static_cast<int64_t>(ai_spec.srcver_column_id_)))
+               || OB_FAIL(dml.add_column("def_version",
+                          static_cast<int64_t>(ai_spec.def_version_)))
+               || OB_FAIL(dml.add_column("flags", static_cast<int64_t>(1)))
+               || OB_FAIL(dml.add_gmt_create())
+               || OB_FAIL(dml.add_gmt_modified())) {
+      LOG_WARN("fail to build ai column meta dml", K(ret), K(column_schema));
+    } else if (OB_FAIL(exec.exec_insert_update(OB_ALL_AI_COLUMN_TNAME, dml, affected_rows))) {
+      LOG_WARN("fail to write ai column meta", K(ret), K(OB_ALL_AI_COLUMN_TNAME));
+    }
+  }
+  return ret;
+}
+
+int ObTableSqlService::add_ai_column_meta(common::ObISQLClient &sql_client,
+                                          const ObTableSchema &table_schema,
+                                          const common::ObString &database_name)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_schema.get_column_count(); ++i) {
+    const ObColumnSchemaV2 *column_schema = table_schema.get_column_schema_by_idx(i);
+    if (OB_ISNULL(column_schema)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("column schema is null", K(ret), K(i));
+    } else if (!column_schema->is_ai_column()) {
+      // skip ordinary columns
+    } else if (OB_FAIL(add_ai_column_meta(sql_client, table_schema, database_name, *column_schema))) {
+      LOG_WARN("fail to add ai column meta", K(ret), KPC(column_schema));
+    }
+  }
+  return ret;
+}
+
+int ObTableSqlService::batch_add_ai_column_meta(common::ObISQLClient &sql_client,
+                                                ObIArray<ObTableSchema> &tables)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < tables.count(); ++i) {
+    ObTableSchema &table_schema = tables.at(i);
+    if (!table_schema.has_ai_column()) {
+      // skip tables without ai columns
+    } else if (OB_FAIL(add_ai_column_meta(sql_client, table_schema, ObString()))) {
+      LOG_WARN("fail to add ai column meta of table", K(ret), K(table_schema.get_table_id()));
+    }
+  }
+  return ret;
+}
+
+int ObTableSqlService::delete_ai_column_meta(common::ObISQLClient &sql_client,
+                                             const uint64_t table_id,
+                                             const uint64_t column_id)
+{
+  int ret = OB_SUCCESS;
+  ObDMLSqlSplicer dml;
+  ObDMLExecHelper exec(sql_client);
+  int64_t affected_rows = 0;
+  if (OB_INVALID_ID == table_id || OB_INVALID_ID == column_id) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument to delete ai column meta", K(ret), K(table_id), K(column_id));
+  } else if (OB_FAIL(dml.add_pk_column("table_id", table_id))
+             || OB_FAIL(dml.add_pk_column("column_id", column_id))) {
+    LOG_WARN("fail to build delete ai column meta dml", K(ret));
+  } else if (OB_FAIL(exec.exec_delete(OB_ALL_AI_COLUMN_TNAME, dml, affected_rows))) {
+    LOG_WARN("fail to delete ai column meta", K(ret), K(table_id), K(column_id));
+  }
+  return ret;
+}
+
+int ObTableSqlService::delete_ai_column_meta_of_table(common::ObISQLClient &sql_client,
+                                                      const uint64_t table_id)
+{
+  int ret = OB_SUCCESS;
+  ObDMLSqlSplicer dml;
+  ObDMLExecHelper exec(sql_client);
+  int64_t affected_rows = 0;
+  if (OB_INVALID_ID == table_id) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid table id to delete ai column meta", K(ret), K(table_id));
+  } else if (OB_FAIL(dml.add_pk_column("table_id", table_id))) {
+    LOG_WARN("fail to build delete ai column meta dml", K(ret));
+  } else if (OB_FAIL(exec.exec_delete(OB_ALL_AI_COLUMN_TNAME, dml, affected_rows))) {
+    LOG_WARN("fail to delete ai column meta of table", K(ret), K(table_id));
   }
   return ret;
 }

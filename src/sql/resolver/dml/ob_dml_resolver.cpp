@@ -41,6 +41,8 @@
 #include "sql/resolver/dcl/ob_dcl_resolver.h"
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
 #include "sql/hybrid_search/ob_hybrid_search_executor.h"
+#include "common/storage/ob_sequence.h"
+#include "lib/string/ob_sql_string.h"
 
 namespace oceanbase
 {
@@ -5709,6 +5711,164 @@ int ObDMLResolver::check_basic_column_generated(const ObColumnRefRawExpr *col_ex
     }
   }
   return ret;
+}
+
+// AI COLUMN: the ai column value is produced asynchronously by the background
+// worker and published with a source-version fence, therefore a user statement
+// must not write it explicitly. Modelled on check_basic_column_generated(),
+// including the same indirection walk over updatable views.
+int ObDMLResolver::check_basic_column_ai(const ObColumnRefRawExpr *col_expr,
+                                         ObDMLStmt *dml_stmt,
+                                         bool &is_ai_column)
+{
+  int ret = OB_SUCCESS;
+  is_ai_column = false;
+  const TableItem *table_item = NULL;
+  const ColumnItem *view_column_item = NULL;
+  const ColumnItem *basic_column_item = NULL;
+  if (OB_ISNULL(col_expr) || OB_ISNULL(dml_stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(table_item = dml_stmt->get_table_item_by_id(col_expr->get_table_id()))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (false == ((table_item->is_generated_table() || table_item->is_temp_table())
+                        && OB_NOT_NULL(table_item->view_base_item_))) {
+    // a plain base table, look up the column schema by its own ids
+    if (OB_ISNULL(basic_column_item = dml_stmt->get_column_item_by_id(
+                                                            col_expr->get_table_id(),
+                                                            col_expr->get_column_id()))) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+  } else if (OB_ISNULL(view_column_item = dml_stmt->get_column_item_by_id(
+                                                                  col_expr->get_table_id(),
+                                                                  col_expr->get_column_id()))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    ObSelectStmt *select_stmt = NULL;
+    while ((table_item->is_generated_table() || table_item->is_temp_table())
+           && OB_NOT_NULL(table_item->view_base_item_)) {
+      select_stmt = table_item->ref_query_;
+      table_item = table_item->view_base_item_;
+    }
+    if (OB_ISNULL(select_stmt) || OB_ISNULL(table_item)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_ISNULL(basic_column_item = select_stmt->get_column_item_by_id(
+                                                            table_item->table_id_,
+                                                            view_column_item->base_cid_))) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+  }
+  if (OB_SUCC(ret)) {
+    const ObColumnSchemaV2 *column_schema = NULL;
+    const uint64_t base_table_id = OB_INVALID_ID == basic_column_item->base_tid_
+                                 ? table_item->get_base_table_item().ref_id_
+                                 : basic_column_item->base_tid_;
+    const uint64_t base_column_id = OB_INVALID_ID == basic_column_item->base_cid_
+                                 ? basic_column_item->column_id_ : basic_column_item->base_cid_;
+    if (OB_ISNULL(basic_column_item->expr_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(get_column_schema(base_table_id, base_column_id, column_schema, true))) {
+      LOG_WARN("failed to get column schema", K(ret), K(base_table_id), K(base_column_id));
+    } else if (OB_ISNULL(column_schema)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (column_schema->is_ai_column()) {
+      is_ai_column = true;
+    }
+  }
+  return ret;
+}
+
+int ObDMLResolver::raise_ai_column_write_error(const ObString &column_name,
+                                               const ObString &table_name)
+{
+  int ret = OB_SUCCESS;
+  // The errno is reused on purpose (notes/contract.md §1.5: 沿用生成列语义) and its
+  // user error message format is fixed to
+  // "The value specified for generated column '%.*s' in table '%.*s' is not allowed",
+  // so the client visible text is exactly the generated column one and the
+  // "OB_AI_COLUMN" prefix can not be prepended here. The ai column itself is
+  // recognisable from the reported table/column pair and the errno 5290.
+  LOG_USER_ERROR(OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN,
+                 column_name.length(), column_name.ptr(),
+                 table_name.length(), table_name.ptr());
+  return ret;
+}
+
+// AI COLUMN: the two hidden companion columns of an ai column.
+// The ids are carried by the ai column metadata, the naming convention
+// OB_AI_COLUMN_STATUS_COLUMN_PREFIX/OB_AI_COLUMN_SRCVER_COLUMN_PREFIX
+// (share/schema/ob_column_schema.h) is used as a fallback.
+int ObDMLResolver::get_ai_companion_column(const ObTableSchema &table,
+                                           const ObColumnSchemaV2 &ai_column,
+                                           const bool want_status_column,
+                                           const ObColumnSchemaV2 *&companion)
+{
+  int ret = OB_SUCCESS;
+  const ObAIColumnSpec &ai_spec = ai_column.get_ai_spec();
+  const uint64_t companion_id = want_status_column ? ai_spec.status_column_id_
+                                                   : ai_spec.srcver_column_id_;
+  companion = OB_INVALID_ID == companion_id ? NULL : table.get_column_schema(companion_id);
+  if (NULL != companion) {
+    // the companion column id is recorded by the DDL
+  } else if (OB_UNLIKELY(ai_column.get_column_name_str().empty())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid ai column name", K(ret), K(ai_column));
+  } else {
+    // fall back to the naming convention
+    const ObString &ai_column_name = ai_column.get_column_name_str();
+    const ObString prefix = ObString::make_string(
+        want_status_column ? OB_AI_COLUMN_STATUS_COLUMN_PREFIX
+                           : OB_AI_COLUMN_SRCVER_COLUMN_PREFIX);
+    for (ObTableSchema::const_column_iterator iter = table.column_begin();
+         OB_SUCC(ret) && iter != table.column_end() && NULL == companion; ++iter) {
+      const ObColumnSchemaV2 *column = *iter;
+      const ObString name = NULL == column ? ObString() : column->get_column_name_str();
+      if (NULL == column) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("column schema is null", K(ret));
+      } else if (!column->is_ai_status_column()) {
+        // not a companion column
+      } else if (name.length() != prefix.length() + ai_column_name.length()) {
+        // not the companion of this ai column
+      } else if (0 != MEMCMP(name.ptr(), prefix.ptr(), prefix.length())) {
+        // a different prefix
+      } else if (0 != MEMCMP(name.ptr() + prefix.length(),
+                             ai_column_name.ptr(),
+                             ai_column_name.length())) {
+        // the companion of another ai column
+      } else {
+        companion = column;
+      }
+    }
+  }
+  return ret;
+}
+
+// AI COLUMN: dependency columns of an ai column, recorded by the DDL in the ai
+// column metadata. get_cascaded_column_ids() only works while resolving the
+// column definition itself (it reads a resolve time bit set), so it is used as a
+// fallback only.
+int ObDMLResolver::get_ai_dep_column_ids(const ObColumnSchemaV2 &ai_column,
+                                         ObIArray<uint64_t> &dep_column_ids)
+{
+  int ret = OB_SUCCESS;
+  const ObAIColumnSpec &ai_spec = ai_column.get_ai_spec();
+  if (!ai_spec.dep_column_ids_.empty()) {
+    if (OB_FAIL(append(dep_column_ids, ai_spec.dep_column_ids_))) {
+      LOG_WARN("failed to get ai column dependency columns", K(ret), K(ai_column));
+    }
+  } else if (OB_FAIL(ai_column.get_cascaded_column_ids(dep_column_ids))) {
+    LOG_WARN("failed to get ai column dependency columns", K(ret), K(ai_column));
+  }
+  return ret;
+}
+
+int64_t ObDMLResolver::build_ai_srcver_value()
+{
+  // A per-statement monotonic source version. The publish fence compares equality
+  // (see notes/contract.md §3), so a value taken once per statement is enough to
+  // make every row invalidated by this statement distinguishable from the version
+  // that a previous worker request was stamped with.
+  return ObSequence::inc_and_get_max_seq_no();
 }
 
 // Check that a generated column's pad flag is consistent with the session SQL mode.

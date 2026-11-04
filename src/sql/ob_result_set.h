@@ -47,6 +47,10 @@ namespace obmysql
 {
 class ObMySQLField;
 }
+namespace query
+{
+class ObSessionInnerSql;
+}
 namespace sql
 {
 class ObSQLSessionInfo;
@@ -341,6 +345,13 @@ private:
   int open_cmd();
   int open_result();
   int do_open_plan(ObExecContext &ctx);
+  // AI COLUMN: strict read, fail the statement when any row of a referenced ai
+  // column is not ready. A no-op when the plan references no ai column.
+  int check_ai_column_strict_read(ObPhysicalPlan &plan);
+  int check_ai_column_ready(query::ObSessionInnerSql &inner_sql,
+                            const common::ObString &database_name,
+                            const common::ObString &table_name,
+                            const common::ObString &column_name);
   int do_close_plan(int errcode, ObExecContext &ctx);
   int deal_feedback_info(ObPhysicalPlan *physical_plan, bool is_rollback, ObExecContext &ctx);
   bool transaction_set_violation_and_retry(int &err, int64_t &retry);

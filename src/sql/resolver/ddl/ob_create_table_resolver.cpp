@@ -737,6 +737,34 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
             if (OB_FAIL(column.set_orig_default_value(column.get_cur_default_value()))) {
             }
           }
+          // AI column: validate the definition and build its hidden companion columns
+          if (OB_SUCC(ret) && !is_create_table_as) {
+            const ParseNode *ai_node = ObDDLResolver::find_ai_column_node(*element);
+            ObSEArray<ObColumnSchemaV2, 2> ai_hidden_cols;
+            if (NULL == ai_node) {
+              // not an AI column
+            } else if (OB_FAIL(ObDDLResolver::resolve_ai_column_attribute(
+                         column, *ai_node, table_schema, resolved_cols,
+                         *allocator_, session_info_, schema_checker_))) {
+              SQL_RESV_LOG(WARN, "fail to resolve ai column attribute", K(ret), K(column));
+            } else {
+              const uint64_t status_column_id = gen_column_id();
+              const uint64_t srcver_column_id = gen_column_id();
+              if (OB_FAIL(ObDDLResolver::build_ai_column_hidden_columns(
+                      column, status_column_id, srcver_column_id,
+                      *allocator_, ai_hidden_cols))) {
+                SQL_RESV_LOG(WARN, "fail to build ai column hidden columns", K(ret));
+              } else if (OB_FAIL(column.set_orig_default_value(column.get_cur_default_value()))) {
+              } else {
+                for (int64_t i = 0; OB_SUCC(ret) && i < ai_hidden_cols.count(); ++i) {
+                  ObColumnSchemaV2 &hidden_col = ai_hidden_cols.at(i);
+                  if (OB_FAIL(resolved_cols.push_back(hidden_col))) {
+                    SQL_RESV_LOG(WARN, "fail to push back ai column hidden column", K(ret));
+                  }
+                }
+              }
+            }
+          }
           if (OB_SUCC(ret)){
             stat.column_id_ = column.get_column_id();
             if (stat.is_primary_key_) {

@@ -1,0 +1,198 @@
+#owner: ai-column
+#owner group: seekdb
+#description: AI COLUMN asynchronous worker.
+#             Wait for readiness after INSERT, grouped visibility (both AI
+#             columns of a row become non NULL together, never half published),
+#             the result type hint that the DDL appends to the prompt,
+#             automatic retry after injected HTTP 500, terminal FAILED once
+#             max_retries is exhausted, and late result protection.
+#
+#require: python3 (>= 3.7) on PATH
+#require: AI_COLUMN_MOCK_PORT=19120 - TCP port of the local mock AI service
+#         (default 19120; when you override it, also change the endpoint URLs
+#         below, they are the only hard coded port literals)
+#require: run from tools/deploy, e.g.
+#         ./obd.sh mysqltest -n test --suite ai_function --test-set ai_column_worker
+#
+# Timing: the mock is told to answer slowly (delay_ms) where a test needs to
+# observe the PENDING window, and every wait is a poll loop
+# (mysql_test/include/wait_condition.inc, 0.1s per iteration, 60s budget), not
+# a fixed sleep.  Fixed --sleep is only used where the assertion is "nothing
+# happens any more".
+#
+--echo # expected output is generated on first run: mysqltest --record
+
+connection default;
+
+--let $wait_timeout= 60
+
+# ---------------------------------------------------------------------------
+# self cleaning
+# ---------------------------------------------------------------------------
+--disable_warnings
+drop table if exists t_ai_group;
+drop table if exists t_ai_worker_retry;
+drop table if exists t_ai_worker_fail;
+drop table if exists t_ai_worker_late;
+--enable_warnings
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_doc_endpoint');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_doc_model');
+
+# ---------------------------------------------------------------------------
+# local mock AI service, logical model and endpoint
+# ---------------------------------------------------------------------------
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --stop-if-running
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --seed 20250101 --dim 4 > /tmp/ai_column_mock.log 2>&1 &
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --wait-ready
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --reset
+
+call DBMS_AI_SERVICE.CREATE_AI_MODEL(
+  'mock_doc_model', '{
+    "type": "completion",
+    "model_name": "mock-complete"
+ }');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT (
+  'mock_doc_endpoint', '{
+    "ai_model_name": "mock_doc_model",
+    "url": "http://127.0.0.1:19120/v1/chat/completions",
+    "access_key": "sk-mock",
+    "request_model_name": "mock-complete",
+    "provider": "openai"
+  }');
+
+# ---------------------------------------------------------------------------
+# tables: one two column group, one retry table, one terminal failure table,
+# one late result table
+# ---------------------------------------------------------------------------
+create table t_ai_group (
+  id       bigint primary key,
+  content  varchar(8192),
+  language varchar(32) AI COLUMN (
+    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content))
+  ) WITH (sync_mode='async', max_retries=3),
+  tags json AI COLUMN (
+    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=TAGS]] Tags for: ', content))
+  ) WITH (sync_mode='async', max_retries=3)
+);
+create table t_ai_worker_retry (
+  id       bigint primary key,
+  content  varchar(8192),
+  language varchar(32) AI COLUMN (
+    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content))
+  ) WITH (sync_mode='async', max_retries=3)
+);
+create table t_ai_worker_fail (
+  id       bigint primary key,
+  content  varchar(8192),
+  language varchar(32) AI COLUMN (
+    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content))
+  ) WITH (sync_mode='async', max_retries=1)
+);
+create table t_ai_worker_late (
+  id      bigint primary key,
+  content varchar(8192),
+  summary varchar(64) AI COLUMN (
+    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=ECHO]] Note: ', content))
+  ) WITH (sync_mode='async', max_retries=3)
+);
+show ai columns from t_ai_group;
+
+# ---------------------------------------------------------------------------
+# 1. after INSERT, poll until the row is ready
+# ---------------------------------------------------------------------------
+insert into t_ai_group (id, content) values
+  (1, '[[LANG=Japanese]] [[TAGS=news,tech]] first row');
+let $wait_condition = select count(*) = 1 from t_ai_group where id = 1 and language = 'Japanese' and tags is not null;
+--source mysql_test/include/wait_condition.inc
+select id, language, json_length(tags) from t_ai_group where id = 1;
+
+# ---------------------------------------------------------------------------
+# 2. grouped visibility: a dependency update invalidates the whole group at
+#    once and publishes it at once, no row may ever show a half ready group
+# ---------------------------------------------------------------------------
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"delay_ms":2000}'
+update t_ai_group set content = '[[LANG=German]] [[TAGS=update]] second row' where id = 1;
+select id, language, tags from t_ai_group where id = 1;
+select count(*) from t_ai_group where id = 1 and ((language is null) <> (tags is null));
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"delay_ms":0}'
+let $wait_condition = select language = 'German' from t_ai_group where id = 1;
+--source mysql_test/include/wait_condition.inc
+select count(*) from t_ai_group where id = 1 and ((language is null) <> (tags is null));
+select id, language, json_length(tags) from t_ai_group where id = 1;
+
+# ---------------------------------------------------------------------------
+# 2b. result type hint: the DDL persists a hint per result type (design 7.1) and
+#     the worker must append it to the prompt, so the mock has to have seen the
+#     word "json" although no column expression of this case contains it.
+#     The assertion must run HERE, right after the step that generates the JSON AI
+#     column (t_ai_group.tags): every following step starts with --reset and the
+#     mock clears its recorded requests on reset, so the json prompts of step 1/2
+#     would no longer be visible there.
+#     --assert-contains exits non zero when no recorded prompt carries it, which
+#     fails the case; for debugging use --print-state --contains json instead.
+# ---------------------------------------------------------------------------
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --assert-contains json
+
+# ---------------------------------------------------------------------------
+# 3. automatic retry: two injected HTTP 500 are absorbed by max_retries=3
+# ---------------------------------------------------------------------------
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --reset
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"fail_times":2,"fail_status":500}'
+insert into t_ai_worker_retry (id, content) values
+  (1, '[[LANG=Spanish]] retry me');
+let $wait_condition = select language = 'Spanish' from t_ai_worker_retry where id = 1;
+--source mysql_test/include/wait_condition.inc
+select id, language from t_ai_worker_retry where id = 1;
+# expected: failed=2 attempts then one success, i.e. total=3
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --print-state
+
+# ---------------------------------------------------------------------------
+# 4. terminal FAILED: max_retries=1 is exhausted after one automatic retry,
+#    the value stays NULL and no further attempt is made
+# ---------------------------------------------------------------------------
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --reset
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"fail_times":100,"fail_status":500}'
+insert into t_ai_worker_fail (id, content) values
+  (1, '[[LANG=Never]] doomed');
+--sleep 5
+select id, language from t_ai_worker_fail where id = 1;
+# expected: total=2 failed=2 (initial attempt + 1 automatic retry)
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --print-state
+# the task is terminal now: nothing is retried any more
+--sleep 3
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --print-state
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"fail_times":0}'
+
+# ---------------------------------------------------------------------------
+# 5. late result protection: the row is updated while its first generation is
+#    still in flight, the newer result must win and the stale one is discarded
+# ---------------------------------------------------------------------------
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --reset
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"delay_ms":3000}'
+insert into t_ai_worker_late (id, content) values
+  (1, '[[ECHO=old]] first version');
+--sleep 1
+update t_ai_worker_late set content = '[[ECHO=new]] second version' where id = 1;
+select id, summary from t_ai_worker_late where id = 1;
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"delay_ms":0}'
+let $wait_condition = select summary = 'new' from t_ai_worker_late where id = 1;
+--source mysql_test/include/wait_condition.inc
+select id, summary from t_ai_worker_late where id = 1;
+# the stale response arrives about now; it must not overwrite the newer value
+--sleep 4
+select id, summary from t_ai_worker_late where id = 1;
+
+# ---------------------------------------------------------------------------
+# self cleaning
+# ---------------------------------------------------------------------------
+--disable_warnings
+drop table if exists t_ai_group;
+drop table if exists t_ai_worker_retry;
+drop table if exists t_ai_worker_fail;
+drop table if exists t_ai_worker_late;
+--enable_warnings
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_doc_endpoint');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_doc_model');
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --stop

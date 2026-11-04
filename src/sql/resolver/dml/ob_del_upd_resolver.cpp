@@ -128,8 +128,18 @@ int ObDelUpdResolver::resolve_assignments(const ParseNode &parse_node,
         assignment.column_expr_ = column->expr_;
         ObRawExpr *expr = value_list.at(i);
         bool is_generated_column = true;
+        bool is_ai_column = false;
         // Mysql only allows updating generated columns to their default value
         if (OB_FAIL(check_basic_column_generated(ref_expr, stmt, is_generated_column))) {
+        } else if (OB_FAIL(check_basic_column_ai(ref_expr, stmt, is_ai_column))) {
+        } else if (is_ai_column) {
+          // AI COLUMN: an ai column is produced by the background worker, a user
+          // statement must not write it, not even with the DEFAULT keyword.
+          ret = OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN;
+          if (OB_FAIL(raise_ai_column_write_error(ref_expr->get_column_name(),
+                                                 ref_expr->get_table_name()))) {
+            LOG_WARN("failed to raise ai column write error", K(ret));
+          }
         } else {
           if (T_DEFAULT == expr->get_expr_type()) {
             ObDefaultValueUtils utils(stmt, &params_, this);
@@ -518,6 +528,10 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
                                                                  assigns.at(i).assignments_,
                                                                  update_with_vector_index))) {
     } else {
+      // AI COLUMN: the source version used to invalidate ai columns. It is taken
+      // once per statement and per table, all rows invalidated by this statement
+      // share it, which is enough because the publish fence compares equality.
+      int64_t ai_srcver = -1;
       for (ObTableSchema::const_column_iterator iter = table_schema->column_begin();
           (OB_SUCCESS == ret && iter != table_schema->column_end()); ++iter) {
         ColumnItem *col_item = NULL;
@@ -534,10 +548,28 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
                                                  trigger_exist,
                                                  *column_schema,
                                                  need_assigned))) {
-        } else if (FALSE_IT(need_assigned = need_assigned || 
+        } else if (FALSE_IT(need_assigned = need_assigned ||
+                                            // AI COLUMN: an insert or an upsert always
+                                            // invalidates every ai column of the row
+                                            (column_schema->is_ai_column() && T_INSERT_SCOPE == scope) ||
                                             ((column_schema->is_vec_hnsw_vid_column() ||
                                               column_schema->is_vec_ivf_center_id_column()) && 
                                              (update_with_vector_index || T_INSERT_SCOPE == scope)))) {
+        } else if (need_assigned && column_schema->is_ai_column()) {
+          // AI COLUMN: invalidate the stored result and mark the row pending in the
+          // same statement and transaction: c = NULL, __ai_status_c = 1,
+          // __ai_srcver_c = <per statement sequence value>. The row status is the
+          // durable task marker, there is no extra task write on the DML path.
+          if (-1 == ai_srcver) {
+            ai_srcver = ObDMLResolver::build_ai_srcver_value();
+          }
+          if (OB_FAIL(build_ai_column_invalidation(*table_item,
+                                                  *table_schema,
+                                                  *column_schema,
+                                                  ai_srcver,
+                                                  assigns))) {
+            LOG_WARN("failed to build ai column invalidation assignments", K(ret), KPC(column_schema));
+          }
         } else if (need_assigned) {
           // for insert scope, on duplicate key update column list already
           // exists in insert list, therefore, only need to add assignment.
@@ -618,6 +650,93 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
       if (OB_FAIL(check_heap_table_update(assigns.at(i)))) {
       }
     }
+  }
+  return ret;
+}
+
+// AI COLUMN: status values written into __ai_status_c, see notes/contract.md §1.2.
+static const int64_t AI_COLUMN_STATUS_PENDING = 1;
+
+int ObDelUpdResolver::add_ai_implicit_assignment(const TableItem &table_item,
+                                                 const ObColumnSchemaV2 &column_schema,
+                                                 ObRawExpr *value_expr,
+                                                 ObIArray<ObTableAssignment> &assigns)
+{
+  int ret = OB_SUCCESS;
+  ObAssignment assignment;
+  ObSEArray<ObColumnRefRawExpr *, 1> col_exprs;
+  ColumnItem *col_item = NULL;
+  ObDMLStmt *stmt = get_stmt();
+  if (OB_ISNULL(params_.expr_factory_) || OB_ISNULL(params_.allocator_)
+      || OB_ISNULL(session_info_) || OB_ISNULL(stmt) || OB_ISNULL(value_expr)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid resolver status", K(ret), KP_(params_.expr_factory), K(stmt), KP(value_expr));
+  } else if (OB_FAIL(add_column_to_stmt(table_item, column_schema, col_exprs))) {
+  } else if (col_exprs.empty()) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(col_item = stmt->get_column_item_by_id(table_item.table_id_,
+                                                             col_exprs.at(0)->get_column_id()))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    assignment.column_expr_ = col_item->expr_;
+    assignment.expr_ = value_expr;
+    assignment.is_implicit_ = true;
+    if (OB_FAIL(ObRawExprUtils::build_column_conv_expr(*params_.expr_factory_,
+                                                      *params_.allocator_,
+                                                      *col_item->get_expr(),
+                                                      assignment.expr_,
+                                                      session_info_))) {
+    } else if (OB_FAIL(add_assignment(assigns, &table_item, col_item, assignment))) {
+    }
+  }
+  return ret;
+}
+
+int ObDelUpdResolver::build_ai_column_invalidation(const TableItem &table_item,
+                                                   const ObTableSchema &table_schema,
+                                                   const ObColumnSchemaV2 &ai_column,
+                                                   const int64_t ai_srcver,
+                                                   ObIArray<ObTableAssignment> &assigns)
+{
+  int ret = OB_SUCCESS;
+  const ObColumnSchemaV2 *status_column = NULL;
+  const ObColumnSchemaV2 *srcver_column = NULL;
+  ObRawExpr *null_expr = NULL;
+  ObConstRawExpr *status_expr = NULL;
+  ObConstRawExpr *srcver_expr = NULL;
+  if (OB_ISNULL(params_.expr_factory_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_UNLIKELY(ai_srcver <= 0)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid ai column source version", K(ret), K(ai_srcver));
+  } else if (OB_FAIL(ObDMLResolver::get_ai_companion_column(table_schema, ai_column,
+                                                            true, status_column))) {
+  } else if (OB_ISNULL(status_column)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("ai column status column not found", K(ret), K(ai_column));
+  } else if (OB_FAIL(ObDMLResolver::get_ai_companion_column(table_schema, ai_column,
+                                                            false, srcver_column))) {
+  } else if (OB_ISNULL(srcver_column)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("ai column source version column not found", K(ret), K(ai_column));
+  } else if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, null_expr))) {
+  } else if (OB_FAIL(ObRawExprUtils::build_const_int_expr(*params_.expr_factory_,
+                                                          status_column->get_data_type(),
+                                                          AI_COLUMN_STATUS_PENDING,
+                                                          status_expr))) {
+  } else if (OB_FAIL(ObRawExprUtils::build_const_int_expr(*params_.expr_factory_,
+                                                          srcver_column->get_data_type(),
+                                                          ai_srcver,
+                                                          srcver_expr))) {
+  } else if (OB_FAIL(add_ai_implicit_assignment(table_item, ai_column, null_expr, assigns))) {
+    // 1. the stale result is cleared, an invalidated row reads as NULL
+  } else if (OB_FAIL(add_ai_implicit_assignment(table_item, *status_column,
+                                                status_expr, assigns))) {
+  } else if (OB_FAIL(add_ai_implicit_assignment(table_item, *srcver_column,
+                                                srcver_expr, assigns))) {
+  }
+  if (OB_SUCC(ret)) {
+    LOG_DEBUG("build ai column invalidation assignments", K(ai_column), K(ai_srcver));
   }
   return ret;
 }
@@ -712,6 +831,11 @@ int ObDelUpdResolver::check_need_assignment(const common::ObIArray<ObAssignment>
   ObDMLStmt *stmt = get_stmt();
   if (OB_ISNULL(stmt)) {
     ret = OB_NOT_INIT;
+  } else if (column.is_ai_status_column()) {
+    // AI COLUMN: the hidden companion columns (__ai_status_<c>, __ai_srcver_<c>)
+    // are never assigned on their own, they are always written together with
+    // their ai column by build_ai_column_invalidation().
+    need_assign = false;
   } else if (column.is_generated_column()) {
     if (OB_FAIL(ObResolverUtils::check_whether_assigned(stmt, assigns, table_id, column.get_column_id(), exist))) {
     } else if (!exist) {
@@ -725,6 +849,24 @@ int ObDelUpdResolver::check_need_assignment(const common::ObIArray<ObAssignment>
       if (OB_SUCC(ret) && exist) {
         //the generated column isn't assigned, but the cascaded columns have been assigned
         //so assign the generated column
+        need_assign = true;
+      }
+    }
+  } else if (column.is_ai_column()) {
+    // AI COLUMN: the ai column result is derived from its dependency columns.
+    // Once any dependency column is assigned by this statement the stored result
+    // becomes stale, so the ai column must be invalidated in the same statement.
+    if (OB_FAIL(ObResolverUtils::check_whether_assigned(stmt, assigns, table_id, column.get_column_id(), exist))) {
+    } else if (!exist) {
+      ObArray<uint64_t> dep_columns;
+      if (OB_FAIL(ObDMLResolver::get_ai_dep_column_ids(column, dep_columns))) {
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && !exist && i < dep_columns.count(); ++i) {
+        if (OB_FAIL(ObResolverUtils::check_whether_assigned(stmt, assigns, table_id, dep_columns.at(i), exist))) {
+        }
+      }
+      if (OB_SUCC(ret) && exist) {
+        //a dependency column of the ai column has been assigned
         need_assign = true;
       }
     }
@@ -1829,6 +1971,92 @@ int ObDelUpdResolver::generate_column_conv_function(ObInsertTableInfo &table_inf
       }
     } //end for
   }
+  // AI COLUMN: an insert always writes the ai columns as invalidated/pending,
+  // this overrides the default value expression built above.
+  if (OB_SUCC(ret)) {
+    OZ (build_ai_column_insert_values(table_info));
+  }
+  return ret;
+}
+
+int ObDelUpdResolver::build_ai_column_insert_values(ObInsertTableInfo &table_info)
+{
+  int ret = OB_SUCCESS;
+  const ObTableSchema *table_schema = NULL;
+  int64_t ai_srcver = -1;
+  if (OB_ISNULL(schema_checker_) || OB_ISNULL(params_.expr_factory_)
+      || OB_ISNULL(params_.allocator_) || OB_ISNULL(session_info_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(schema_checker_->get_table_schema(table_info.ref_table_id_, table_schema))) {
+  } else if (OB_ISNULL(table_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("fail to get table schema", K(ret), K(table_info.ref_table_id_));
+  } else if (OB_UNLIKELY(table_info.column_conv_exprs_.count() < table_info.column_exprs_.count())) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    for (ObTableSchema::const_column_iterator iter = table_schema->column_begin();
+         OB_SUCC(ret) && iter != table_schema->column_end(); ++iter) {
+      const ObColumnSchemaV2 *ai_column = *iter;
+      // 0: the ai column itself, 1: the status column, 2: the source version column
+      const ObColumnSchemaV2 *ai_columns[3] = { ai_column, NULL, NULL };
+      if (OB_ISNULL(ai_column)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("column schema is null", K(ret));
+      } else if (!ai_column->is_ai_column()) {
+        continue;
+      } else if (OB_FAIL(ObDMLResolver::get_ai_companion_column(*table_schema, *ai_column,
+                                                                true, ai_columns[1]))) {
+      } else if (OB_ISNULL(ai_columns[1])) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("ai column status column not found", K(ret), KPC(ai_column));
+      } else if (OB_FAIL(ObDMLResolver::get_ai_companion_column(*table_schema, *ai_column,
+                                                                false, ai_columns[2]))) {
+      } else if (OB_ISNULL(ai_columns[2])) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("ai column source version column not found", K(ret), KPC(ai_column));
+      } else if (-1 == ai_srcver) {
+        ai_srcver = ObDMLResolver::build_ai_srcver_value();
+      }
+      for (int64_t k = 0; OB_SUCC(ret) && k < 3; ++k) {
+        const ObColumnSchemaV2 *column_schema = ai_columns[k];
+        ObRawExpr *value_expr = NULL;
+        int64_t idx = OB_INVALID_INDEX;
+        if (OB_ISNULL(column_schema)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (0 == k) {
+          // the stale result is cleared, so an invalidated row reads as NULL
+          OZ (ObRawExprUtils::build_null_expr(*params_.expr_factory_, value_expr));
+        } else {
+          ObConstRawExpr *const_expr = NULL;
+          OZ (ObRawExprUtils::build_const_int_expr(*params_.expr_factory_,
+                                                   column_schema->get_data_type(),
+                                                   1 == k ? AI_COLUMN_STATUS_PENDING : ai_srcver,
+                                                   const_expr));
+          value_expr = const_expr;
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && OB_INVALID_INDEX == idx
+                            && i < table_info.column_exprs_.count(); ++i) {
+          if (OB_ISNULL(table_info.column_exprs_.at(i))) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (table_info.column_exprs_.at(i)->get_column_id()
+                     == column_schema->get_column_id()) {
+            idx = i;
+          }
+        }
+        if (OB_FAIL(ret)) {
+        } else if (OB_INVALID_INDEX == idx) {
+          // this column is not written by the insert statement, nothing to do
+        } else if (OB_FAIL(ObRawExprUtils::build_column_conv_expr(*params_.expr_factory_,
+                                                                  *params_.allocator_,
+                                                                  *table_info.column_exprs_.at(idx),
+                                                                  value_expr,
+                                                                  session_info_))) {
+        } else {
+          table_info.column_conv_exprs_.at(idx) = value_expr;
+        }
+      } // end for
+    }   // end for
+  }
   return ret;
 }
 
@@ -2194,6 +2422,11 @@ int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
       for (int64_t i = 0; OB_SUCC(ret) && i < N; i++) {
         uint64_t column_id = column_items.at(i).column_id_;
         bool is_duplicate = false;
+        // AI COLUMN: an insert without a column list maps the values one to one
+        // onto the table columns, including the ai columns (see
+        // notes/integration-decisions.md D2): an explicit value in an ai column
+        // position is rejected in resolve_insert_values(), the DEFAULT keyword is
+        // accepted there as "not assigned".
         if (OB_FAIL(check_insert_column_duplicate(column_id, is_duplicate))) {
         } else if (is_duplicate) {
           ret = OB_ERR_FIELD_SPECIFIED_TWICE;
@@ -2321,10 +2554,33 @@ int ObDelUpdResolver::resolve_insert_values(const ParseNode *node,
             uint64_t column_id = column_expr->get_column_id();
             ObDefaultValueUtils utils(del_upd_stmt, &params_, this);
             bool is_generated_column = false;
+            bool is_ai_column = false;
             if (OB_FAIL(resolve_sql_expr(*value_node, expr))) {
             } else if (OB_ISNULL(expr)) {
               ret = OB_ERR_UNEXPECTED;
               LOG_ERROR("fail to resolve sql expr", K(ret), K(expr));
+            } else if (OB_FAIL(check_basic_column_generated(column_expr, del_upd_stmt,
+                                                            is_generated_column))) {
+            } else if (OB_FAIL(check_basic_column_ai(column_expr, del_upd_stmt,
+                                                     is_ai_column))) {
+            } else if (is_ai_column && T_DEFAULT == expr->get_expr_type()) {
+              // AI COLUMN (notes/integration-decisions.md D2): DEFAULT in an ai
+              // column position means "not assigned", so the invalidation values
+              // (NULL / __ai_status_c = 1 / __ai_srcver_c = <seq>) injected in
+              // build_ai_column_insert_values() are used. Only a placeholder is
+              // needed here to keep the value list arity.
+              if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, expr))) {
+              }
+            } else if (is_ai_column) {
+              // AI COLUMN: the value list must map one to one onto the table
+              // columns, so a value in an ai column position is an explicit write
+              // of the ai column and is rejected exactly like an explicit column
+              // list insert does.
+              ret = OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN;
+              if (OB_FAIL(raise_ai_column_write_error(column_expr->get_column_name(),
+                                                     column_expr->get_table_name()))) {
+                LOG_WARN("failed to raise ai column write error", K(ret));
+              }
             } else if (T_DEFAULT == expr->get_expr_type()) {
               ColumnItem *column_item = NULL;
               if (OB_ISNULL(column_item = del_upd_stmt->get_column_item_by_id(table_info.table_id_,
@@ -2340,8 +2596,6 @@ int ObDelUpdResolver::resolve_insert_values(const ParseNode *node,
                 }
               } else if (OB_FAIL(utils.resolve_default_expr(*column_item, expr, T_INSERT_SCOPE))) {
               }
-            } else if (OB_FAIL(check_basic_column_generated(column_expr, del_upd_stmt,
-                                                            is_generated_column))) {
             } else if (is_generated_column) {
               ret = OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN;
               ColumnItem *orig_col_item = NULL;

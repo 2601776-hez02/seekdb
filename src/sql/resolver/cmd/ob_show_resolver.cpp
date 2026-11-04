@@ -150,7 +150,8 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             && OB_UNLIKELY(parse_tree.type_ != T_SHOW_ENGINE)
             && OB_UNLIKELY(parse_tree.type_ != T_SHOW_OPEN_TABLES)
             && OB_UNLIKELY(parse_tree.type_ != T_SHOW_CREATE_USER)
-            && OB_UNLIKELY(parse_tree.type_ != T_SHOW_CHECK_TABLE)) {
+            && OB_UNLIKELY(parse_tree.type_ != T_SHOW_CHECK_TABLE)
+            && OB_UNLIKELY(parse_tree.type_ != T_SHOW_AI_COLUMNS)) {
     ret = OB_ERR_UNEXPECTED;
   } else {
     real_id = 1;
@@ -650,6 +651,51 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_INDEXES);
                 GEN_SQL_STEP_2(ObShowSqlSet::SHOW_INDEXES, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_TABLE_INDEX_TNAME, show_table_id);
               }
+            }
+          }
+        }();
+        break;
+      }
+      case T_SHOW_AI_COLUMNS: {
+        [&] {
+          if (OB_UNLIKELY(parse_tree.num_child_ != 2 || NULL == parse_tree.children_)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            ObString show_db_name;
+            uint64_t show_db_id = OB_INVALID_ID;
+            ObString show_table_name;
+            uint64_t show_table_id = OB_INVALID_ID;
+            bool is_view = false;
+            show_resv_ctx.stmt_type_ = stmt::T_SHOW_AI_COLUMNS;
+            if (OB_FAIL(resolve_show_from_table(parse_tree.children_[0], parse_tree.children_[1],
+                                                database_name.empty(), T_SHOW_AI_COLUMNS, real_id,
+                                                show_db_name, show_db_id, show_table_name,
+                                                show_table_id, is_view))) {
+            } else if (OB_FAIL(stmt_need_privs.need_privs_.init(3))) {
+            } else {
+              ObNeedPriv need_priv;
+              //Priv check: global select || db select || table acc
+              need_priv.priv_level_ = OB_PRIV_USER_LEVEL;
+              need_priv.priv_set_ = OB_PRIV_SELECT;
+              stmt_need_privs.need_privs_.push_back(need_priv);
+
+              need_priv.priv_level_ = OB_PRIV_DB_LEVEL;
+              need_priv.priv_set_ = OB_PRIV_SELECT;
+              need_priv.db_ = show_db_name;
+              stmt_need_privs.need_privs_.push_back(need_priv);
+
+              need_priv.priv_level_ = OB_PRIV_TABLE_LEVEL;
+              need_priv.priv_set_ = OB_PRIV_SELECT;
+              need_priv.db_ = show_db_name;
+              need_priv.table_ = show_table_name;
+              stmt_need_privs.need_privs_.push_back(need_priv);
+              if (OB_FAIL(schema_checker_->check_priv_or(session_priv, enable_role_id_array, stmt_need_privs))) {
+              }
+            }
+            if (OB_SUCC(ret)) {
+              GEN_SQL_STEP_1(ObShowSqlSet::SHOW_AI_COLUMNS);
+              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_AI_COLUMNS, OB_SYS_DATABASE_NAME,
+                             OB_ALL_AI_COLUMN_TNAME, show_table_id);
             }
           }
         }();
@@ -2412,6 +2458,12 @@ DEFINE_SHOW_CLAUSE_SET(SHOW_INDEXES,
                        "SELECT `TABLE` AS `Table`, NON_UNIQUE AS Non_unique, KEY_NAME AS Key_name, SEQ_IN_INDEX AS Seq_in_index, COLUMN_NAME AS Column_name, COLLATION AS Collation, CARDINALITY AS Cardinality, SUB_PART AS Sub_part, PACKED AS Packed, `NULL` AS `Null`, INDEX_TYPE AS Index_type, `COMMENT` AS `Comment`, INDEX_COMMENT AS Index_comment, IS_VISIBLE AS Visible, EXPRESSION AS Expression FROM %s.%s  where table_id = %ld AND is_column_visible = true",
                        R"(SELECT "TABLE" AS "TABLE", "NON_UNIQUE" AS "NON_UNIQUE", "KEY_NAME" AS "KEY_NAME", "SEQ_IN_INDEX" AS "SEQ_IN_INDEX", "COLUMN_NAME" AS "COLUMN_NAME", "COLLATION" AS "COLLATION", "CARDINALITY" AS "CARDINALITY", "SUB_PART" AS "SUB_PART", "PACKED" AS "PACKED", "NULL" AS "NULL", "INDEX_TYPE" AS "INDEX_TYPE", "COMMENT" AS "COMMENT", )"
                        R"(INDEX_COMMENT" AS "INDEX_COMMENT", "IS_VISIBLE" AS "VISIBLE", "EXPRESSION" AS "EXPRESSION" FROM %s.%s  WHERE TABLE_ID = %ld AND IS_COLUMN_VISIBLE = 1")",
+                       NULL);
+// SHOW AI COLUMNS FROM t: one row for each AI column of the table
+DEFINE_SHOW_CLAUSE_SET(SHOW_AI_COLUMNS,
+                       NULL,
+                       "SELECT table_name AS `Table`, column_name AS `Column`, ai_function AS `AIFunction`, model_name AS `ModelName`, result_type AS `ResultType`, dependencies AS `Dependencies`, case sync_mode when 0 then 'async' else 'invalid' end AS `SyncMode`, max_retries AS `MaxRetries`, concat('__ai_status_', column_name) AS `StatusColumn`, def_version AS `DefVersion` FROM %s.%s where table_id = %ld ORDER BY column_id ASC",
+                       R"(SELECT "TABLE_NAME" AS "TABLE_NAME", "COLUMN_NAME" AS "COLUMN_NAME", "AI_FUNCTION" AS "AI_FUNCTION", "MODEL_NAME" AS "MODEL_NAME", "RESULT_TYPE" AS "RESULT_TYPE", "DEPENDENCIES" AS "DEPENDENCIES", "SYNC_MODE" AS "SYNC_MODE", "MAX_RETRIES" AS "MAX_RETRIES", "STATUS_COLUMN_ID" AS "STATUS_COLUMN_ID", "DEF_VERSION" AS "DEF_VERSION" FROM %s.%s WHERE TABLE_ID = %ld ORDER BY COLUMN_ID ASC)",
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_EXTENDED_INDEXES,
                        NULL,

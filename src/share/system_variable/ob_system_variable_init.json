@@ -10975,5 +10975,18 @@
     "info_cn": "",
     "background_cn": "",
     "ref_url": ""
+  },
+  "enable_file_sql": {
+    "id": 10754,
+    "name": "enable_file_sql",
+    "default_value": "0",
+    "base_value": "0",
+    "data_type": "bool",
+    "info": "enable the file SQL table functions read_csv, read_json, read_ndjson, read_parquet and glob; local file access still requires secure_file_priv",
+    "flags": "SESSION | GLOBAL | INFLUENCE_PLAN",
+    "publish_version": "1.0.0.0",
+    "info_cn": "",
+    "background_cn": "",
+    "ref_url": ""
   }
 }

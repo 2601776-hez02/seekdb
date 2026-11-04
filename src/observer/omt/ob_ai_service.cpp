@@ -1087,7 +1087,8 @@ int ObAIColumnWorker::claim_row_(ObInnerSQLConnection &conn,
     if (OB_SUCC(ret)) {
       ++claimed_count_;
       LOG_INFO("[AI_COLUMN_WORKER] claimed row", K(table.table_id_), K(row.row_key_),
-               "column_count", items.count(), "request_id", request_id);
+               "column_count", items.count(), "request_id", request_id,
+               "srcver", items.at(0).srcver_, "retry", items.at(0).retry_count_);
       int tmp_ret = insert_task_row_(conn, table, row, items, request_id, task_id);
       if (OB_SUCCESS != tmp_ret) {
         // the task table is observability only: never block generation on it
@@ -1572,7 +1573,8 @@ int ObAIColumnWorker::requeue_or_fail_(const ObAIColumnTargetTable &table,
     }
   }
   LOG_INFO("[AI_COLUMN_WORKER] requeued failed ai columns", K(table.table_id_),
-           K(row.row_key_), "backoff_count", backoffs_.count(), K(now));
+           K(row.row_key_), "backoff_count", backoffs_.count(), K(now),
+           "srcvers", items.at(0).srcver_, "retries", items.at(0).retry_count_);
   return ret;
 }
 

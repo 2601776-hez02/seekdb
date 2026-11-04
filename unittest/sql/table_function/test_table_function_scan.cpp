@@ -47,7 +47,25 @@ TEST(TableFunctionRegistryTest, arity_overloads_are_discoverable_and_ambiguity_i
   EXPECT_EQ(OB_ERR_FUNCTION_UNKNOWN, TableFunctionRegistry::match(ObString("unregistered"), 0, matched));
   ObSEArray<const TableFunctionDescriptor *, 16> all;
   ASSERT_EQ(OB_SUCCESS, TableFunctionRegistry::get_all(all));
-  EXPECT_EQ(8, all.count());
+  // Built-in providers: unnest, generator, json_table, hybrid_search plus the
+  // five file SQL providers (read_csv, read_json, read_ndjson, read_parquet,
+  // glob).
+  EXPECT_EQ(13, all.count());
+  const TableFunctionDescriptor *file_provider = nullptr;
+  ASSERT_EQ(OB_SUCCESS, TableFunctionRegistry::match(ObString("read_csv"), 1, file_provider));
+  EXPECT_EQ(READ_CSV_FUNCTION_ID, file_provider->id_);
+  ASSERT_EQ(OB_SUCCESS, TableFunctionRegistry::match(ObString("read_csv"), 3, file_provider));
+  EXPECT_EQ(READ_CSV_FUNCTION_ID, file_provider->id_);
+  ASSERT_EQ(OB_SUCCESS, TableFunctionRegistry::match(ObString("read_json"), 1, file_provider));
+  EXPECT_EQ(READ_JSON_FUNCTION_ID, file_provider->id_);
+  ASSERT_EQ(OB_SUCCESS, TableFunctionRegistry::match(ObString("read_ndjson"), 1, file_provider));
+  EXPECT_EQ(READ_NDJSON_FUNCTION_ID, file_provider->id_);
+  ASSERT_EQ(OB_SUCCESS, TableFunctionRegistry::match(ObString("read_parquet"), 1, file_provider));
+  EXPECT_EQ(READ_PARQUET_FUNCTION_ID, file_provider->id_);
+  ASSERT_EQ(OB_SUCCESS, TableFunctionRegistry::match(ObString("glob"), 1, file_provider));
+  EXPECT_EQ(GLOB_FUNCTION_ID, file_provider->id_);
+  EXPECT_EQ(OB_ERR_PARAM_SIZE, TableFunctionRegistry::match(ObString("read_parquet"), 2, file_provider));
+  EXPECT_EQ(OB_ERR_PARAM_SIZE, TableFunctionRegistry::match(ObString("glob"), 2, file_provider));
 }
 
 class TableFunctionScanTest : public ::testing::Test

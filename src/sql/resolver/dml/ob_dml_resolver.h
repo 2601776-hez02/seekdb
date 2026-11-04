@@ -209,6 +209,9 @@ public:
   int bind_fixed_table_function(const TableFunctionCall &call, TableItem *&item);
   int bind_unnest_table_function(const TableFunctionCall &call, TableItem *&item);
   int bind_generator_table_function(const TableFunctionCall &call, TableItem *&item);
+  // Binds read_csv/read_json/read_ndjson/read_parquet/glob: the whole file is
+  // inspected at bind time, so the plan carries a fixed column set.
+  int bind_file_table_function(const TableFunctionCall &call, TableItem *&item);
   int bind_hybrid_table_function(const TableFunctionCall &call, TableItem *&item);
   int apply_table_function_aliases(const TableFunctionCall &call, TableItem &item);
   int create_function_scan_item(const TableFunctionCall &call, TableItem *&item);

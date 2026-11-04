@@ -1,0 +1,3 @@
+--disable_warnings
+--exec rm -rf /tmp/seekdb_file_sql
+--enable_warnings

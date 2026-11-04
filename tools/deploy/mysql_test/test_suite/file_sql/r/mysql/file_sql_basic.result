@@ -1,0 +1,47 @@
+#
+# 1. the switch is off by default
+#
+# 2. CSV: header, type inference, quoting, NULL marker
+id	name	score	active	day
+1	alice	1.5	1	2024-01-15
+2	bob, jr	2	0	2024-02-29
+3	carol	NULL	NULL	2024-03-01
+k	len
+1	10
+2	16
+#
+# 3. single file SQL: projection, filter, aggregate, order, limit
+region	cnt	total
+east	2	15
+west	1	20
+name
+alice
+#
+# 4. JSONL: field union, missing fields and type conflicts
+id	name	city	vip
+1	alice	hangzhou	NULL
+2	bob	NULL	NULL
+3	carol	shanghai	1
+cnt
+3
+#
+# 5. Parquet: footer schema, optional columns, snappy pages
+id	name	score
+1	alpha	1.5
+2	NULL	2.5
+3	gamma	NULL
+cnt
+3
+#
+# 6. glob() only discovers files
+file
+/tmp/seekdb_file_sql/basic.csv
+/tmp/seekdb_file_sql/quoted.csv
+/tmp/seekdb_file_sql/sales.csv
+#
+# 7. JOIN across two files stays in the seekdb plan
+name	total
+alice	12.5
+carol	9.5
+#
+# 8. diagnostics

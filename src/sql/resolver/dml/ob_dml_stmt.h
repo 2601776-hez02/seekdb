@@ -299,6 +299,9 @@ struct TableItem
   bool table_function_requires_all_columns_;
   common::ObSEArray<int64_t, 4> function_argument_column_counts_;
   common::ObSEArray<common::ObString, 8> function_column_names_;
+  // Serialized file SQL snapshot (options, path, inferred columns) built at
+  // bind time and copied into the plan by the compile callback.
+  common::ObString file_sql_options_;
   int64_t ddl_schema_version_;
   int64_t ddl_table_id_;
   // table partition

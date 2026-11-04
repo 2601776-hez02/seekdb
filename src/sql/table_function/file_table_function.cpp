@@ -732,7 +732,6 @@ int ObDMLResolver::bind_file_table_function(const TableFunctionCall &call, Table
     OZ (create_function_scan_item(scan_call, item));
   }
   if (OB_SUCC(ret)) {
-    item->table_function_requires_all_columns_ = false;
     for (size_t i = 0; OB_SUCC(ret) && i < columns.size(); ++i) {
       ObObjMeta meta;
       ObAccuracy accuracy;
@@ -749,14 +748,6 @@ int ObDMLResolver::bind_file_table_function(const TableFunctionCall &call, Table
       } else if (OB_FAIL(resolve_function_table_column_item(*item, meta, accuracy, column_name,
                                                             OB_APP_MIN_COLUMN_ID + i,
                                                             column_item))) {
-      } else if (OB_ISNULL(column_item) || OB_ISNULL(column_item->expr_)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else {
-        // ObLogFunctionTable::generate_access_exprs() only forwards columns whose
-        // expression is an explicit reference.  A table function column has no
-        // schema to mark it implicitly, so mark it here; otherwise the scan
-        // operator is planned with no output columns and the projection fails.
-        column_item->expr_->set_explicited_reference();
       }
     }
   }

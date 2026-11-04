@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2025 OceanBase.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -59,23 +59,23 @@ const TableFunctionDescriptor BUILTINS[] = {
   {READ_CSV_FUNCTION_ID, "read_csv", "read_csv(path [, option = value, ...])",
    "Reads one local CSV file; columns and types are inferred from the whole file.",
    1, -1, nullptr, 0, bind_file, create_file_table_scan, nullptr, nullptr, 0,
-   compile_file_table_options},
+   compile_file_table_options, true},
   {READ_JSON_FUNCTION_ID, "read_json", "read_json(path [, option = value, ...])",
    "Reads one local JSON document file with one flat object per line.",
    1, -1, nullptr, 0, bind_file, create_file_table_scan, nullptr, nullptr, 0,
-   compile_file_table_options},
+   compile_file_table_options, true},
   {READ_NDJSON_FUNCTION_ID, "read_ndjson", "read_ndjson(path [, option = value, ...])",
    "Newline delimited JSON; the same reader as read_json.",
    1, -1, nullptr, 0, bind_file, create_file_table_scan, nullptr, nullptr, 0,
-   compile_file_table_options},
+   compile_file_table_options, true},
   {READ_PARQUET_FUNCTION_ID, "read_parquet", "read_parquet(path)",
    "Reads one local Parquet file; columns come from the file footer schema.",
    1, 1, nullptr, 0, bind_file, create_file_table_scan, nullptr, nullptr, 0,
-   compile_file_table_options},
+   compile_file_table_options, true},
   {GLOB_FUNCTION_ID, "glob", "glob(pattern)",
    "Lists the local files matching a glob pattern; the only column is file.",
    1, 1, nullptr, 0, bind_file, create_file_table_scan, nullptr, nullptr, 0,
-   compile_file_table_options},
+   compile_file_table_options, true},
 };
 }
 

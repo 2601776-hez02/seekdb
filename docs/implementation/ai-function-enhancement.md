@@ -121,5 +121,29 @@ Mock AI Service（监听 `0.0.0.0:8000`）的端到端用例。
 
 ## 5. 验证状态
 
-- 逻辑与题面 6 个评分项逐条对照过（见第 1 节表格），行为与参考实现一致。
-- 本机（Windows，无 Linux 构建环境）未做完整编译；Linux 上的复核步骤见第 4 节。
+### 已在 Linux（Alinux3，clang++-17 + 仓库固定依赖）上验证
+
+按发布构建的原始编译契约做语法级检查（`-std=gnu++20 -O2 -fPIC -Wall -Wextra -Werror`，
+`CXX_DEFINES`/`CXX_INCLUDES`/`CXX_FLAGS` 直接取自
+`build_release/src/sql/CMakeFiles/ob_sql.dir/flags.make`），结果：
+
+```
+OK  src/sql/engine/expr/ob_expr_ai/ob_expr_ai_prompt.cpp
+OK  src/sql/engine/expr/ob_expr_ai/ob_expr_ai_complete.cpp
+OK  src/sql/engine/expr/ob_expr_ai/ob_expr_ai_embed.cpp
+OK  src/sql/engine/expr/ob_expr_ai/ob_expr_ai_rerank.cpp
+OK  src/sql/engine/expr/ob_expr_ai/ob_ai_func.cpp
+OK  src/sql/engine/expr/ob_expr_ai/ob_ai_func_client.cpp
+OK  src/sql/engine/expr/ob_expr_ai/ob_ai_func_utils.cpp
+OK  src/share/ai_service/ob_ai_service_struct.cpp
+OK  unittest/sql/engine/expr/ob_expr_ai_prompt_test.cpp
+OK  unittest/sql/engine/expr/test_ob_openai_utils.cpp
+```
+
+`./build.sh release -DNEED_PARSER_CACHE=OFF` 的 CMake configure 也在同一棵树上成功
+（生成了 `build_release/generated` 下的内部表 schema 等生成头）。
+
+### 未验证
+
+- 完整 `make seekdb` / `sql_tests` 链接，以及 mysqltest 的实际输出：本次只做了编译期验证，
+  没有在 4 vCPU 机器上跑完整构建。第 4 节的命令需要在 ≥16 vCPU / 32GB 的机器上执行一次。

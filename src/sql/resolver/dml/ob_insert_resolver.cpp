@@ -832,11 +832,23 @@ int ObInsertResolver::check_insert_select_field(ObInsertStmt &insert_stmt,
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < values_desc.count(); ++i) {
     const ObColumnRefRawExpr *value_desc = values_desc.at(i);
+    bool is_ai_column = false;
     if (OB_ISNULL(value_desc)) {
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(ObDMLResolver::check_basic_column_generated(value_desc,
                                                                    &insert_stmt,
                                                                    is_generated_column))) {
+    } else if (OB_FAIL(ObDMLResolver::check_basic_column_ai(value_desc,
+                                                            &insert_stmt,
+                                                            is_ai_column))) {
+    } else if (is_ai_column) {
+      // AI COLUMN: ai columns are filled by the implicit assignments, so an
+      // insert ... select statement can not provide their values.
+      ret = OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN;
+      if (OB_FAIL(ObDMLResolver::raise_ai_column_write_error(value_desc->get_column_name(),
+                                                             value_desc->get_table_name()))) {
+        LOG_WARN("failed to raise ai column write error", K(ret));
+      }
     } else if (is_generated_column) {
       if (select_stmt.get_table_size() == 1 &&
           select_stmt.get_table_item(0) != NULL &&

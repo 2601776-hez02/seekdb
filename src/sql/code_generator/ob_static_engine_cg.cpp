@@ -5671,6 +5671,136 @@ int ObStaticEngineCG::set_properties_pre(const ObLogPlan &log_plan, ObPhysicalPl
   return ret;
 }
 
+// AI COLUMN: strict read needs the list of ai columns the statement reads. The
+// (database, table, column) triples are collected here because the resolved
+// statement is not available when the plan is opened again (plan cache).
+// Columns that the statement writes are skipped on purpose: an insert/update
+// invalidates the ai column in the same statement, it does not read a value.
+static int collect_written_dml_columns(const ObDMLStmt &stmt,
+                                       ObIArray<uint64_t> &table_ids,
+                                       ObIArray<uint64_t> &column_ids)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<const ObDmlTableInfo*, 2> table_infos;
+  if (!stmt.is_insert_stmt() && !stmt.is_update_stmt() && !stmt.is_delete_stmt()) {
+    // only insert/update/delete write columns of the target table
+  } else if (OB_FAIL(static_cast<const ObDelUpdStmt &>(stmt).get_dml_table_infos(table_infos))) {
+    LOG_WARN("failed to get dml table infos", K(ret));
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_infos.count(); ++i) {
+    const ObDmlTableInfo *table_info = table_infos.at(i);
+    if (OB_ISNULL(table_info)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("dml table info is null", K(ret));
+    } else if (ObDmlTableType::INSERT_TABLE == table_info->table_type_
+               || ObDmlTableType::MERGE_TABLE == table_info->table_type_) {
+      // an insert writes every column of the target table
+      for (int64_t j = 0; OB_SUCC(ret) && j < table_info->column_exprs_.count(); ++j) {
+        const ObColumnRefRawExpr *column_expr = table_info->column_exprs_.at(j);
+        if (OB_ISNULL(column_expr)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(table_ids.push_back(column_expr->get_table_id()))) {
+        } else if (OB_FAIL(column_ids.push_back(column_expr->get_column_id()))) {
+        }
+      }
+    } else if (ObDmlTableType::UPDATE_TABLE == table_info->table_type_) {
+      const ObUpdateTableInfo *upd_table_info = static_cast<const ObUpdateTableInfo*>(table_info);
+      for (int64_t j = 0; OB_SUCC(ret) && j < upd_table_info->assignments_.count(); ++j) {
+        const ObColumnRefRawExpr *column_expr = upd_table_info->assignments_.at(j).column_expr_;
+        if (OB_ISNULL(column_expr)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(table_ids.push_back(column_expr->get_table_id()))) {
+        } else if (OB_FAIL(column_ids.push_back(column_expr->get_column_id()))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+static int collect_ai_column_check_targets(const ObDMLStmt &stmt,
+                                           ObSqlSchemaGuard &sql_schema_guard,
+                                           const ObIArray<uint64_t> &written_table_ids,
+                                           const ObIArray<uint64_t> &written_column_ids,
+                                           ObPhysicalPlan &phy_plan)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<ObColumnRefRawExpr*, 8> column_exprs;
+  ObSEArray<uint64_t, 4> checked_table_ids;
+  ObSEArray<uint64_t, 4> checked_column_ids;
+  if (OB_FAIL(stmt.get_column_exprs(column_exprs))) {
+    LOG_WARN("failed to get stmt column exprs", K(ret));
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < column_exprs.count(); ++i) {
+    const ObColumnRefRawExpr *column_expr = column_exprs.at(i);
+    const TableItem *table_item = NULL;
+    const ObTableSchema *table_schema = NULL;
+    const ObColumnSchemaV2 *column_schema = NULL;
+    bool is_written = false;
+    bool is_checked = false;
+    if (OB_ISNULL(column_expr)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("column expr is null", K(ret));
+    }
+    for (int64_t j = 0; OB_SUCC(ret) && !is_written && j < written_table_ids.count(); ++j) {
+      is_written = written_table_ids.at(j) == column_expr->get_table_id()
+                && written_column_ids.at(j) == column_expr->get_column_id();
+    }
+    for (int64_t j = 0; OB_SUCC(ret) && !is_checked && j < checked_table_ids.count(); ++j) {
+      is_checked = checked_table_ids.at(j) == column_expr->get_table_id()
+                && checked_column_ids.at(j) == column_expr->get_column_id();
+    }
+    if (OB_FAIL(ret)) {
+    } else if (is_written || is_checked) {
+      // the column is written by this statement or already collected
+    } else if (OB_ISNULL(table_item = stmt.get_table_item_by_id(column_expr->get_table_id()))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("table item is null", K(ret), KPC(column_expr));
+    } else if (!table_item->is_basic_table()) {
+      // the ai column of a view/subquery is collected from the child statement
+    } else if (OB_FAIL(sql_schema_guard.get_table_schema(table_item->ref_id_, table_schema))) {
+    } else if (OB_ISNULL(table_schema)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("table schema is null", K(ret), KPC(table_item));
+    } else {
+      column_schema = table_schema->get_column_schema(column_expr->get_column_id());
+      if (NULL == column_schema || !column_schema->is_ai_column()) {
+        // not an ai column, nothing to check
+      } else if (OB_FAIL(checked_table_ids.push_back(column_expr->get_table_id()))) {
+      } else if (OB_FAIL(checked_column_ids.push_back(column_expr->get_column_id()))) {
+      } else {
+        phy_plan.set_plan_references_ai_column(true);
+        const int tmp_ret = phy_plan.add_ai_column_check_target(table_item->database_name_,
+                                                                table_item->table_name_,
+                                                                column_schema->get_column_name_str());
+        if (OB_SUCCESS != tmp_ret) {
+          // the check list is a bounded buffer, never fail the statement for it
+          LOG_WARN("failed to record ai column check target", K(tmp_ret),
+                   K(table_item->database_name_), K(table_item->table_name_),
+                   K(column_schema->get_column_name_str()));
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ObSEArray<ObSelectStmt*, 4> child_stmts;
+    if (OB_FAIL(stmt.get_child_stmts(child_stmts))) {
+      LOG_WARN("failed to get child stmts", K(ret));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < child_stmts.count(); ++i) {
+      if (OB_ISNULL(child_stmts.at(i))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(SMART_CALL(collect_ai_column_check_targets(*child_stmts.at(i),
+                                                                    sql_schema_guard,
+                                                                    written_table_ids,
+                                                                    written_column_ids,
+                                                                    phy_plan)))) {
+      }
+    }
+  }
+  return ret;
+}
+
 int ObStaticEngineCG::set_properties_post(const ObLogPlan &log_plan, ObPhysicalPlan &phy_plan)
 {
   int ret = OB_SUCCESS;
@@ -5888,6 +6018,24 @@ int ObStaticEngineCG::set_properties_post(const ObLogPlan &log_plan, ObPhysicalP
     if (OB_SUCC(ret)) {
       phy_plan_->set_contain_pl_udf_or_trigger(log_plan.get_stmt()->get_query_ctx()->has_pl_udf_);
       phy_plan_->set_udf_has_dml_stmt(log_plan.get_stmt()->get_query_ctx()->udf_has_dml_stmt_);
+    }
+  }
+
+  // AI COLUMN: record the ai columns this statement reads, the strict read check
+  // is performed in ObResultSet::do_open_plan() right before execution.
+  if (OB_SUCC(ret)) {
+    ObSEArray<uint64_t, 8> written_table_ids;
+    ObSEArray<uint64_t, 8> written_column_ids;
+    if (OB_ISNULL(log_plan.get_stmt()) || OB_ISNULL(sql_schema_guard)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(collect_written_dml_columns(*log_plan.get_stmt(),
+                                                   written_table_ids,
+                                                   written_column_ids))) {
+    } else if (OB_FAIL(collect_ai_column_check_targets(*log_plan.get_stmt(),
+                                                       *sql_schema_guard,
+                                                       written_table_ids,
+                                                       written_column_ids,
+                                                       phy_plan))) {
     }
   }
 

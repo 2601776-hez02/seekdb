@@ -18,6 +18,7 @@
 #include "ob_expr_ai_complete.h"
 #include "query/ai/ob_ai_endpoint_resolver.h"
 #include "share/rc/ob_server_runtime.h"
+#include "sql/session/ob_sql_session_info.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
@@ -26,6 +27,43 @@ namespace oceanbase
 {
 namespace sql 
 {
+
+// AI COLUMN (design 7.1): the result type hint of an AI column definition reaches
+// the model through the hidden session variable _ai_column_type_hint, which only the
+// background AI column worker sets on its own internal session.  A user's AI_COMPLETE
+// call always sees an empty value, so nothing is appended there.  The hint is appended
+// to the *final* prompt text (after the prompt object template has been expanded), it
+// never modifies the stored column expression or the statement itself.
+static int append_ai_column_type_hint(ObEvalCtx &ctx,
+                                      ObIAllocator &allocator,
+                                      ObString &prompt)
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session = ctx.exec_ctx_.get_my_session();
+  ObString type_hint;
+  if (OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("session info is null", KR(ret));
+  } else if (OB_FAIL(session->get_ai_column_type_hint(type_hint))) {
+    LOG_WARN("fail to get ai column type hint", KR(ret));
+  } else if (type_hint.empty() || prompt.empty()) {
+    // no type hint (e.g. a VECTOR result column) or no prompt: nothing to append
+  } else {
+    const int64_t new_len = prompt.length() + 1 + type_hint.length();
+    char *buf = static_cast<char *>(allocator.alloc(new_len));
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("fail to allocate prompt buffer", KR(ret), K(new_len));
+    } else {
+      MEMCPY(buf, prompt.ptr(), prompt.length());
+      buf[prompt.length()] = ' ';
+      MEMCPY(buf + prompt.length() + 1, type_hint.ptr(), type_hint.length());
+      prompt.assign_ptr(buf, static_cast<int32_t>(new_len));
+    }
+  }
+  return ret;
+}
+
 ObExprAIComplete::ObExprAIComplete(common::ObIAllocator &alloc)
     : ObFuncExprOperator(alloc, 
                         T_FUN_SYS_AI_COMPLETE, 
@@ -155,7 +193,8 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     } else {
       ObAIFuncModel model(temp_allocator, *info, *endpoint_info);
       ObString result;
-      if (OB_FAIL(model.call_completion(prompt, config, result))) {
+      if (OB_FAIL(append_ai_column_type_hint(ctx, temp_allocator, prompt))) {
+      } else if (OB_FAIL(model.call_completion(prompt, config, result))) {
       } else if (OB_FAIL(ObAIFuncUtils::set_string_result(expr, ctx, res, result))) {
       }
     }

@@ -27,6 +27,9 @@
 #include "sql/monitor/show_trace/ob_show_trace.h"
 #include "sql/engine/table/ob_table_scan_op.h"
 #include "share/ob_ddl_checksum.h"
+#include "common/mysqlclient/ob_mysql_proxy.h"
+#include "lib/string/ob_sql_string.h"
+#include "query/session/ob_session_inner_sql.h"
 
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -441,6 +444,106 @@ bool ObResultSet::transaction_set_violation_and_retry(int &err, int64_t &retry_t
   return bret;
 }
 
+// AI COLUMN: strict read. When the session variable ai_column_strict_read is on,
+// a statement that references an ai column may only run when every row of that
+// column is READY. The check is column level: even if the statement's own
+// predicates select only ready rows, the statement fails as long as any row of
+// the referenced ai column is not ready (status 0 invalid, 1 pending, 4 running).
+int ObResultSet::check_ai_column_strict_read(ObPhysicalPlan &plan)
+{
+  int ret = OB_SUCCESS;
+  bool strict_read = false;
+  ObString targets(plan.get_ai_column_check_targets());
+  // ai_column_strict_read is a session variable, see notes/contract.md §7
+  if (OB_FAIL(my_session_.get_ai_column_strict_read(strict_read))) {
+    LOG_WARN("failed to get ai_column_strict_read", K(ret));
+  } else if (!strict_read) {
+    // do nothing, the strict read check is disabled for this session
+  } else if (targets.empty()) {
+    // the code generator did not record any target, nothing to check
+  } else {
+    query::ObSessionInnerSql inner_sql(&my_session_);
+    if (OB_UNLIKELY(!inner_sql.is_valid())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid session inner sql", K(ret), K(my_session_.get_server_sid()));
+    }
+    while (OB_SUCC(ret) && !targets.empty()) {
+      ObString record = targets.split_on(ObPhysicalPlan::AI_COLUMN_TARGET_RECORD_SEP);
+      if (record.empty()) {
+        // the last record has no trailing record separator
+        record = targets;
+        targets.reset();
+      }
+      ObString database_name = record.split_on(ObPhysicalPlan::AI_COLUMN_TARGET_FIELD_SEP);
+      ObString table_name = record.split_on(ObPhysicalPlan::AI_COLUMN_TARGET_FIELD_SEP);
+      ObString column_name = record;
+      if (OB_UNLIKELY(database_name.empty() || table_name.empty() || column_name.empty())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("invalid ai column check target", K(ret), K(record));
+      } else if (OB_FAIL(check_ai_column_ready(inner_sql, database_name, table_name, column_name))) {
+      }
+    }
+  }
+  return ret;
+}
+
+// AI COLUMN: check whether all rows of one ai column are ready, the statement
+// fails when the first not ready row is found.
+int ObResultSet::check_ai_column_ready(query::ObSessionInnerSql &inner_sql,
+                                       const ObString &database_name,
+                                       const ObString &table_name,
+                                       const ObString &column_name)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  // the status column naming is the single source of truth,
+  // see OB_AI_COLUMN_STATUS_COLUMN_PREFIX in share/schema/ob_column_schema.h.
+  // A row is "not ready" when the status column is NULL (never generated, e.g. a
+  // row that predates the ai column), 0 (invalid), 1 (pending) or 4 (running).
+  if (OB_FAIL(sql.assign_fmt("SELECT 1 FROM `%.*s`.`%.*s` "
+                             "WHERE `%s%.*s` IS NULL OR `%s%.*s` IN (0, 1, 4) LIMIT 1",
+                             database_name.length(), database_name.ptr(),
+                             table_name.length(), table_name.ptr(),
+                             OB_AI_COLUMN_STATUS_COLUMN_PREFIX,
+                             column_name.length(), column_name.ptr(),
+                             OB_AI_COLUMN_STATUS_COLUMN_PREFIX,
+                             column_name.length(), column_name.ptr()))) {
+    LOG_WARN("failed to build ai column strict read sql", K(ret), K(column_name));
+  } else {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      common::sqlclient::ObMySQLResult *result = NULL;
+      if (OB_FAIL(inner_sql.execute_read(sql, res))) {
+        LOG_WARN("failed to execute ai column strict read sql", K(ret), "sql", sql.ptr());
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("invalid sql result", K(ret), "sql", sql.ptr());
+      } else if (OB_FAIL(result->next())) {
+        if (OB_ITER_END == ret) {
+          // every row of this ai column is ready
+          ret = OB_SUCCESS;
+        } else {
+          LOG_WARN("failed to fetch ai column strict read result", K(ret), "sql", sql.ptr());
+        }
+      } else {
+        // the first not ready row, the statement must fail
+        ObSqlString message;
+        if (OB_FAIL(message.assign_fmt("OB_AI_COLUMN: ai column '%.*s' of table '%.*s.%.*s' is not ready",
+                                       column_name.length(), column_name.ptr(),
+                                       database_name.length(), database_name.ptr(),
+                                       table_name.length(), table_name.ptr()))) {
+          LOG_WARN("failed to build ai column not ready message", K(ret));
+        } else {
+          ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
+          LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID,
+                         static_cast<int32_t>(message.length()), message.ptr());
+          LOG_WARN("ai column strict read failed", K(ret), "message", message.ptr());
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 OB_INLINE int ObResultSet::do_open_plan(ObExecContext &ctx)
 {
   ObPhysicalPlan* physical_plan_ = static_cast<ObPhysicalPlan*>(cache_obj_guard_.get_cache_obj());
@@ -459,6 +562,13 @@ OB_INLINE int ObResultSet::do_open_plan(ObExecContext &ctx)
     }
   }
 
+  // AI COLUMN: strict read. A plan that references no ai column does no extra work.
+  // Prepare itself does not read any row, the check is done when it is executed.
+  if (OB_SUCC(ret) && stmt::T_PREPARE != stmt_type_
+      && physical_plan_->get_plan_references_ai_column()) {
+    if (OB_FAIL(check_ai_column_strict_read(*physical_plan_))) {
+    }
+  }
 
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(start_stmt())) {

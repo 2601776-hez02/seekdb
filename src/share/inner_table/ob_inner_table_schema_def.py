@@ -2447,6 +2447,69 @@ all_ai_model_endpoint_def = dict(
 def_table_schema(**all_ai_model_endpoint_def)
 
 
+# AI column metadata: one row for each AI column of a user table.
+# NOTE: tenant_id is implicit in this single tenant runtime (no inner table of this
+# tree declares it), so the primary key is (table_id, column_id).
+all_ai_column_def = dict(
+    owner = 'ai-column',
+    table_name = '__all_ai_column',
+    table_id = '1131',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+      ('table_id', 'int'),
+      ('column_id', 'int')
+    ],
+
+    is_cluster_private = False,
+    normal_columns = [
+        ('database_name', 'varchar:OB_MAX_DATABASE_NAME_LENGTH', 'true'),
+        ('table_name', 'varchar:OB_MAX_TABLE_NAME_LENGTH', 'true'),
+        ('column_name', 'varchar:OB_MAX_COLUMN_NAME_LENGTH', 'true'),
+        ('ai_function', 'varchar:64', 'true'),
+        ('model_name', 'varchar:OB_MAX_TABLE_NAME_LENGTH', 'true'),
+        ('expression', 'longtext', 'true'),
+        ('result_type', 'varchar:MAX_COLUMN_COMMENT_LENGTH', 'true'),
+        ('dependencies', 'longtext', 'true'),
+        ('sync_mode', 'int', 'true'),
+        ('max_retries', 'int', 'true'),
+        ('status_column_id', 'int', 'true'),
+        ('srcver_column_id', 'int', 'true'),
+        ('def_version', 'int', 'true'),
+        ('flags', 'int', 'true')
+    ]
+)
+def_table_schema(**all_ai_column_def)
+
+# AI column task queue: one row for one group of AI columns of one row change
+all_ai_column_task_def = dict(
+    owner = 'ai-column',
+    table_name = '__all_ai_column_task',
+    table_id = '1132',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+      ('task_id', 'int')
+    ],
+
+    is_cluster_private = False,
+    normal_columns = [
+        ('table_id', 'int', 'true'),
+        ('row_key', 'varchar:OB_MAX_ROW_KEY_LENGTH', 'true'),
+        ('column_ids', 'varchar:OB_MAX_INNER_VALUE_LENGTH', 'true'),
+        ('srcvers', 'varchar:OB_MAX_INNER_VALUE_LENGTH', 'true'),
+        ('def_versions', 'varchar:OB_MAX_INNER_VALUE_LENGTH', 'true'),
+        ('request_id', 'varchar:64', 'true'),
+        ('task_status', 'int', 'true'),
+        ('retry_count', 'int', 'true'),
+        ('lease_owner', 'varchar:128', 'true'),
+        ('lease_expire_ts', 'int', 'true'),
+        ('input_snapshot', 'longtext', 'true')
+    ]
+)
+def_table_schema(**all_ai_column_task_def)
+
+
 all_objauth_mysql_def = dict(
     owner = 'cjl476581',
     table_name     = '__all_objauth_mysql',
@@ -13821,6 +13884,37 @@ def_table_schema(
       REQUEST_TRANSFORM_FN,
       RESPONSE_TRANSFORM_FN
     FROM oceanbase.__all_ai_model_endpoint WHERE ENDPOINT_ID != -1;
+  """.replace("\n", " ")
+)
+
+def_table_schema(
+  owner           = 'ai-column',
+  table_name      = 'DBA_OB_AI_COLUMNS',
+  table_id        = '21665',
+  table_type      = 'SYSTEM_VIEW',
+  rowkey_columns  = [],
+  normal_columns  = [],
+  gm_columns      = [],
+  view_definition =
+  """
+    SELECT
+      TABLE_ID,
+      COLUMN_ID,
+      DATABASE_NAME,
+      TABLE_NAME,
+      COLUMN_NAME,
+      AI_FUNCTION,
+      MODEL_NAME,
+      EXPRESSION,
+      RESULT_TYPE,
+      DEPENDENCIES,
+      SYNC_MODE,
+      MAX_RETRIES,
+      STATUS_COLUMN_ID,
+      SRCVER_COLUMN_ID,
+      DEF_VERSION,
+      FLAGS
+    FROM oceanbase.__all_ai_column;
   """.replace("\n", " ")
 )
 

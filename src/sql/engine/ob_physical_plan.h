@@ -218,6 +218,22 @@ public:
   { return &sql_expression_factory_; }
   void set_has_top_limit(const bool has_top_limit) { has_top_limit_ = has_top_limit; }
   bool has_top_limit() const { return has_top_limit_; }
+  // ---- AI COLUMN strict read support -------------------------------------
+  // The flag is set by the code generator when the statement references at least
+  // one ai column. The check targets are carried as "db\x1ftable\x1fcolumn"
+  // records separated by '\x1e', they are only filled when the flag is set.
+  static const int64_t MAX_AI_COLUMN_CHECK_TARGETS_LEN = 4096;
+  static constexpr char AI_COLUMN_TARGET_FIELD_SEP = '\x1f';
+  static constexpr char AI_COLUMN_TARGET_RECORD_SEP = '\x1e';
+  inline bool get_plan_references_ai_column() const { return plan_references_ai_column_; }
+  inline void set_plan_references_ai_column(bool v) { plan_references_ai_column_ = v; }
+  inline const char *get_ai_column_check_targets() const { return ai_column_check_targets_; }
+  // append one (database, table, column) triple, returns OB_SIZE_OVERFLOW when the
+  // buffer is full, in that case the caller keeps the flag and logs a warning.
+  int add_ai_column_check_target(const common::ObString &database_name,
+                                 const common::ObString &table_name,
+                                 const common::ObString &column_name);
+  // ---- end of AI COLUMN strict read support ------------------------------
   void set_is_wise_join(const bool is_wise_join) { is_wise_join_ = is_wise_join; }
   bool is_wise_join() const { return is_wise_join_; }
   void set_contain_table_scan(bool v) { contain_table_scan_ = v; }
@@ -528,6 +544,10 @@ private:
 private:
   bool insertup_can_do_gts_opt_;
   int64_t px_worker_share_plan_enabled_;
+  // AI COLUMN strict read: whether the statement references an ai column and the
+  // (database, table, column) triples that have to pass the readiness check.
+  bool plan_references_ai_column_;
+  char ai_column_check_targets_[MAX_AI_COLUMN_CHECK_TARGETS_LEN];
 };
 
 inline void ObPhysicalPlan::set_affected_last_insert_id(bool affected_last_insert_id)

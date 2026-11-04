@@ -84,6 +84,21 @@ protected:
                             bool before_update_row_trigger_exist,
                             const share::schema::ObColumnSchemaV2 &column,
                             bool &need_assign);
+  // AI COLUMN: inject the implicit assignments that invalidate one ai column:
+  // c = NULL, __ai_status_c = PENDING, __ai_srcver_c = <srcver>.
+  int build_ai_column_invalidation(const TableItem &table_item,
+                                   const share::schema::ObTableSchema &table_schema,
+                                   const share::schema::ObColumnSchemaV2 &ai_column,
+                                   const int64_t ai_srcver,
+                                   common::ObIArray<ObTableAssignment> &assigns);
+  // AI COLUMN: add one implicit (column = value_expr) assignment for the dml stmt.
+  int add_ai_implicit_assignment(const TableItem &table_item,
+                                 const share::schema::ObColumnSchemaV2 &column_schema,
+                                 ObRawExpr *value_expr,
+                                 common::ObIArray<ObTableAssignment> &assigns);
+  // AI COLUMN: fill the value expressions of the ai columns of an insert statement,
+  // the ai columns are always omitted from the insert value list.
+  int build_ai_column_insert_values(ObInsertTableInfo &table_info);
 
   int set_base_table_for_updatable_view(TableItem &table_item,
                                         const ObColumnRefRawExpr &col_ref,

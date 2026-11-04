@@ -111,8 +111,10 @@ ObPhysicalPlan::ObPhysicalPlan(MemoryContext &mem_context /* = CURRENT_CONTEXT *
     need_switch_to_table_lock_worker_(false),
     data_complement_gen_doc_id_(false),
     insertup_can_do_gts_opt_(false),
-    px_worker_share_plan_enabled_(false)
+    px_worker_share_plan_enabled_(false),
+    plan_references_ai_column_(false)
 {
+  ai_column_check_targets_[0] = '\0';
 }
 
 ObPhysicalPlan::~ObPhysicalPlan()
@@ -193,6 +195,8 @@ void ObPhysicalPlan::reset()
   data_complement_gen_doc_id_ = false;
   insertup_can_do_gts_opt_ = false;
   px_worker_share_plan_enabled_ = false;
+  plan_references_ai_column_ = false;
+  ai_column_check_targets_[0] = '\0';
 }
 void ObPhysicalPlan::destroy()
 {
@@ -649,7 +653,41 @@ OB_SERIALIZE_MEMBER(ObPhysicalPlan,
                     need_switch_to_table_lock_worker_,
                     data_complement_gen_doc_id_,
                     px_parallel_rule_,
-                    px_worker_share_plan_enabled_);
+                    px_worker_share_plan_enabled_,
+                    plan_references_ai_column_,
+                    ai_column_check_targets_);
+
+int ObPhysicalPlan::add_ai_column_check_target(const common::ObString &database_name,
+                                               const common::ObString &table_name,
+                                               const common::ObString &column_name)
+{
+  int ret = OB_SUCCESS;
+  const int64_t len = static_cast<int64_t>(strlen(ai_column_check_targets_));
+  const int64_t need = database_name.length() + table_name.length() + column_name.length()
+                     + 3 /* three separators */ + 1 /* record separator when len > 0 */;
+  if (OB_UNLIKELY(database_name.empty() || table_name.empty() || column_name.empty())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid ai column check target", K(ret), K(database_name), K(table_name), K(column_name));
+  } else if (OB_UNLIKELY(len + need >= MAX_AI_COLUMN_CHECK_TARGETS_LEN)) {
+    ret = OB_SIZE_OVERFLOW;
+    LOG_WARN("ai column check targets buffer is full", K(ret), K(len), K(need));
+  } else {
+    char *pos = ai_column_check_targets_ + len;
+    if (len > 0) {
+      *pos++ = AI_COLUMN_TARGET_RECORD_SEP;
+    }
+    MEMCPY(pos, database_name.ptr(), database_name.length());
+    pos += database_name.length();
+    *pos++ = AI_COLUMN_TARGET_FIELD_SEP;
+    MEMCPY(pos, table_name.ptr(), table_name.length());
+    pos += table_name.length();
+    *pos++ = AI_COLUMN_TARGET_FIELD_SEP;
+    MEMCPY(pos, column_name.ptr(), column_name.length());
+    pos += column_name.length();
+    *pos = '\0';
+  }
+  return ret;
+}
 
 int ObPhysicalPlan::set_table_locations(const ObTablePartitionInfoArray &infos,
                                         ObSchemaGetterGuard &schema_guard)

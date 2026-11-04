@@ -545,6 +545,40 @@ protected:
   int resolve_generated_column_attribute(share::schema::ObColumnSchemaV2 &column,
                                          ParseNode *attrs_node,
                                          ObColumnResolveStat &reslove_stat);
+  // ---------- AI column ----------
+  // Return the T_AI_COLUMN attribute node of a column definition, NULL if the
+  // column is not declared as an AI column.
+  static const ParseNode *find_ai_column_node(const ParseNode &column_definition);
+  // Validate the AI column definition (ai function / model / result type / options)
+  // and fill the expression text, ai_spec_ and the dependency column ids of `column`.
+  static int resolve_ai_column_attribute(
+      share::schema::ObColumnSchemaV2 &column,
+      const ParseNode &ai_node,
+      share::schema::ObTableSchema &table_schema,
+      ObIArray<share::schema::ObColumnSchemaV2 *> &resolved_cols,
+      common::ObIAllocator &allocator,
+      ObSQLSessionInfo *session_info,
+      ObSchemaChecker *schema_checker);
+  static int resolve_ai_column_attribute(
+      share::schema::ObColumnSchemaV2 &column,
+      const ParseNode &ai_node,
+      share::schema::ObTableSchema &table_schema,
+      ObIArray<share::schema::ObColumnSchemaV2> &resolved_cols,
+      common::ObIAllocator &allocator,
+      ObSQLSessionInfo *session_info,
+      ObSchemaChecker *schema_checker);
+  // Build the two hidden companion columns of an AI column and fill
+  // status_column_id_/srcver_column_id_ of the ai spec.
+  // Public because the rootserver (ObDDLService::add_new_column_to_table_schema)
+  // builds them for ALTER TABLE ... ADD COLUMN, where the column ids are assigned.
+public:
+  static int build_ai_column_hidden_columns(
+      share::schema::ObColumnSchemaV2 &ai_column,
+      const uint64_t status_column_id,
+      const uint64_t srcver_column_id,
+      common::ObIAllocator &allocator,
+      ObIArray<share::schema::ObColumnSchemaV2> &hidden_columns);
+protected:
   int resolve_srid_node(share::schema::ObColumnSchemaV2 &column,
                         const ParseNode &srid_node);
   int resolve_column_skip_index(

@@ -3018,6 +3018,31 @@ int ObBasicSessionInfo::get_sql_quote_show_create(bool &sql_quote_show_create) c
   return get_bool_sys_var(SYS_VAR_SQL_QUOTE_SHOW_CREATE, sql_quote_show_create);
 }
 
+int ObBasicSessionInfo::get_ai_column_strict_read(bool &v) const
+{
+  return get_bool_sys_var(SYS_VAR_AI_COLUMN_STRICT_READ, v);
+}
+
+int ObBasicSessionInfo::get_ai_column_type_hint(common::ObString &type_hint) const
+{
+  int ret = OB_SUCCESS;
+  ObBasicSysVar *sys_var = NULL;
+  type_hint.reset();
+  if (OB_FAIL(inner_get_sys_var(SYS_VAR__AI_COLUMN_TYPE_HINT, sys_var))) {
+    LOG_WARN("fail to get ai column type hint sys var", K(ret));
+  } else if (OB_ISNULL(sys_var)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("ai column type hint sys var is null", K(ret));
+  } else if (!ob_is_string_type(sys_var->get_value().get_type())) {
+    // An inner SQL session only initializes the essential system variables, so
+    // this one has no value there unless the AI column worker set it.  That means
+    // "no hint", not an error: a normal statement must keep working.
+  } else if (OB_FAIL(sys_var->get_value().get_string(type_hint))) {
+    LOG_WARN("fail to read ai column type hint value", K(ret), K(sys_var->get_value()));
+  }
+  return ret;
+}
+
 int ObBasicSessionInfo::get_optimizer_cost_based_transformation(int64_t &cbqt_policy) const
 {
   int ret = get_int64_sys_var(SYS_VAR__OPTIMIZER_COST_BASED_TRANSFORMATION, cbqt_policy);

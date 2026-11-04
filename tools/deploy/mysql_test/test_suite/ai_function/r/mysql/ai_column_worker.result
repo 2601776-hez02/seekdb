@@ -1,0 +1,119 @@
+# expected output is generated on first run: mysqltest --record
+drop table if exists t_ai_group;
+drop table if exists t_ai_worker_retry;
+drop table if exists t_ai_worker_fail;
+drop table if exists t_ai_worker_late;
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_doc_endpoint');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_doc_model');
+MOCK STOPPED
+MOCK READY
+MOCK RESET
+call DBMS_AI_SERVICE.CREATE_AI_MODEL(
+  'mock_doc_model', '{
+    "type": "completion",
+    "model_name": "mock-complete"
+ }');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT (
+  'mock_doc_endpoint', '{
+    "ai_model_name": "mock_doc_model",
+    "url": "http://127.0.0.1:19120/v1/chat/completions",
+    "access_key": "sk-mock",
+    "request_model_name": "mock-complete",
+    "provider": "openai"
+  }');
+create table t_ai_group (
+  id       bigint primary key,
+  content  varchar(8192),
+  language varchar(32) AI COLUMN (
+    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content))
+  ) WITH (sync_mode='async', max_retries=3),
+  tags json AI COLUMN (
+    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=TAGS]] Tags for: ', content))
+  ) WITH (sync_mode='async', max_retries=3)
+);
+create table t_ai_worker_retry (
+  id       bigint primary key,
+  content  varchar(8192),
+  language varchar(32) AI COLUMN (
+    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content))
+  ) WITH (sync_mode='async', max_retries=3)
+);
+create table t_ai_worker_fail (
+  id       bigint primary key,
+  content  varchar(8192),
+  language varchar(32) AI COLUMN (
+    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=LANG]] Return only the language name. Content: ', content))
+  ) WITH (sync_mode='async', max_retries=1)
+);
+create table t_ai_worker_late (
+  id      bigint primary key,
+  content varchar(8192),
+  summary varchar(64) AI COLUMN (
+    AI_COMPLETE('mock_doc_model', CONCAT('[[OUT=ECHO]] Note: ', content))
+  ) WITH (sync_mode='async', max_retries=3)
+);
+show ai columns from t_ai_group;
+Table	Column	AIFunction	ModelName	ResultType	Dependencies	SyncMode	MaxRetries	StatusColumn	DefVersion
+t_ai_group	language	AI_COMPLETE	mock_doc_model	VARCHAR	<deps>	async	3	__ai_status_language	1
+t_ai_group	tags	AI_COMPLETE	mock_doc_model	JSON	<deps>	async	3	__ai_status_tags	1
+insert into t_ai_group (id, content) values
+  (1, '[[LANG=Japanese]] [[TAGS=news,tech]] first row');
+select id, language, json_length(tags) from t_ai_group where id = 1;
+id	language	json_length(tags)
+1	Japanese	2
+MOCK CONFIG OK
+update t_ai_group set content = '[[LANG=German]] [[TAGS=update]] second row' where id = 1;
+select id, language, tags from t_ai_group where id = 1;
+id	language	tags
+1	NULL	NULL
+select count(*) from t_ai_group where id = 1 and ((language is null) <> (tags is null));
+count(*)
+0
+MOCK CONFIG OK
+select count(*) from t_ai_group where id = 1 and ((language is null) <> (tags is null));
+count(*)
+0
+select id, language, json_length(tags) from t_ai_group where id = 1;
+id	language	json_length(tags)
+1	German	1
+CONTAINS PRESENT
+MOCK RESET
+MOCK CONFIG OK
+insert into t_ai_worker_retry (id, content) values
+  (1, '[[LANG=Spanish]] retry me');
+select id, language from t_ai_worker_retry where id = 1;
+id	language
+1	Spanish
+total=3 complete=3 embed=0 ollama_chat=0 ollama_embed=0 failed=2 dropped=0 throttled=0 peak=1 models=mock-complete:3
+MOCK RESET
+MOCK CONFIG OK
+insert into t_ai_worker_fail (id, content) values
+  (1, '[[LANG=Never]] doomed');
+select id, language from t_ai_worker_fail where id = 1;
+id	language
+1	NULL
+total=2 complete=2 embed=0 ollama_chat=0 ollama_embed=0 failed=2 dropped=0 throttled=0 peak=1 models=mock-complete:2
+total=2 complete=2 embed=0 ollama_chat=0 ollama_embed=0 failed=2 dropped=0 throttled=0 peak=1 models=mock-complete:2
+MOCK CONFIG OK
+MOCK RESET
+MOCK CONFIG OK
+insert into t_ai_worker_late (id, content) values
+  (1, '[[ECHO=old]] first version');
+update t_ai_worker_late set content = '[[ECHO=new]] second version' where id = 1;
+select id, summary from t_ai_worker_late where id = 1;
+id	summary
+1	NULL
+MOCK CONFIG OK
+select id, summary from t_ai_worker_late where id = 1;
+id	summary
+1	new
+select id, summary from t_ai_worker_late where id = 1;
+id	summary
+1	new
+drop table if exists t_ai_group;
+drop table if exists t_ai_worker_retry;
+drop table if exists t_ai_worker_fail;
+drop table if exists t_ai_worker_late;
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_doc_endpoint');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_doc_model');
+MOCK STOPPED

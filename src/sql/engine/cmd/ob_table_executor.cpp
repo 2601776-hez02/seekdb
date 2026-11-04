@@ -830,6 +830,15 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
           }
         }
       }
+      if (OB_SUCC(ret) && 0 != res.affected_rows_) {
+        // ALTER TABLE ... RETRY AI COLUMN changes rows without changing the
+        // schema, report the number of re-queued rows the way data changing DDL
+        // does (see the create table as select path).
+        ObPhysicalPlanCtx *plan_ctx = ctx.get_physical_plan_ctx();
+        if (OB_NOT_NULL(plan_ctx)) {
+          plan_ctx->set_affected_rows(res.affected_rows_);
+        }
+      }
     }
     if (OB_SUCC(ret)) {
       if (!need_check) {

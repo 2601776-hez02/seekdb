@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX RS
 
 #include "share/rc/ob_server_runtime.h"
+#include "common/storage/ob_sequence.h"
 #include "config_bridge.h"
 #include <algorithm>
 #include "rootserver/ob_dependency_ddl_helper.h"
@@ -7771,7 +7772,27 @@ int ObDDLService::add_new_column_to_table_schema(
       alter_column_schema.set_index_position(0);
       alter_column_schema.set_not_part_key();
       alter_column_schema.set_table_id(new_table_schema.get_table_id());
-      
+      // AI column: create the two hidden companion columns, their column ids must
+      // follow the column id of the AI column itself
+      if (alter_column_schema.is_ai_column()) {
+        common::ObSEArray<ObColumnSchemaV2, 2> ai_hidden_cols;
+        const uint64_t status_column_id = ++max_used_column_id;
+        const uint64_t srcver_column_id = ++max_used_column_id;
+        if (OB_FAIL(ObDDLResolver::build_ai_column_hidden_columns(alter_column_schema,
+                                                                  status_column_id,
+                                                                  srcver_column_id,
+                                                                  allocator,
+                                                                  ai_hidden_cols))) {
+          LOG_WARN("fail to build ai column hidden columns", K(ret), K(alter_column_schema));
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < ai_hidden_cols.count(); ++i) {
+          ObColumnSchemaV2 &hidden_col = ai_hidden_cols.at(i);
+          hidden_col.set_table_id(new_table_schema.get_table_id());
+          if (OB_FAIL(new_table_schema.add_column(hidden_col))) {
+            LOG_WARN("fail to add ai column hidden column", K(ret), K(hidden_col));
+          }
+        }
+      }
       new_table_schema.set_max_used_column_id(max_used_column_id);
     }
   }
@@ -12409,6 +12430,280 @@ int ObDDLService::check_add_list_subpartition(const ObPartition &orig_part, cons
   }
   return ret;
 }
+namespace
+{
+// AI COLUMN status values written into __ai_status_<c>, see notes/contract.md 1.2.
+// The observer worker owns the full state machine; rootserver only needs the two
+// values it writes (PENDING on retry, FAILED to filter "RETRY FAILED").
+const int32_t AI_RETRY_STATUS_PENDING = 1;
+const int32_t AI_RETRY_STATUS_FAILED = 3;
+
+// Append a single quoted SQL text literal ('...' with the canonical escaping).
+int append_ai_retry_string_literal(const common::ObString &value,
+                             common::ObIAllocator &allocator,
+                             common::ObSqlString &sql){
+  int ret = OB_SUCCESS;
+  ObHexEscapeSqlStr escaped(value, false /*skip_escape*/);
+  const int64_t extra_len = escaped.get_extra_length();
+  const int64_t buf_len = static_cast<int64_t>(value.length())
+                          + (extra_len > 0 ? extra_len : 0) + 1;
+  char *buf = static_cast<char *>(allocator.alloc(buf_len));
+  if (OB_ISNULL(buf)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    const int64_t written = escaped.to_string(buf, buf_len);
+    if (OB_FAIL(sql.append("'"))) {
+    } else if (written > 0 && OB_FAIL(sql.append(buf, written))) {
+    } else if (OB_FAIL(sql.append("'"))) {
+    }
+  }
+  return ret;
+}
+
+bool is_ai_retry_ident_char(const char c)
+{
+  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+         || '_' == c || '$' == c || static_cast<unsigned char>(c) >= 0x80;
+}
+
+bool is_ai_retry_blank(const char c)
+{
+  return ' ' == c || '\t' == c || '\n' == c || '\r' == c;
+}
+}  // namespace
+
+// AI COLUMN: rewrite the `status` pseudo column of a RETRY ... WHERE clause.
+//
+// The condition is user written SQL text that the rootserver pastes into the
+// WHERE of the internal requeue UPDATE, so its identifiers are not resolved by
+// the parser: an unquoted `status` names the AI column status of the row (the
+// hidden `__ai_status_<c>` companion column), while a backtick quoted `status`
+// is the ordinary business column of the table and a qualified `t.status` is
+// left alone as well. Single/double quoted strings and backtick quoted
+// identifiers are copied verbatim, so a `status` inside a string is never
+// touched:
+//   status = 3 and `status` = 'x' and t.status = 2
+//   => `__ai_status_c` = 3 and `status` = 'x' and t.status = 2
+//
+// Self check (this checkout has no unittest tree, see notes/module-retry.md):
+//   in                                    out, with ai column name "c"
+//   `status` = 'archived'                 `status` = 'archived'
+//   status = 'READY'                      `__ai_status_c` = 'READY'
+//   STATUS=3                              `__ai_status_c`=3
+//   status_x = 1 and t.status = 2         status_x = 1 and t.status = 2
+//   content = 'where status'              content = 'where status'
+//   content like '%where%' and status=3   content like '%where%' and `__ai_status_c`=3
+int ObDDLService::rewrite_ai_column_retry_where_cond(const common::ObString &where_cond,
+                                                     const common::ObString &ai_column_name,
+                                                     common::ObSqlString &rewritten)
+{
+  int ret = OB_SUCCESS;
+  const char *p = where_cond.ptr();
+  const int64_t len = where_cond.length();
+  int64_t i = 0;
+  char prev_significant = 0;
+  rewritten.reset();
+  if (OB_UNLIKELY(ai_column_name.empty())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("ai column name of the retry condition rewrite is empty", KR(ret));
+  }
+  while (OB_SUCC(ret) && i < len) {
+    const char c = p[i];
+    if ('\'' == c || '"' == c || '`' == c) {
+      const char quote = c;
+      const int64_t quote_begin = i;
+      bool closed = false;
+      ++i;
+      while (i < len && !closed) {
+        if ('\\' == p[i] && '`' != quote) {
+          i += 2;
+        } else if (quote != p[i]) {
+          ++i;
+        } else if (i + 1 < len && quote == p[i + 1]) {
+          i += 2;
+        } else {
+          ++i;
+          closed = true;
+        }
+      }
+      if (OB_UNLIKELY(!closed)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unterminated literal in the retry condition", KR(ret), K(where_cond));
+      } else if (OB_FAIL(rewritten.append(p + quote_begin, i - quote_begin))) {
+        LOG_WARN("fail to append the quoted part of the retry condition", KR(ret));
+      } else {
+        prev_significant = p[i - 1];
+      }
+    } else if (is_ai_retry_ident_char(c)) {
+      const int64_t token_begin = i;
+      while (i < len && is_ai_retry_ident_char(p[i])) {
+        ++i;
+      }
+      const int64_t token_len = i - token_begin;
+      // `t.status` keeps referring to the business column of the table alias
+      const bool is_status_pseudo_column =
+          (6 == token_len)
+          && ('.' != prev_significant)
+          && ObCharset::case_insensitive_equal(
+               common::ObString(static_cast<int32_t>(6), p + token_begin),
+               common::ObString::make_string("status"));
+      if (is_status_pseudo_column) {
+        if (OB_FAIL(rewritten.append("`"))) {
+        } else if (OB_FAIL(rewritten.append(OB_AI_COLUMN_STATUS_COLUMN_PREFIX))) {
+        } else if (OB_FAIL(rewritten.append(ai_column_name))) {
+        } else if (OB_FAIL(rewritten.append("`"))) {
+        }
+        if (OB_FAIL(ret)) {
+          LOG_WARN("fail to append the ai column status column", KR(ret), K(ai_column_name));
+        }
+      } else if (OB_FAIL(rewritten.append(p + token_begin, token_len))) {
+        LOG_WARN("fail to append an identifier of the retry condition", KR(ret));
+      }
+      if (OB_SUCC(ret)) {
+        prev_significant = p[i - 1];
+      }
+    } else {
+      if (OB_FAIL(rewritten.append(p + i, 1))) {
+        LOG_WARN("fail to append a character of the retry condition", KR(ret));
+      } else {
+        if (!is_ai_retry_blank(c)) {
+          prev_significant = c;
+        }
+        ++i;
+      }
+    }
+  }
+  return ret;
+}
+
+// AI COLUMN: execution side of
+//   ALTER TABLE <t> RETRY [FAILED] AI COLUMN <c> [WHERE <cond>]
+//
+// Requeueing rows does not need a schema change or a ddl task: it invalidates the
+// AI column value and turns the durable work marker back to PENDING in one UPDATE,
+// exactly like a DML that touched a dependency column does.  The asynchronous
+// worker picks the rows up on its next tick (<= 200ms).
+int ObDDLService::retry_ai_column(const uint64_t table_id,
+                                  const common::ObString &database_name,
+                                  const common::ObString &column_name,
+                                  const bool only_failed,
+                                  const common::ObString &where_cond,
+                                  int64_t &affected_rows)
+{
+  int ret = OB_SUCCESS;
+  ObArenaAllocator allocator("AIRetry");
+  ObSqlString read_sql;
+  ObSqlString update_sql;
+  affected_rows = 0;
+  if (OB_ISNULL(sql_proxy_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("sql proxy is null", KR(ret));
+  } else if (OB_UNLIKELY(OB_INVALID_ID == table_id) || column_name.empty()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid retry ai column argument", KR(ret), K(table_id), K(column_name));
+  } else if (OB_FAIL(read_sql.assign_fmt(
+                 "SELECT database_name, table_name, column_name FROM %s "
+                 "WHERE table_id = %lu AND column_name = ",
+                 OB_ALL_AI_COLUMN_TNAME,
+                 static_cast<unsigned long>(table_id)))) {
+    LOG_WARN("fail to build ai column definition query", KR(ret));
+  } else if (OB_FAIL(append_ai_retry_string_literal(column_name, allocator, read_sql))) {
+    LOG_WARN("fail to append ai column name", KR(ret));
+  } else {
+    ObString db_name;
+    ObString table_name;
+    ObString ai_column_name;
+    ObString db_name_copy;
+    ObString table_name_copy;
+    ObString ai_column_name_copy;
+    bool found = false;
+    SMART_VAR(ObMySQLProxy::MySQLResult, res)
+    {
+      sqlclient::ObMySQLResult *result = NULL;
+      if (OB_FAIL(sql_proxy_->read(res, read_sql.ptr()))) {
+        LOG_WARN("fail to read ai column definition", KR(ret), K(read_sql));
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("result of ai column definition query is null", KR(ret));
+      } else {
+        int tmp_ret = result->next();
+        if (OB_ITER_END == tmp_ret) {
+          // not an AI column of this table
+        } else if (OB_SUCCESS != tmp_ret) {
+          ret = tmp_ret;
+          LOG_WARN("fail to iterate ai column definition", KR(ret));
+        } else if (OB_FAIL(result->get_varchar("database_name", db_name))) {
+          LOG_WARN("fail to read database name", KR(ret));
+        } else if (OB_FAIL(result->get_varchar("table_name", table_name))) {
+          LOG_WARN("fail to read table name", KR(ret));
+        } else if (OB_FAIL(result->get_varchar("column_name", ai_column_name))) {
+          LOG_WARN("fail to read column name", KR(ret));
+        } else if (OB_FAIL(ob_write_string(allocator, db_name, db_name_copy))) {
+        } else if (OB_FAIL(ob_write_string(allocator, table_name, table_name_copy))) {
+        } else if (OB_FAIL(ob_write_string(allocator, ai_column_name, ai_column_name_copy))) {
+        } else {
+          // The DDL hooks that maintain __all_ai_column only know the database id, so
+          // its database_name column is empty. The caller resolves the name from the
+          // schema guard (table_schema->get_database_id() -> ObDatabaseSchema) and that
+          // name wins; the metadata column is only a fallback.
+          db_name = database_name.empty() ? db_name_copy : database_name;
+          table_name = table_name_copy;
+          ai_column_name = ai_column_name_copy;
+          found = true;
+        }
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (!found) {
+      ret = OB_ENTRY_NOT_EXIST;
+      LOG_WARN("retry target is not an ai column", KR(ret), K(table_id), K(column_name));
+    } else if (OB_UNLIKELY(db_name.empty() || table_name.empty())) {
+      // never emit an unqualified / empty `db`.`table` of the requeue UPDATE
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("database or table name of the retry target is empty", KR(ret), K(table_id),
+               K(column_name), K(db_name), K(table_name));
+    } else {
+      // hidden companion column names follow the catalog naming rule (contract 1.2)
+      ObSqlString status_column_name;
+      ObSqlString srcver_column_name;
+      const int64_t new_srcver = ObSequence::inc_and_get_max_seq_no();
+      if (OB_FAIL(status_column_name.assign_fmt("%s%.*s", OB_AI_COLUMN_STATUS_COLUMN_PREFIX,
+                                                ai_column_name.length(),
+                                                ai_column_name.ptr()))) {
+      } else if (OB_FAIL(srcver_column_name.assign_fmt("%s%.*s", OB_AI_COLUMN_SRCVER_COLUMN_PREFIX,
+                                                       ai_column_name.length(),
+                                                       ai_column_name.ptr()))) {
+      } else if (OB_FAIL(update_sql.assign_fmt("UPDATE `%.*s`.`%.*s` SET `%.*s` = NULL, "
+                                               "`%.*s` = %d, `%.*s` = %ld WHERE ",
+                                               db_name.length(), db_name.ptr(),
+                                               table_name.length(), table_name.ptr(),
+                                               ai_column_name.length(), ai_column_name.ptr(),
+                                               status_column_name.length(),
+                                               status_column_name.ptr(),
+                                               AI_RETRY_STATUS_PENDING,
+                                               srcver_column_name.length(),
+                                               srcver_column_name.ptr(),
+                                               new_srcver))) {
+      } else if (where_cond.empty() && OB_FAIL(update_sql.append("1 = 1"))) {
+      } else if (!where_cond.empty() && OB_FAIL(update_sql.append("("))) {
+      } else if (!where_cond.empty() && OB_FAIL(update_sql.append(where_cond))) {
+      } else if (!where_cond.empty() && OB_FAIL(update_sql.append(")"))) {
+      } else if (only_failed
+                 && OB_FAIL(update_sql.append_fmt(" AND `%.*s` = %d",
+                                                  status_column_name.length(),
+                                                  status_column_name.ptr(),
+                                                  AI_RETRY_STATUS_FAILED))) {
+      } else if (OB_FAIL(sql_proxy_->write(update_sql.ptr(), affected_rows))) {
+        LOG_WARN("fail to requeue ai column rows", KR(ret), K(update_sql));
+      } else {
+        LOG_INFO("[AI_COLUMN_RETRY] requeued ai column rows", K(table_id), K(column_name),
+                 K(only_failed), K(where_cond), K(new_srcver), K(affected_rows));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObDDLService::alter_table(obcall::ObAlterTableArg &alter_table_arg,
                               obcall::ObAlterTableRes &res)
 {
@@ -12479,7 +12774,68 @@ int ObDDLService::alter_table(obcall::ObAlterTableArg &alter_table_arg,
     }
 
     //do alter table in transaction
-    if (OB_SUCC(ret)) {
+    if (OB_SUCC(ret) && alter_table_arg.has_ai_column_retry_action()) {
+      // ALTER TABLE <t> RETRY [FAILED] AI COLUMN <c> [WHERE <cond>] is not a
+      // schema change, it is a plain requeue UPDATE, so it is dispatched here and
+      // never reaches check_is_offline_ddl / alter_table_in_trans. No ddl lock and
+      // no ddl task is taken or created: the only side effect is the UPDATE issued
+      // by retry_ai_column, and ObAIColumnWorker picks the re-queued rows up on
+      // its next tick (<= 200ms).
+      const common::ObString &retry_column_name = alter_table_arg.get_ai_column_name();
+      const share::schema::ObColumnSchemaV2 *retry_column_schema = NULL;
+      const share::schema::ObDatabaseSchema *retry_db_schema = NULL;
+      common::ObSqlString rewritten_where;
+      int64_t retried_rows = 0;
+      if (OB_ISNULL(orig_table_schema)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("origin table schema is null", KR(ret));
+      } else if (OB_UNLIKELY(!orig_table_schema->is_user_table())) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "OB_AI_COLUMN: RETRY AI COLUMN on a non user table is");
+        LOG_WARN("retry ai column on a non user table", KR(ret), KPC(orig_table_schema));
+      } else if (OB_FAIL(schema_guard.get_database_schema(orig_table_schema->get_database_id(),
+                                                          retry_db_schema))) {
+        LOG_WARN("fail to get the database schema of the retry target", KR(ret),
+                 KPC(orig_table_schema));
+      } else if (OB_ISNULL(retry_db_schema)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("database schema of the retry target is null", KR(ret),
+                 KPC(orig_table_schema));
+      } else if (OB_ISNULL(retry_column_schema =
+                           orig_table_schema->get_column_schema(retry_column_name))) {
+        common::ObString scope_name = "field list";
+        ret = OB_ERR_BAD_FIELD_ERROR;
+        LOG_USER_ERROR(OB_ERR_BAD_FIELD_ERROR, retry_column_name.length(), retry_column_name.ptr(),
+                       scope_name.length(), scope_name.ptr());
+        LOG_WARN("retry target column does not exist", KR(ret), K(retry_column_name));
+      } else if (OB_UNLIKELY(!retry_column_schema->is_ai_column())) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "OB_AI_COLUMN: RETRY requires an AI column");
+        LOG_WARN("retry target is not an ai column", KR(ret), K(retry_column_name));
+      } else if (OB_FAIL(rewrite_ai_column_retry_where_cond(
+                   alter_table_arg.get_ai_column_where_cond(), retry_column_name,
+                   rewritten_where))) {
+        LOG_WARN("fail to rewrite the retry ai column condition", KR(ret),
+                 K(alter_table_arg.get_ai_column_where_cond()));
+      } else if (OB_FAIL(retry_ai_column(orig_table_schema->get_table_id(),
+                                         retry_db_schema->get_database_name_str(),
+                                         retry_column_name,
+                                         alter_table_arg.is_ai_column_retry_only_failed(),
+                                         rewritten_where.string(),
+                                         retried_rows))) {
+        LOG_WARN("fail to retry the ai column", KR(ret), K(retry_column_name),
+                 K(rewritten_where), K(alter_table_arg));
+      } else {
+        res.affected_rows_ = retried_rows;
+        LOG_INFO("[AI_COLUMN_RETRY] retry ai column done", K(retry_column_name),
+                 K(retried_rows), K(rewritten_where));
+      }
+      end_usec = ObTimeUtility::current_time();
+      cost_usec = end_usec - start_usec;
+      start_usec = end_usec;
+      LOG_INFO("[AI_COLUMN_RETRY] retry ai column cost: ", KR(ret), K(cost_usec),
+               "ddl_stmt", alter_table_arg.ddl_stmt_str_, K(alter_table_arg));
+    } else if (OB_SUCC(ret)) {
       const uint64_t data_format_version = DATA_CURRENT_VERSION;
       if (OB_FAIL(check_is_offline_ddl(alter_table_arg, ddl_type, ddl_need_retry_at_executor))) {
       } else {

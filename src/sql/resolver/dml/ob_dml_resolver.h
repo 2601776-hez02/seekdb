@@ -490,6 +490,29 @@ protected:
   int check_basic_column_generated(const ObColumnRefRawExpr *col_expr,
                                   ObDMLStmt *dml_stmt,
                                   bool &is_generated);
+  // AI COLUMN: an ai column is generated asynchronously by the background worker,
+  // so a user statement must not write it explicitly. See notes/contract.md §3.
+  int check_basic_column_ai(const ObColumnRefRawExpr *col_expr,
+                            ObDMLStmt *dml_stmt,
+                            bool &is_ai_column);
+  // raise the user error for an explicit write of an ai column,
+  // reuse the generated column errno but keep the OB_AI_COLUMN message prefix.
+  static int raise_ai_column_write_error(const common::ObString &column_name,
+                                         const common::ObString &table_name);
+public:
+  // AI COLUMN: find the hidden companion column (__ai_status_<c>/__ai_srcver_<c>)
+  // of an ai column. Both companion columns carry AI_STATUS_COLUMN_FLAG and the
+  // name prefix is the single source of truth (notes/contract.md §1.2).
+  static int get_ai_companion_column(const share::schema::ObTableSchema &table,
+                                     const share::schema::ObColumnSchemaV2 &ai_column,
+                                     const bool want_status_column,
+                                     const share::schema::ObColumnSchemaV2 *&companion);
+  static int get_ai_dep_column_ids(const share::schema::ObColumnSchemaV2 &ai_column,
+                                   common::ObIArray<uint64_t> &dep_column_ids);
+  // a per-statement monotonic source version used as the durable invalidation mark,
+  // see notes/module-dml.md for why a resolve time constant is enough.
+  static int64_t build_ai_srcver_value();
+protected:
   virtual int expand_view(TableItem &view_item);
   int do_expand_view(TableItem &view_item, ObChildStmtResolver &view_resolver);
   int check_pad_generated_column(const ObSQLMode sql_mode,

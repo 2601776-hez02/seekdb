@@ -148,6 +148,27 @@ public:
                                const ObTableSchema &table_schema,
                                const ObConstraint &constraint_schema);
 
+  // ---------------- AI column metadata (__all_ai_column) ----------------
+  // Insert or update the metadata row of one AI column.
+  static int add_ai_column_meta(common::ObISQLClient &sql_client,
+                                const ObTableSchema &table_schema,
+                                const common::ObString &database_name,
+                                const ObColumnSchemaV2 &column_schema);
+  // Insert or update the metadata rows of all AI columns of a table (create table).
+  static int add_ai_column_meta(common::ObISQLClient &sql_client,
+                                const ObTableSchema &table_schema,
+                                const common::ObString &database_name);
+  // Delete the metadata row of one AI column (drop/add of a single column).
+  static int delete_ai_column_meta(common::ObISQLClient &sql_client,
+                                   const uint64_t table_id,
+                                   const uint64_t column_id);
+  // Delete the metadata rows of all AI columns of a table (drop table).
+  static int delete_ai_column_meta_of_table(common::ObISQLClient &sql_client,
+                                            const uint64_t table_id);
+  // Insert or update the metadata rows of all AI columns of a list of tables.
+  static int batch_add_ai_column_meta(common::ObISQLClient &sql_client,
+                                      ObIArray<ObTableSchema> &tables);
+
   int revise_check_cst_column_info(
       common::ObISQLClient &sql_client,
       const ObTableSchema &table_schema,

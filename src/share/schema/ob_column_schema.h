@@ -50,6 +50,138 @@ const char *const STR_COLUMN_TYPE_RAW = "raw";
 const char *const STR_COLUMN_TYPE_UNKNOWN = "unknown";
 
 class ObTableSchema;
+
+// AI column: the function kind of an AI column definition
+struct ObAIColumnFuncType
+{
+  enum TYPE { INVALID = 0, COMPLETE = 1, EMBED = 2, RERANK = 3, MAX };
+};
+// AI column: name of the ai function, MUST be identical to the persisted string
+const char *const OB_AI_COLUMN_FUNC_COMPLETE = "AI_COMPLETE";
+const char *const OB_AI_COLUMN_FUNC_EMBED = "AI_EMBED";
+const char *const OB_AI_COLUMN_FUNC_RERANK = "AI_RERANK";
+// AI column: name prefix of the hidden companion columns
+const char *const OB_AI_COLUMN_STATUS_COLUMN_PREFIX = "__ai_status_";
+const char *const OB_AI_COLUMN_SRCVER_COLUMN_PREFIX = "__ai_srcver_";
+// AI column: default value of option max_retries
+static const int64_t OB_DEFAULT_AI_COLUMN_MAX_RETRIES = 3;
+static const int64_t OB_MAX_AI_COLUMN_MAX_RETRIES = 100;
+
+// AI column: options of the asynchronous generation, i.e. WITH(sync_mode=..., max_retries=...)
+struct ObAIColumnOption
+{
+  ObAIColumnOption() { reset(); }
+  ~ObAIColumnOption() = default;
+  void reset()
+  {
+    max_retries_ = OB_DEFAULT_AI_COLUMN_MAX_RETRIES;
+    sync_mode_ = ASYNC;
+  }
+  int assign(const ObAIColumnOption &other)
+  {
+    max_retries_ = other.max_retries_;
+    sync_mode_ = other.sync_mode_;
+    return OB_SUCCESS;
+  }
+  TO_STRING_KV(K_(max_retries), K_(sync_mode));
+
+  enum SyncMode { ASYNC = 0, MAX_SYNC_MODE };
+  int64_t max_retries_;
+  SyncMode sync_mode_;
+  OB_UNIS_VERSION(1);
+};
+
+// AI column: the whole metadata of one AI column, stored in ObColumnSchemaV2::ai_spec_
+struct ObAIColumnSpec
+{
+  ObAIColumnSpec() { reset(); }
+  ~ObAIColumnSpec() = default;
+  void reset()
+  {
+    def_version_ = 0;
+    status_column_id_ = OB_INVALID_ID;
+    srcver_column_id_ = OB_INVALID_ID;
+    func_type_ = ObAIColumnFuncType::INVALID;
+    model_name_.reset();
+    ai_function_.reset();
+    option_.reset();
+    dep_column_ids_.reset();
+    type_hint_.reset();
+    allocator_ = NULL;
+  }
+  bool is_valid() const
+  {
+    return OB_INVALID_ID != status_column_id_
+           && OB_INVALID_ID != srcver_column_id_
+           && ObAIColumnFuncType::INVALID != func_type_
+           && !model_name_.empty()
+           && !ai_function_.empty();
+  }
+  int assign(const ObAIColumnSpec &other, common::ObIAllocator &alloc)
+  {
+    int ret = OB_SUCCESS;
+    if (this != &other) {
+      def_version_ = other.def_version_;
+      status_column_id_ = other.status_column_id_;
+      srcver_column_id_ = other.srcver_column_id_;
+      func_type_ = other.func_type_;
+      if (OB_FAIL(ob_write_string(alloc, other.model_name_, model_name_))) {
+      } else if (OB_FAIL(ob_write_string(alloc, other.ai_function_, ai_function_))) {
+      } else if (OB_FAIL(ob_write_string(alloc, other.type_hint_, type_hint_))) {
+      } else if (OB_FAIL(option_.assign(other.option_))) {
+      } else if (OB_FAIL(dep_column_ids_.assign(other.dep_column_ids_))) {
+      } else {
+        allocator_ = &alloc;
+      }
+    }
+    return ret;
+  }
+  int set_model_name(const common::ObString &model_name, common::ObIAllocator &alloc)
+  {
+    int ret = OB_SUCCESS;
+    if (OB_FAIL(ob_write_string(alloc, model_name, model_name_))) {
+    } else {
+      allocator_ = &alloc;
+    }
+    return ret;
+  }
+  int set_ai_function(const common::ObString &ai_function, common::ObIAllocator &alloc)
+  {
+    int ret = OB_SUCCESS;
+    if (OB_FAIL(ob_write_string(alloc, ai_function, ai_function_))) {
+    } else {
+      allocator_ = &alloc;
+    }
+    return ret;
+  }
+  int set_type_hint(const common::ObString &type_hint, common::ObIAllocator &alloc)
+  {
+    int ret = OB_SUCCESS;
+    if (OB_FAIL(ob_write_string(alloc, type_hint, type_hint_))) {
+    } else {
+      allocator_ = &alloc;
+    }
+    return ret;
+  }
+  int add_dep_column_id(const uint64_t column_id) { return dep_column_ids_.push_back(column_id); }
+  void set_allocator(common::ObIAllocator *allocator) { allocator_ = allocator; }
+  common::ObIAllocator *get_allocator() const { return allocator_; }
+  TO_STRING_KV(K_(def_version), K_(status_column_id), K_(srcver_column_id), K_(func_type),
+               K_(model_name), K_(ai_function), K_(option), K_(dep_column_ids), K_(type_hint));
+
+  uint64_t def_version_;      // bumped on every DDL which changes this definition
+  uint64_t status_column_id_;
+  uint64_t srcver_column_id_;
+  int64_t func_type_;         // see ObAIColumnFuncType
+  common::ObString model_name_;   // logical model name, i.e. the first argument of the ai function
+  common::ObString ai_function_;  // "AI_COMPLETE" / "AI_EMBED" / "AI_RERANK"
+  ObAIColumnOption option_;
+  common::ObSEArray<uint64_t, 4> dep_column_ids_;  // ordinary columns referenced by the expression
+  common::ObString type_hint_;    // type hint appended to the prompt, see contract 7.1
+  common::ObIAllocator *allocator_;  // used to deep copy strings when deserializing, not serialized
+  OB_UNIS_VERSION(1);
+};
+
 class ObColumnSchemaV2 : public ObSchema
 {
   OB_UNIS_VERSION_V(1);
@@ -314,6 +446,32 @@ int assign(const ObColumnSchemaV2 &src_schema);
   inline bool is_not_null_validate_column() const
   { return has_not_null_constraint() && (column_flags_ & NOT_NULL_VALIDATE_FLAG); }
 
+  // AI column: the result column which is generated asynchronously by an ai model
+  inline bool is_ai_column() const { return column_flags_ & AI_COLUMN_FLAG; }
+  inline bool is_ai_status_column() const { return column_flags_ & AI_STATUS_COLUMN_FLAG; }
+  inline void set_ai_column() { add_column_flag(AI_COLUMN_FLAG); }
+  inline void set_ai_status_column() { add_column_flag(AI_STATUS_COLUMN_FLAG); }
+  inline void unset_ai_column() { del_column_flag(AI_COLUMN_FLAG); }
+  inline const ObAIColumnSpec &get_ai_spec() const { return ai_spec_; }
+  inline ObAIColumnSpec &get_ai_spec() { return ai_spec_; }
+  inline int set_ai_spec(const ObAIColumnSpec &ai_spec)
+  {
+    int ret = OB_SUCCESS;
+    common::ObIAllocator *allocator = get_allocator();
+    if (OB_ISNULL(allocator)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      ret = ai_spec_.assign(ai_spec, *allocator);
+    }
+    return ret;
+  }
+  inline void reset_ai_spec() { ai_spec_.reset(); }
+  inline bool is_ai_status_value_column() const
+  {
+    return is_ai_status_column()
+           && column_name_.prefix_match(OB_AI_COLUMN_STATUS_COLUMN_PREFIX);
+  }
+
   inline void add_column_flag(int64_t flag) { column_flags_ |= flag; }
   inline void del_column_flag(int64_t flag) { column_flags_ &= ~flag; }
   inline void add_or_del_column_flag(int64_t flag, bool is_add);
@@ -397,6 +555,7 @@ private:
   uint64_t sub_type_;
   ObSkipIndexColumnAttr skip_index_attr_;
   int64_t lob_chunk_size_;
+  ObAIColumnSpec ai_spec_;
   share::ObLocalSessionVar local_session_vars_;
 };
 

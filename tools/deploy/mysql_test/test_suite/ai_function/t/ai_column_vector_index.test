@@ -1,0 +1,173 @@
+#owner: ai-column
+#owner group: seekdb
+#description: AI COLUMN that produces a VECTOR(4) through AI_EMBED, backed by a
+#             VSAG HNSW vector index.  Generation enters the index, an
+#             invalidation removes the row from the ANN result, regeneration
+#             puts it back with its new vector, RETRY FAILED regenerates a
+#             terminal row into the index, and a rolled back UPDATE leaves both
+#             the value and the index untouched.
+#
+#require: python3 (>= 3.7) on PATH
+#require: AI_COLUMN_MOCK_PORT=19120 - TCP port of the local mock AI service
+#         (default 19120; when you override it, also change the endpoint URLs
+#         below, they are the only hard coded port literals)
+#require: run from tools/deploy, e.g.
+#         ./obd.sh mysqltest -n test --suite ai_function --test-set ai_column_vector_index
+#
+# The mock returns exactly the numbers of a [[VEC=...]] marker, so the vectors
+# and the ANN order below are known constants instead of hash values.
+# Distances from the query vector [1,0,0,0]:
+#   id=1 [1,0,0,0]        0.0
+#   id=2 [0.6,0.8,0,0]    0.894427
+#   id=3 [0,0.5,0,0]      1.118034
+#   id=4 [0,0,0.25,0]     1.030777
+#   id=5 [0.5,0.5,0,0]    0.707107   (only after RETRY FAILED)
+#
+--echo # expected output is generated on first run: mysqltest --record
+
+connection default;
+
+--let $wait_timeout= 60
+
+# ---------------------------------------------------------------------------
+# self cleaning
+# ---------------------------------------------------------------------------
+--disable_warnings
+drop table if exists t_ai_vec;
+--enable_warnings
+--error 0,11112
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_embed_endpoint');
+--error 0,11118
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_embed_model');
+
+# ---------------------------------------------------------------------------
+# local mock AI service, logical model and endpoint
+# ---------------------------------------------------------------------------
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --stop-if-running
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --seed 20250101 --dim 4 > /tmp/ai_column_mock.log 2>&1 &
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --wait-ready
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --reset
+
+call DBMS_AI_SERVICE.CREATE_AI_MODEL(
+  'mock_embed_model', '{
+    "type": "dense_embedding",
+    "model_name": "mock-embed"
+ }');
+call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT (
+  'mock_embed_endpoint', '{
+    "ai_model_name": "mock_embed_model",
+    "url": "http://127.0.0.1:19120/v1/embeddings",
+    "access_key": "sk-mock",
+    "request_model_name": "mock-embed",
+    "provider": "openai"
+  }');
+
+# ---------------------------------------------------------------------------
+# 1. VECTOR(4) AI column with an inline vector index (same syntax as
+#    test_suite/vector_index/t/create_table_with_vector_index.test)
+# ---------------------------------------------------------------------------
+create table t_ai_vec (
+  id      int primary key,
+  content varchar(4096),
+  emb     vector(4) AI COLUMN (
+    AI_EMBED('mock_embed_model', content, 4)
+  ) WITH (sync_mode='async', max_retries=3),
+  vector index idx_emb(emb) with (distance=l2, type=hnsw, lib=vsag, m=16, ef_construction=200, ef_search=64)
+);
+show ai columns from t_ai_vec;
+show create table t_ai_vec;
+show index from t_ai_vec;
+
+# the same index created after the table, on the AI column
+drop table t_ai_vec;
+create table t_ai_vec (
+  id      int primary key,
+  content varchar(4096),
+  emb     vector(4) AI COLUMN (
+    AI_EMBED('mock_embed_model', content, 4)
+  ) WITH (sync_mode='async', max_retries=3)
+);
+create vector index idx_emb on t_ai_vec(emb) with (distance=l2, type=hnsw, lib=vsag, m=16, ef_construction=200, ef_search=64);
+show create table t_ai_vec;
+
+# ---------------------------------------------------------------------------
+# 2. generation fills the column and the index
+# ---------------------------------------------------------------------------
+insert into t_ai_vec (id, content) values
+  (1, '[[VEC=1,0,0,0]] alpha document'),
+  (2, '[[VEC=0.6,0.8,0,0]] beta document'),
+  (3, '[[VEC=0,0.5,0,0]] gamma document'),
+  (4, '[[VEC=0,0,0.25,0]] delta document');
+let $wait_condition = select count(*) = 0 from t_ai_vec where id in (1, 2, 3, 4) and emb is null;
+--source mysql_test/include/wait_condition.inc
+select id, emb from t_ai_vec order by id;
+
+# ---------------------------------------------------------------------------
+# 3. ANN query: [1,0,0,0] is the exact vector of row 1, rows 2 and 4 are the
+#    next closest, row 3 is the farthest
+# ---------------------------------------------------------------------------
+select id from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3;
+select id, l2_distance(emb, [1,0,0,0]) from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3;
+
+# ---------------------------------------------------------------------------
+# 4. invalidation removes the row from the index: row 1 has no vector while the
+#    regeneration is still running
+# ---------------------------------------------------------------------------
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"delay_ms":2000}'
+update t_ai_vec set content = '[[VEC=0.9,0.1,0,0]] alpha document, rewritten' where id = 1;
+select id, emb from t_ai_vec where id = 1;
+select id from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3;
+select count(*) from (select id from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3) q where q.id = 1;
+
+# ---------------------------------------------------------------------------
+# 5. regeneration puts the row back into the index with its new vector
+#    (0.9,0.1,0,0) is even closer to the query than before
+# ---------------------------------------------------------------------------
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"delay_ms":0}'
+let $wait_condition = select emb is not null from t_ai_vec where id = 1;
+--source mysql_test/include/wait_condition.inc
+select id, emb from t_ai_vec where id = 1;
+select id from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3;
+select id, l2_distance(emb, [1,0,0,0]) from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3;
+
+# ---------------------------------------------------------------------------
+# 6. terminal failure and RETRY: a row without a vector is not in the index,
+#    RETRY FAILED regenerates it and it becomes the second nearest row
+# ---------------------------------------------------------------------------
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"fail_times":100,"fail_status":500}'
+insert into t_ai_vec (id, content) values
+  (5, '[[VEC=0.5,0.5,0,0]] epsilon document that fails first');
+--sleep 5
+select id, emb from t_ai_vec where id = 5;
+select id from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3;
+select count(*) from (select id from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 4) q where q.id = 5;
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --config '{"fail_times":0}'
+alter table t_ai_vec retry failed ai column emb where id = 5;
+let $wait_condition = select emb is not null from t_ai_vec where id = 5;
+--source mysql_test/include/wait_condition.inc
+select id, emb is not null from t_ai_vec where id = 5;
+select id from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3;
+
+# ---------------------------------------------------------------------------
+# 7. rollback consistency: a rolled back UPDATE leaves the old vector in the
+#    column and in the index, and costs no model call
+# ---------------------------------------------------------------------------
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --reset
+begin;
+update t_ai_vec set content = '[[VEC=0,0,0,1]] beta document, rolled back' where id = 2;
+select id, emb is null from t_ai_vec where id = 2;
+rollback;
+select id, emb from t_ai_vec where id = 2;
+select id from t_ai_vec order by l2_distance(emb, [1,0,0,0]) APPROXIMATE limit 3;
+--sleep 2
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --print-state
+
+# ---------------------------------------------------------------------------
+# self cleaning
+# ---------------------------------------------------------------------------
+--disable_warnings
+drop table if exists t_ai_vec;
+--enable_warnings
+call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('mock_embed_endpoint');
+call DBMS_AI_SERVICE.DROP_AI_MODEL('mock_embed_model');
+--exec python3 ./mysql_test/test_suite/ai_function/include/ai_column_mock.py --stop

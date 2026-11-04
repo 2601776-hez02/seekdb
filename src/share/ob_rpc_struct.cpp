@@ -453,6 +453,34 @@ int ObAlterTableArg::is_alter_comment(bool &is_alter_comment) const
   return ret;
 }
 
+// AI COLUMN: ALTER TABLE ... RETRY [FAILED] AI COLUMN <c> [WHERE <cond>].
+// The three inputs are deep copied into the argument's own arena because the
+// parse tree buffer and the statement text are gone once resolve is finished,
+// while the argument is still serialized to / executed by the rootserver.
+int ObAlterTableArg::set_ai_column_retry_action(const common::ObString &column_name,
+                                                const bool only_failed,
+                                                const common::ObString &where_cond)
+{
+  int ret = OB_SUCCESS;
+  common::ObString column_name_copy;
+  common::ObString where_cond_copy;
+  if (OB_UNLIKELY(column_name.empty())) {
+    ret = OB_INVALID_ARGUMENT;
+    SHARE_LOG(WARN, "ai column name of the retry action is empty", KR(ret));
+  } else if (OB_FAIL(ob_write_string(allocator_, column_name, column_name_copy, true /*c_style*/))) {
+    SHARE_LOG(WARN, "fail to deep copy ai column name", KR(ret), K(column_name));
+  } else if (!where_cond.empty()
+             && OB_FAIL(ob_write_string(allocator_, where_cond, where_cond_copy, true /*c_style*/))) {
+    SHARE_LOG(WARN, "fail to deep copy ai column retry condition", KR(ret), K(where_cond));
+  } else {
+    ai_column_name_ = column_name_copy;
+    ai_where_cond_ = where_cond_copy;
+    ai_only_failed_ = only_failed;
+    ai_action_ = AI_COLUMN_ACTION_RETRY;
+  }
+  return ret;
+}
+
 int ObAlterTableArg::serialize_index_args(char *buf, const int64_t data_len, int64_t &pos) const
 {
   int ret = OB_SUCCESS;
@@ -771,6 +799,14 @@ OB_DEF_SERIALIZE(ObAlterTableArg)
   LST_DO_CODE(OB_UNIS_ENCODE,
               data_version_);
 
+  // AI COLUMN retry action, appended after the historical fields so that buffers
+  // written before this change still deserialize (see OB_DEF_DESERIALIZE).
+  LST_DO_CODE(OB_UNIS_ENCODE,
+              ai_action_,
+              ai_column_name_,
+              ai_where_cond_,
+              ai_only_failed_);
+
   return ret;
 }
 
@@ -819,6 +855,28 @@ OB_DEF_DESERIALIZE(ObAlterTableArg)
 
   LST_DO_CODE(OB_UNIS_DECODE,
               data_version_);
+
+  // AI COLUMN retry action. It is the last block of the buffer, so a buffer
+  // written before this change (e.g. a persisted ddl task) simply has no bytes
+  // left here (OB_UNIS_DECODE stops at data_len) and keeps AI_COLUMN_ACTION_NONE.
+  // The strings are copied into the arg's own arena: the buffer they are decoded
+  // from may not outlive the argument.
+  LST_DO_CODE(OB_UNIS_DECODE,
+              ai_action_,
+              ai_column_name_,
+              ai_where_cond_,
+              ai_only_failed_);
+  if (OB_FAIL(ret)) {
+  } else if (!ai_column_name_.empty()) {
+    common::ObString column_name = ai_column_name_;
+    common::ObString where_cond = ai_where_cond_;
+    if (OB_FAIL(ob_write_string(allocator_, column_name, ai_column_name_))) {
+      SHARE_LOG(WARN, "fail to deep copy ai column name on deserialize", KR(ret));
+    } else if (!where_cond.empty()
+               && OB_FAIL(ob_write_string(allocator_, where_cond, ai_where_cond_))) {
+      SHARE_LOG(WARN, "fail to deep copy ai column retry condition on deserialize", KR(ret));
+    }
+  }
   return ret;
 }
 
@@ -859,7 +917,11 @@ OB_DEF_SERIALIZE_SIZE(ObAlterTableArg)
                 lock_session_id_,
                 lock_session_create_ts_,
                 lock_priority_,
-                data_version_);
+                data_version_,
+                ai_action_,
+                ai_column_name_,
+                ai_where_cond_,
+                ai_only_failed_);
   }
 
   if (OB_FAIL(ret)) {
@@ -2700,6 +2762,7 @@ void ObAlterTableRes::reset()
   task_id_ = 0;
   ddl_res_array_.reset();
   ddl_need_retry_at_executor_ = false;
+  affected_rows_ = 0;
 }
 
 
@@ -2707,7 +2770,7 @@ void ObAlterTableRes::reset()
 OB_SERIALIZE_MEMBER(ObDropDatabaseRes, ddl_res_, affected_row_);
 OB_SERIALIZE_MEMBER(ObAlterTableResArg, schema_type_, schema_id_, schema_version_, part_object_id_);
 OB_SERIALIZE_MEMBER(ObAlterTableRes, index_table_id_, constriant_id_, schema_version_,
-res_arg_array_, ddl_type_, task_id_, ddl_res_array_, ddl_need_retry_at_executor_);
+res_arg_array_, ddl_type_, task_id_, ddl_res_array_, ddl_need_retry_at_executor_, affected_rows_);
 OB_SERIALIZE_MEMBER(ObGetRuntimeSchemaVersionArg);
 OB_SERIALIZE_MEMBER(ObGetRuntimeSchemaVersionResult, schema_version_);
 

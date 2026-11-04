@@ -1,0 +1,29 @@
+load("//bazel:defs.bzl", "seekdb_module_cc_test")
+
+package(default_visibility = ["//visibility:private"])
+
+# The AI-function task asks for two focused unit tests:
+#   engine/expr/ob_expr_ai_prompt_test.cpp   JSON args / repeated placeholders / nested prompt
+#   engine/expr/test_ob_openai_utils.cpp     embedding validation, index reordering, Ollama
+# They used to be part of a shared `sql_tests` module binary that this branch no
+# longer ships, so the module target is rebuilt here with the sources that are
+# present in the tree.  `srcs` is a glob so cases dropped into this directory
+# later are picked up automatically; every file that needs a separate
+# translation unit must be listed in `unity_exceptions` with a reason.
+seekdb_module_cc_test(
+    name = "sql_tests",
+    srcs = glob(["**/*.cpp"]),
+    test_hdrs = glob(
+        [
+            "**/*.h",
+            "**/*.hh",
+            "**/*.hpp",
+            "**/*.ipp",
+        ],
+        allow_empty = True,
+    ),
+    module_interface = "//src/sql:sql_unit_test_interface",
+    unity_exceptions = {},
+    shard_count = 1,
+    data = [],
+)

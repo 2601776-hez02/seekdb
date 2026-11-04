@@ -85,7 +85,8 @@ int check_secure_local_path(const ObString &secure_file_priv, const std::string 
       }
     }
   }
-  LOG_DEBUG("file sql path check", K(ret), K(path), K(is_directory), K(secure_file_priv));
+  LOG_DEBUG("file sql path check", K(ret), K(is_directory), K(secure_file_priv),
+            "path", ObString(static_cast<int32_t>(path.size()), path.c_str()));
   return ret;
 }
 
@@ -207,16 +208,27 @@ public:
     if (OB_SUCC(ret)) {
       projection_.clear();
       needed_.clear();
-      for (int64_t i = 0; OB_SUCC(ret) && i < context_.column_ids_.count(); ++i) {
-        const uint64_t column_id = context_.column_ids_.at(i);
-        const int64_t index = static_cast<int64_t>(column_id) - OB_APP_MIN_COLUMN_ID;
-        if (column_id < static_cast<uint64_t>(OB_APP_MIN_COLUMN_ID) || index < 0 ||
-            index >= static_cast<int64_t>(columns_.size())) {
-          ret = OB_ERR_UNEXPECTED;
-        } else {
-          projection_.push_back(index);
-          if (std::find(needed_.begin(), needed_.end(), index) == needed_.end()) {
-            needed_.push_back(index);
+      if (context_.column_ids_.empty()) {
+        // A table function with a bind-dependent output is planned without an
+        // explicit column id list, so the scan is responsible for producing
+        // every inferred column in order.  Returning zero cells here would make
+        // the projection above the scan fail.
+        for (size_t i = 0; OB_SUCC(ret) && i < columns_.size(); ++i) {
+          projection_.push_back(static_cast<int64_t>(i));
+          needed_.push_back(static_cast<int64_t>(i));
+        }
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < context_.column_ids_.count(); ++i) {
+          const uint64_t column_id = context_.column_ids_.at(i);
+          const int64_t index = static_cast<int64_t>(column_id) - OB_APP_MIN_COLUMN_ID;
+          if (column_id < static_cast<uint64_t>(OB_APP_MIN_COLUMN_ID) || index < 0 ||
+              index >= static_cast<int64_t>(columns_.size())) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            projection_.push_back(index);
+            if (std::find(needed_.begin(), needed_.end(), index) == needed_.end()) {
+              needed_.push_back(index);
+            }
           }
         }
       }
@@ -373,7 +385,9 @@ private:
   int64_t file_size_;
   int64_t modify_time_;
   IRecordReader *reader_;
-  Row file_row_;
+  // Fully qualified: oceanbase::sql::Row (a class template) is also visible in
+  // this translation unit through the engine headers.
+  file_sql::Row file_row_;
   ObSEArray<ObObj, 8> cells_;
   ObNewRow ob_row_;
   ObArenaAllocator row_allocator_;
@@ -470,10 +484,24 @@ int ObDMLResolver::bind_file_table_function(const TableFunctionCall &call, Table
     if (T_OP_EQ == node.type_ && 2 == node.num_child_ && nullptr != node.children_[0] &&
         nullptr != node.children_[1]) {
       const ParseNode *left = node.children_[0];
-      if (T_COLUMN_REF == left->type_ && 2 == left->num_child_ && nullptr != left->children_[1] &&
-          T_IDENT == left->children_[1]->type_) {
-        name.assign_ptr(left->children_[1]->str_value_,
-                        static_cast<int32_t>(left->children_[1]->str_len_));
+      // The name is a bare identifier in the grammar, so it arrives as a
+      // T_COLUMN_REF.  Depending on how the parser fills the node the text may
+      // sit in the column child, in the table child slot, or on the node
+      // itself, so accept all three spellings.
+      const ParseNode *ident = nullptr;
+      if (T_COLUMN_REF == left->type_) {
+        if (nullptr != left->str_value_ && left->str_len_ > 0) {
+          ident = left;
+        } else if (left->num_child_ > 1 && nullptr != left->children_[1] &&
+                   T_IDENT == left->children_[1]->type_) {
+          ident = left->children_[1];
+        } else if (left->num_child_ > 0 && nullptr != left->children_[0] &&
+                   T_IDENT == left->children_[0]->type_) {
+          ident = left->children_[0];
+        }
+      }
+      if (nullptr != ident) {
+        name.assign_ptr(ident->str_value_, static_cast<int32_t>(ident->str_len_));
         named = true;
       } else if (T_VARCHAR == left->type_) {
         name.assign_ptr(left->str_value_, static_cast<int32_t>(left->str_len_));
@@ -721,6 +749,14 @@ int ObDMLResolver::bind_file_table_function(const TableFunctionCall &call, Table
       } else if (OB_FAIL(resolve_function_table_column_item(*item, meta, accuracy, column_name,
                                                             OB_APP_MIN_COLUMN_ID + i,
                                                             column_item))) {
+      } else if (OB_ISNULL(column_item) || OB_ISNULL(column_item->expr_)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        // ObLogFunctionTable::generate_access_exprs() only forwards columns whose
+        // expression is an explicit reference.  A table function column has no
+        // schema to mark it implicitly, so mark it here; otherwise the scan
+        // operator is planned with no output columns and the projection fails.
+        column_item->expr_->set_explicited_reference();
       }
     }
   }

@@ -295,12 +295,15 @@ bool parse_integer_text(const char *text, const int64_t length, int64_t &value)
   int64_t index = 0;
   bool negative = false;
   uint64_t magnitude = 0;
-  const uint64_t limit = static_cast<uint64_t>(INT64_MAX);
   if (ok && ('+' == text[0] || '-' == text[0])) {
     negative = '-' == text[0];
     index = 1;
     ok = index < length;
   }
+  // A negative value may reach one further than INT64_MAX because INT64_MIN has
+  // no positive counterpart; both bounds must infer as BIGINT instead of DOUBLE.
+  const uint64_t limit = negative ? static_cast<uint64_t>(INT64_MAX) + 1
+                                  : static_cast<uint64_t>(INT64_MAX);
   for (; ok && index < length; ++index) {
     const char c = text[index];
     if (c < '0' || c > '9') {
@@ -316,7 +319,10 @@ bool parse_integer_text(const char *text, const int64_t length, int64_t &value)
   }
   if (ok) {
     if (negative) {
-      value = (0 == magnitude) ? 0 : -static_cast<int64_t>(magnitude);
+      // Negating 2^63 is not representable, so name INT64_MIN explicitly.
+      value = (static_cast<uint64_t>(INT64_MAX) + 1 == magnitude)
+                  ? INT64_MIN
+                  : -static_cast<int64_t>(magnitude);
     } else {
       value = static_cast<int64_t>(magnitude);
     }

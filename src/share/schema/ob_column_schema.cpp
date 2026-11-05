@@ -37,6 +37,7 @@ OB_DEF_SERIALIZE(ObAIColumnSpec)
               def_version_,
               status_column_id_,
               srcver_column_id_,
+              result_spec_column_id_,
               func_type_,
               model_name_,
               ai_function_,
@@ -60,6 +61,7 @@ OB_DEF_DESERIALIZE(ObAIColumnSpec)
               def_version_,
               status_column_id_,
               srcver_column_id_,
+              result_spec_column_id_,
               func_type_,
               model_name,
               ai_function,
@@ -95,6 +97,7 @@ OB_DEF_SERIALIZE_SIZE(ObAIColumnSpec)
               def_version_,
               status_column_id_,
               srcver_column_id_,
+              result_spec_column_id_,
               func_type_,
               model_name_,
               ai_function_,
@@ -679,6 +682,11 @@ int ObColumnSchemaV2::convert_column_id(const hash::ObHashMap<uint64_t, uint64_t
     if (OB_INVALID_ID != ai_spec.srcver_column_id_
         && OB_SUCCESS == column_id_map.get_refactored(ai_spec.srcver_column_id_, new_column_id)) {
       ai_spec.srcver_column_id_ = new_column_id;
+    }
+    new_column_id = 0;
+    if (OB_INVALID_ID != ai_spec.result_spec_column_id_
+        && OB_SUCCESS == column_id_map.get_refactored(ai_spec.result_spec_column_id_, new_column_id)) {
+      ai_spec.result_spec_column_id_ = new_column_id;
     }
     ObSEArray<uint64_t, 4> remapped_ids;
     for (int64_t i = 0; OB_SUCC(ret) && i < ai_spec.dep_column_ids_.count(); ++i) {

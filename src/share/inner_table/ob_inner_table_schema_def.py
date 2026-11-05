@@ -2441,7 +2441,8 @@ all_ai_model_endpoint_def = dict(
         ('request_model_name', 'varchar:128', 'true'),
         ('parameters', 'varchar:2048', 'true'),
         ('request_transform_fn', 'varchar:64', 'true'),
-        ('response_transform_fn', 'varchar:64', 'true')
+        ('response_transform_fn', 'varchar:64', 'true'),
+        ('max_concurrency', 'int', 'true')
     ]
 )
 def_table_schema(**all_ai_model_endpoint_def)
@@ -2473,8 +2474,9 @@ all_ai_column_def = dict(
         ('dependencies', 'longtext', 'true'),
         ('sync_mode', 'int', 'true'),
         ('max_retries', 'int', 'true'),
-        ('status_column_id', 'int', 'true'),
-        ('srcver_column_id', 'int', 'true'),
+        ('state_column_id', 'int', 'true'),
+        ('request_column_id', 'int', 'true'),
+        ('result_spec_column_id', 'int', 'true'),
         ('def_version', 'int', 'true'),
         ('flags', 'int', 'true')
     ]
@@ -2504,7 +2506,9 @@ all_ai_column_task_def = dict(
         ('retry_count', 'int', 'true'),
         ('lease_owner', 'varchar:128', 'true'),
         ('lease_expire_ts', 'int', 'true'),
-        ('input_snapshot', 'longtext', 'true')
+        ('input_snapshot', 'longtext', 'true'),
+        ('eligible_ts', 'timestamp', 'true'),
+        ('rowkey_predicate', 'varchar:OB_MAX_ROW_KEY_LENGTH', 'true')
     ]
 )
 def_table_schema(**all_ai_column_task_def)
@@ -13948,7 +13952,8 @@ def_table_schema(
       REQUEST_MODEL_NAME,
       PARAMETERS,
       REQUEST_TRANSFORM_FN,
-      RESPONSE_TRANSFORM_FN
+      RESPONSE_TRANSFORM_FN,
+      MAX_CONCURRENCY
     FROM oceanbase.__all_ai_model_endpoint WHERE ENDPOINT_ID != -1;
   """.replace("\n", " ")
 )
@@ -13976,8 +13981,9 @@ def_table_schema(
       DEPENDENCIES,
       SYNC_MODE,
       MAX_RETRIES,
-      STATUS_COLUMN_ID,
-      SRCVER_COLUMN_ID,
+      STATE_COLUMN_ID,
+      REQUEST_COLUMN_ID,
+      RESULT_SPEC_COLUMN_ID,
       DEF_VERSION,
       FLAGS
     FROM oceanbase.__all_ai_column;

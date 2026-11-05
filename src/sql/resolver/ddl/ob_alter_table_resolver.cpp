@@ -3681,6 +3681,7 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
                        // the real ones (the next two column ids) and rewrites the spec
                        AI_HIDDEN_COLUMN_ID_PLACEHOLDER,
                        AI_HIDDEN_COLUMN_ID_PLACEHOLDER + 1,
+                       AI_HIDDEN_COLUMN_ID_PLACEHOLDER + 2,
                        *allocator_,
                        ai_hidden_cols))) {
             SQL_RESV_LOG(WARN, "fail to build ai column hidden columns", K(ret));
@@ -4370,6 +4371,7 @@ int ObAlterTableResolver::resolve_modify_column(const ParseNode &node,
             const ObAIColumnSpec &origin_ai_spec = origin_col_schema->get_ai_spec();
             ai_spec.status_column_id_ = origin_ai_spec.status_column_id_;
             ai_spec.srcver_column_id_ = origin_ai_spec.srcver_column_id_;
+            ai_spec.result_spec_column_id_ = origin_ai_spec.result_spec_column_id_;
             ai_spec.def_version_ = origin_ai_spec.def_version_ + 1;
             if (OB_FAIL(alter_column_schema.set_ai_spec(ai_spec))) {
               SQL_RESV_LOG(WARN, "fail to set ai column spec", K(ret));

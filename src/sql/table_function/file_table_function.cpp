@@ -526,12 +526,9 @@ int ObDMLResolver::bind_file_table_function(const TableFunctionCall &call, Table
         status = OB_INVALID_ARGUMENT;
       }
     } else if (value.is_integer_type()) {
-      int64_t int_value = 0;
-      if (OB_SUCCESS == value.get_int(int_value)) {
-        flag = 0 != int_value;
-      } else {
-        status = OB_INVALID_ARGUMENT;
-      }
+      // get_int() only accepts the wide integer types, so narrow integer
+      // objects (TRUE is a TINYINT) are read through their own getter.
+      flag = 0 != value.get_int32();
     } else {
       status = OB_INVALID_ARGUMENT;
     }
@@ -541,7 +538,13 @@ int ObDMLResolver::bind_file_table_function(const TableFunctionCall &call, Table
   auto option_to_int = [](const ObObj &value, int64_t &result) -> int {
     int status = OB_SUCCESS;
     if (value.is_integer_type()) {
-      if (OB_SUCCESS != value.get_int(result)) {
+      if (OB_SUCCESS == value.get_int(result)) {
+      } else if (value.is_tinyint() || value.is_smallint() || value.is_mediumint() ||
+                 value.is_int32()) {
+        // narrow integer objects (a TRUE literal evaluates to TINYINT) are not
+        // readable through get_int()
+        result = value.get_int32();
+      } else {
         status = OB_INVALID_ARGUMENT;
       }
     } else if (value.is_varchar()) {
@@ -625,6 +628,21 @@ int ObDMLResolver::bind_file_table_function(const TableFunctionCall &call, Table
         status = OB_INVALID_ARGUMENT;
       }
       options.skip_rows_ = int_value;
+    } else if (name.case_compare("format") == 0) {
+      // The explicit format overrides what the function name implies.
+      FileFormat format = FileFormat::CSV;
+      if (!value.is_varchar()) {
+        status = OB_INVALID_ARGUMENT;
+      } else {
+        const ObString text = value.get_string();
+        if (!parse_format_name(text.ptr(), static_cast<int64_t>(text.length()), format)) {
+          status = OB_INVALID_ARGUMENT;
+          FORWARD_USER_ERROR_MSG(status, "unknown file format '%.*s'",
+                                 text.length(), text.ptr());
+        } else {
+          options.format_ = format;
+        }
+      }
     } else if (name.case_compare("sample_size") == 0) {
       status = option_to_int(value, int_value);
       if (OB_SUCCESS == status && -1 != int_value) {
@@ -648,8 +666,44 @@ int ObDMLResolver::bind_file_table_function(const TableFunctionCall &call, Table
       ret = OB_ERR_UNEXPECTED;
     } else if (is_named_option(*argument, option_name)) {
       ObObj value;
-      if (OB_SUCCESS != (ret = evaluate_constant(*argument->children_[1], value))) {
-      } else if (OB_SUCCESS != (ret = apply_option(option_name, value))) {
+      const ParseNode *value_node = argument->children_[1];
+      bool resolved = false;
+      if (OB_ISNULL(value_node)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (value_node->is_literal_bool_ ||
+                 (T_BOOL == value_node->type_ && 0 == value_node->num_child_)) {
+        // TRUE/FALSE literals: the fast parser turns them into a parameter marker
+        // that carries no value (reading it back fails with "invalid argument"),
+        // so read the boolean from the node itself.  The value is passed as the
+        // canonical text, which option_to_bool already understands.
+        value.set_varchar(0 != value_node->value_ ? ObString::make_string("true")
+                                                  : ObString::make_string("false"));
+        value.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+        resolved = true;
+      } else if (T_QUESTIONMARK == value_node->type_ && OB_NOT_NULL(value_node->raw_text_) &&
+                 value_node->text_len_ > 0) {
+        // The fast parser replaces every literal with a parameter marker.  For a
+        // boolean word the parameter store carries no usable value, so read the
+        // original text instead of failing with "invalid argument".
+        const ObString raw(static_cast<int32_t>(value_node->text_len_), value_node->raw_text_);
+        if (0 == raw.case_compare("true") || 0 == raw.case_compare("on") ||
+            0 == raw.case_compare("yes")) {
+          value.set_varchar(ObString::make_string("true"));
+          value.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+          resolved = true;
+        } else if (0 == raw.case_compare("false") || 0 == raw.case_compare("off") ||
+                   0 == raw.case_compare("no")) {
+          value.set_varchar(ObString::make_string("false"));
+          value.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+          resolved = true;
+        }
+      }
+      if (OB_FAIL(ret)) {
+      } else if (resolved) {
+        ret = apply_option(option_name, value);
+      } else if (OB_SUCCESS != (ret = evaluate_constant(*value_node, value))) {
+      } else {
+        ret = apply_option(option_name, value);
       }
     } else if (positional_count > 0) {
       // Only the path may be passed positionally; every other argument has to

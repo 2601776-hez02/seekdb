@@ -213,7 +213,9 @@ bool parse_format_name(const char *name, const int64_t length, FileFormat &forma
   bool found = true;
   if (text_iequal(name, length, "csv")) {
     format = FileFormat::CSV;
-  } else if (text_iequal(name, length, "json")) {
+  } else if (text_iequal(name, length, "json") ||
+             text_iequal(name, length, "newline_delimited") ||
+             text_iequal(name, length, "jsonl")) {
     format = FileFormat::JSON;
   } else if (text_iequal(name, length, "ndjson")) {
     format = FileFormat::NDJSON;
@@ -520,6 +522,10 @@ Status convert_text(const char *text, const int64_t length, const bool is_null,
     cell.is_null_ = true;
   } else if (ColumnType::VARCHAR == type) {
     cell.text_.assign(text, static_cast<size_t>(length));
+  } else if (0 == length) {
+    // An empty cell has no text to convert; for every typed column it reads as
+    // NULL (an empty string cannot be a number or a date).
+    cell.is_null_ = true;
   } else if (ColumnType::BIGINT == type) {
     if (parse_integer_text(text, length, cell.int_value_)) {
       cell.text_.assign(text, static_cast<size_t>(length));
@@ -590,13 +596,15 @@ bool column_needed(const std::vector<int64_t> &needed, const int64_t index)
   return std::find(needed.begin(), needed.end(), index) != needed.end();
 }
 
-// Duplicates are rejected later by the binder, so make names unique here.
+// Duplicates are rejected later by the binder, so make names unique here.  The
+// suffix is the DuckDB one: the second `id` column becomes `id__2`, the third
+// `id__3`, and so on.
 std::string unique_column_name(const std::vector<Column> &columns, const std::string &name,
                                const int64_t position)
 {
   std::string base = name.empty() ? ("column" + std::to_string(position)) : name;
   std::string candidate = base;
-  int64_t suffix = 1;
+  int64_t suffix = 2;
   bool clash = true;
   while (clash) {
     clash = false;
@@ -607,7 +615,7 @@ std::string unique_column_name(const std::vector<Column> &columns, const std::st
       }
     }
     if (clash) {
-      candidate = base + "_" + std::to_string(suffix);
+      candidate = base + "__" + std::to_string(suffix);
       ++suffix;
     }
   }
@@ -1758,6 +1766,9 @@ Status load_parquet_meta(FILE *fp, ParquetMeta &meta, std::vector<Column> *colum
           column.name_ = unique_column_name(*columns, element.name_,
                                             static_cast<int64_t>(columns->size()));
           column.type_ = meta.column_types_.back();
+          // A parquet leaf declared as optional (repetition level 1) may hold a
+          // definition level that reads as NULL.
+          column.nullable_ = 1 == element.repetition_;
           columns->push_back(column);
         }
       }
@@ -2788,13 +2799,18 @@ Status infer_csv(const std::string &path, const Options &options, std::vector<Co
     for (int64_t i = 0; Status::OK == status && i < static_cast<int64_t>(columns.size()); ++i) {
       const std::string &field = fields[static_cast<size_t>(i)];
       const bool is_null = !options.null_string_.empty() && field == options.null_string_;
-      if (!is_null) {
+      if (!is_null && !field.empty()) {
         columns[static_cast<size_t>(i)].type_ =
             merge_column_type(columns[static_cast<size_t>(i)].type_,
                               detect_text_type(field.data(), static_cast<int64_t>(field.size())));
       }
     }
   }
+  // A cell that carries no text is NULL for the typed formats (an empty string
+  // cannot be read as a number or a date) but stays an empty string for
+  // VARCHAR, which is what DESCRIBE SELECT reports in the `null` column.
+  std::vector<bool> null_seen(columns.size(), false);
+  std::vector<bool> empty_seen(columns.size(), false);
   while (Status::OK == status) {
     status = read_csv_record(stream, options, fields, eof, error);
     if (Status::OK != status || eof) {
@@ -2809,11 +2825,24 @@ Status infer_csv(const std::string &path, const Options &options, std::vector<Co
     for (int64_t i = 0; Status::OK == status && i < static_cast<int64_t>(columns.size()); ++i) {
       const std::string &field = fields[static_cast<size_t>(i)];
       const bool is_null = !options.null_string_.empty() && field == options.null_string_;
-      if (!is_null) {
+      if (is_null) {
+        null_seen[static_cast<size_t>(i)] = true;
+      } else if (field.empty()) {
+        // An empty cell carries no text: it must not widen a DATE/DATETIME column
+        // to VARCHAR.  The reader still reports it as an empty string for a
+        // VARCHAR column, which is what `null = NO` for such a column means.
+        empty_seen[static_cast<size_t>(i)] = true;
+      } else {
         columns[static_cast<size_t>(i)].type_ =
             merge_column_type(columns[static_cast<size_t>(i)].type_,
                               detect_text_type(field.data(), static_cast<int64_t>(field.size())));
       }
+    }
+  }
+  if (Status::OK == status) {
+    for (size_t i = 0; i < columns.size(); ++i) {
+      const bool typed = ColumnType::VARCHAR != columns[i].type_;
+      columns[i].nullable_ = null_seen[i] || (typed && empty_seen[i]);
     }
   }
   stream.close();
@@ -2871,6 +2900,21 @@ Status infer_json(const std::string &path, std::vector<Column> &columns, std::st
             merge_column_type(columns[static_cast<size_t>(found)].type_,
                               detect_text_type(member.text_.data(),
                                                static_cast<int64_t>(member.text_.size())));
+        columns[static_cast<size_t>(found)].nullable_ = columns[static_cast<size_t>(found)].nullable_ ||
+                                                       member.text_.empty();
+      } else {
+        columns[static_cast<size_t>(found)].nullable_ = true;
+      }
+    }
+    // A field that the document does not mention at all reads as NULL, so it
+    // makes every other column nullable too.
+    for (size_t c = 0; c < columns.size(); ++c) {
+      if (!columns[c].nullable_) {
+        bool present = false;
+        for (size_t i = 0; i < members.size() && !present; ++i) {
+          present = members[i].name_ == columns[c].name_;
+        }
+        columns[c].nullable_ = !present;
       }
     }
   }
@@ -3095,7 +3139,7 @@ namespace
 {
 
 const char OPTIONS_MAGIC[4] = {'F', 'S', 'Q', 'L'};
-constexpr int64_t OPTIONS_VERSION = 1;
+constexpr int64_t OPTIONS_VERSION = 2;
 
 void append_u8(std::string &buffer, const uint8_t value)
 {
@@ -3206,6 +3250,7 @@ std::string encode_options(const Options &options, const std::string &path,
   append_u32(buffer, static_cast<uint32_t>(columns.size()));
   for (size_t i = 0; i < columns.size(); ++i) {
     append_u8(buffer, static_cast<uint8_t>(columns[i].type_));
+    append_u8(buffer, columns[i].nullable_ ? 1 : 0);
     append_string(buffer, columns[i].name_);
   }
   append_u32(buffer, static_cast<uint32_t>(files.size()));
@@ -3248,11 +3293,14 @@ Status decode_options(const char *data, const int64_t length, Options &options, 
       options.header_ = 0 != header;
       for (uint32_t i = 0; Status::OK == status && i < column_count; ++i) {
         uint8_t type = 0;
+        uint8_t nullable = 0;
         Column column;
-        if (!reader.read_u8(type) || !reader.read_string(column.name_)) {
+        if (!reader.read_u8(type) || !reader.read_u8(nullable) ||
+            !reader.read_string(column.name_)) {
           status = Status::INVALID_OPTION;
         } else {
           column.type_ = static_cast<ColumnType>(type);
+          column.nullable_ = 0 != nullable;
           columns.push_back(column);
         }
       }

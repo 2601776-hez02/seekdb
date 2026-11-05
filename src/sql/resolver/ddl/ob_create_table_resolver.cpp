@@ -750,8 +750,9 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
             } else {
               const uint64_t status_column_id = gen_column_id();
               const uint64_t srcver_column_id = gen_column_id();
+              const uint64_t result_spec_column_id = gen_column_id();
               if (OB_FAIL(ObDDLResolver::build_ai_column_hidden_columns(
-                      column, status_column_id, srcver_column_id,
+                      column, status_column_id, srcver_column_id, result_spec_column_id,
                       *allocator_, ai_hidden_cols))) {
                 SQL_RESV_LOG(WARN, "fail to build ai column hidden columns", K(ret));
               } else if (OB_FAIL(column.set_orig_default_value(column.get_cur_default_value()))) {

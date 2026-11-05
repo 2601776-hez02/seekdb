@@ -2601,7 +2601,7 @@ DEFINE_SHOW_CLAUSE_SET(SHOW_INDEXES,
 DEFINE_SHOW_CLAUSE_SET(SHOW_AI_COLUMNS,
                        NULL,
                        "SELECT table_name AS `Table`, column_name AS `Column`, ai_function AS `AIFunction`, model_name AS `ModelName`, result_type AS `ResultType`, dependencies AS `Dependencies`, case sync_mode when 0 then 'async' else 'invalid' end AS `SyncMode`, max_retries AS `MaxRetries`, concat('__ai_status_', column_name) AS `StatusColumn`, def_version AS `DefVersion` FROM %s.%s where table_id = %ld ORDER BY column_id ASC",
-                       R"(SELECT "TABLE_NAME" AS "TABLE_NAME", "COLUMN_NAME" AS "COLUMN_NAME", "AI_FUNCTION" AS "AI_FUNCTION", "MODEL_NAME" AS "MODEL_NAME", "RESULT_TYPE" AS "RESULT_TYPE", "DEPENDENCIES" AS "DEPENDENCIES", "SYNC_MODE" AS "SYNC_MODE", "MAX_RETRIES" AS "MAX_RETRIES", "STATUS_COLUMN_ID" AS "STATUS_COLUMN_ID", "DEF_VERSION" AS "DEF_VERSION" FROM %s.%s WHERE TABLE_ID = %ld ORDER BY COLUMN_ID ASC)",
+                       R"(SELECT "TABLE_NAME" AS "TABLE_NAME", "COLUMN_NAME" AS "COLUMN_NAME", "AI_FUNCTION" AS "AI_FUNCTION", "MODEL_NAME" AS "MODEL_NAME", "RESULT_TYPE" AS "RESULT_TYPE", "DEPENDENCIES" AS "DEPENDENCIES", "SYNC_MODE" AS "SYNC_MODE", "MAX_RETRIES" AS "MAX_RETRIES", "STATE_COLUMN_ID" AS "STATE_COLUMN_ID", "DEF_VERSION" AS "DEF_VERSION" FROM %s.%s WHERE TABLE_ID = %ld ORDER BY COLUMN_ID ASC)",
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_EXTENDED_INDEXES,
                        NULL,

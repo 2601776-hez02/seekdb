@@ -121,10 +121,19 @@ class Handler(BaseHTTPRequestHandler):
         elif path.endswith("/rerank"):
             STATE["rerank"] += 1
             documents = body.get("documents") or []
+            query = body.get("query") or ""
+            query_terms = set(str(query).lower().split())
             results = []
             for index, doc in enumerate(documents):
                 text = doc if isinstance(doc, str) else json.dumps(doc, sort_keys=True)
-                results.append({"index": index, "relevance_score": float(len(text)),
+                # Relevance heuristic: how many query terms occur in the document.
+                # The document that mentions the query wins, which is what a real
+                # reranker returns and what the expected results are derived from.
+                haystack = text.lower()
+                hits = sum(1 for term in query_terms if term and term in haystack)
+                results.append({"index": index,
+                                "relevance_score": float(hits) if hits > 0
+                                else 0.0,
                                 "document": doc})
             self._send({"id": "rerank-mock", "results": results,
                         "meta": {"tokens": 1}})

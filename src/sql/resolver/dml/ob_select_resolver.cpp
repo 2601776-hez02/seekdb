@@ -3048,7 +3048,7 @@ int ObSelectResolver::resolve_into_outfile_without_format(const ParseNode *node,
                                                           ObSelectIntoItem &into_item)
 {
   int ret = OB_SUCCESS;
-  if (node->num_child_ != 5) {
+  if (node->num_child_ < 5) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(resolve_into_const_node(node->children_[0], into_item.outfile_name_))) {
   }
@@ -3076,6 +3076,45 @@ int ObSelectResolver::resolve_into_outfile_without_format(const ParseNode *node,
   // file: single, max_file_size, buffer_size
   if (OB_SUCC(ret) && NULL != node->children_[4]) {
     if (OB_FAIL(resolve_into_file_node(node->children_[4], into_item))) {
+    }
+  }
+  // COPY (query) TO 'file': a CSV export whose first line is the column names.
+  if (OB_SUCC(ret) && node->num_child_ >= 6 && NULL != node->children_[5]) {
+    ObSelectStmt *select_stmt = get_select_stmt();
+    static const char csv_field_term = ',';
+    static const char csv_quote = '"';
+    ObString field_term(1, &csv_field_term);
+    ObString quote(1, &csv_quote);
+    into_item.field_str_.set_varchar(field_term);
+    into_item.field_str_.set_collation_type(ObCharset::get_system_collation());
+    into_item.closed_cht_.meta_.set_char();
+    into_item.closed_cht_.set_char_value(&csv_quote, 1);
+    into_item.closed_cht_.set_collation_type(ObCharset::get_system_collation());
+    into_item.escaped_cht_.meta_.set_char();
+    into_item.escaped_cht_.set_char_value(&csv_quote, 1);
+    into_item.escaped_cht_.set_collation_type(ObCharset::get_system_collation());
+    into_item.is_optional_ = true;
+    if (0 != node->children_[5]->value_) {
+      ObSqlString header;
+      if (OB_ISNULL(select_stmt)) {
+        ret = OB_ERR_UNEXPECTED;
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); ++i) {
+        const SelectItem &item = select_stmt->get_select_item(i);
+        if (0 != i && OB_FAIL(header.append(field_term))) {
+        } else if (OB_FAIL(header.append(item.alias_name_))) {
+        }
+      }
+      if (OB_SUCC(ret) && OB_FAIL(header.append(into_item.line_str_.get_string()))) {
+      }
+      if (OB_SUCC(ret)) {
+        ObString header_line;
+        if (OB_FAIL(ob_write_string(*allocator_, header.string(), header_line))) {
+        } else {
+          into_item.header_line_.set_varchar(header_line);
+          into_item.header_line_.set_collation_type(ObCharset::get_system_collation());
+        }
+      }
     }
   }
   return ret;

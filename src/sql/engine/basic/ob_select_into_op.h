@@ -71,7 +71,8 @@ public:
       parallel_(1),
       buffer_size_(DEFAULT_BUFFER_SIZE),
       is_overwrite_(false),
-      external_properties_(alloc)
+      external_properties_(alloc),
+      header_line_()
   {
   }
 
@@ -91,6 +92,8 @@ public:
   int64_t buffer_size_;
   bool is_overwrite_;
   ObExternalFileFormat::StringData external_properties_;
+  // Column-name line (already terminated) written before the first data row.
+  common::ObObj header_line_;
   static const int64_t DEFAULT_MAX_FILE_SIZE = 256LL * 1024 * 1024;
   static const int64_t DEFAULT_BUFFER_SIZE = 1LL * 1024 * 1024;
 };
@@ -126,7 +129,8 @@ public:
       external_properties_(),
       format_type_(ObExternalFileFormat::FormatType::CSV_FORMAT),
       block_id_(0),
-      need_commit_(true)
+      need_commit_(true),
+      header_written_(false)
   {
   }
 
@@ -254,6 +258,8 @@ private:
   int calc_outfile_path();
   int create_shared_buffer_for_data_writer();
   int create_the_only_data_writer(ObExternalFileWriter *&data_writer);
+  // Writes the column-name line once, before the first data row.
+  int write_csv_header(ObExternalFileWriter *data_writer);
   int new_data_writer(ObExternalFileWriter *&data_writer);
   int check_secure_file_path(ObString file_name);
   char *get_json_buf() { return json_buf_; }
@@ -292,6 +298,7 @@ private:
   ObExternalFileFormat::FormatType format_type_;
   uint32_t block_id_;
   bool need_commit_;
+  bool header_written_;
   static const int64_t SHARED_BUFFER_SIZE = 2LL * 1024 * 1024;
 
 };

@@ -372,6 +372,7 @@ END_P SET_VAR DELIMITER
         ORGANIZATION
 //-----------------------------non_reserved keyword end---------------------------------------------
 %type <node> sql_stmt stmt_list stmt opt_end_p
+%type <node> copy_to_stmt opt_copy_to_options copy_to_option_list copy_to_option copy_option_name copy_option_value
 %type <node> select_stmt update_stmt delete_stmt
 %type <node> insert_stmt single_table_insert values_clause dml_table_name
 %type <node> create_table_stmt create_table_like_stmt fork_table_stmt fork_database_stmt diff_table_stmt merge_table_stmt opt_table_option_list table_option_list table_option table_option_list_space_seperated parallel_option lob_storage_clause lob_storage_parameter lob_storage_parameters lob_chunk_size
@@ -557,6 +558,7 @@ opt_end_p:
 /* only preparable statement will set question mark size */
 stmt:
     select_stmt             { $$ = $1; question_mark_issue($$, result); }
+  | copy_to_stmt            { $$ = $1; question_mark_issue($$, result); }
   | insert_stmt             { $$ = $1; question_mark_issue($$, result); }
   | create_table_stmt       {
     $$ = $1;
@@ -8932,12 +8934,107 @@ LIMIT limit_expr OFFSET limit_expr
 }
 ;
 
+/* COPY (query) TO 'file' [(format csv, header, nullstr 'NULL')]
+ * DuckDB style export.  It is resolved as the equivalent SELECT ... INTO OUTFILE
+ * so that the existing export operator writes the file; children_[5] of the
+ * T_INTO_OUTFILE node carries the "write a header line" flag. */
+copy_to_stmt:
+COPY '(' select_stmt ')' TO text_string opt_copy_to_options
+{
+  ParseNode *into_node = NULL;
+  malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 6,
+                           $6, NULL, NULL, NULL, NULL, $7);
+  $$ = $3;
+  if (NULL != $$) {
+    $$->children_[PARSE_SELECT_INTO] = into_node;
+  }
+}
+;
+
+opt_copy_to_options:
+/* empty */
+{
+  $$ = NULL;
+}
+| '(' copy_to_option_list ')'
+{
+  $$ = $2;
+}
+;
+
+copy_to_option_list:
+copy_to_option_list ',' copy_to_option
+{
+  $$ = NULL != $3 ? $3 : $1;
+}
+| copy_to_option
+{
+  $$ = $1;
+}
+;
+
+copy_to_option:
+copy_option_name
+{
+  $$ = NULL;
+  if (NULL != $1 && 6 == $1->str_len_ && 0 == strncasecmp($1->str_value_, "header", 6)) {
+    malloc_terminal_node($$, result->malloc_pool_, T_INT);
+    if (NULL != $$) {
+      $$->value_ = 1;
+    }
+  }
+}
+| copy_option_name copy_option_value
+{
+  $$ = NULL;
+  if (NULL != $1 && 6 == $1->str_len_ && 0 == strncasecmp($1->str_value_, "header", 6)) {
+    malloc_terminal_node($$, result->malloc_pool_, T_INT);
+    if (NULL != $$) {
+      $$->value_ = 1;
+      if (NULL != $2 && T_BOOL == $2->type_ && 0 == $2->value_) {
+        $$->value_ = 0;
+      }
+    }
+  }
+}
+| text_string
+{
+  (void)($1);
+  $$ = NULL;
+}
+;
+
+copy_option_name:
+NAME_OB
+{
+  $$ = $1;
+}
+| FORMAT
+{
+  $$ = NULL;
+}
+;
+
+copy_option_value:
+NAME_OB
+{
+  $$ = $1;
+}
+| text_string
+{
+  $$ = $1;
+}
+| INTNUM
+{
+  $$ = $1;
+}
+;
+
 into_clause:
 INTO OUTFILE STRING_VALUE opt_charset field_opt line_opt file_opt
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_INTO_OUTFILE, 5, $3, $4, $5, $6, $7);
-}
-| INTO OUTFILE STRING_VALUE FORMAT opt_equal_mark '(' external_file_format_list ')' file_opt
+}| INTO OUTFILE STRING_VALUE FORMAT opt_equal_mark '(' external_file_format_list ')' file_opt
 {
   (void)($5);
   ParseNode *format_list = NULL;

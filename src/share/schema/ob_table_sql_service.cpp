@@ -4769,10 +4769,12 @@ int ObTableSqlService::add_ai_column_meta(common::ObISQLClient &sql_client,
                || OB_FAIL(dml.add_column("sync_mode",
                           static_cast<int64_t>(ai_spec.option_.sync_mode_)))
                || OB_FAIL(dml.add_column("max_retries", ai_spec.option_.max_retries_))
-               || OB_FAIL(dml.add_column("status_column_id",
+               || OB_FAIL(dml.add_column("state_column_id",
                           static_cast<int64_t>(ai_spec.status_column_id_)))
-               || OB_FAIL(dml.add_column("srcver_column_id",
+               || OB_FAIL(dml.add_column("request_column_id",
                           static_cast<int64_t>(ai_spec.srcver_column_id_)))
+               || OB_FAIL(dml.add_column("result_spec_column_id",
+                          static_cast<int64_t>(ai_spec.result_spec_column_id_)))
                || OB_FAIL(dml.add_column("def_version",
                           static_cast<int64_t>(ai_spec.def_version_)))
                || OB_FAIL(dml.add_column("flags", static_cast<int64_t>(1)))

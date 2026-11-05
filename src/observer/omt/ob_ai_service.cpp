@@ -102,8 +102,9 @@ const char *const AI_COLUMN_TABLE_COL_EXPRESSION = "expression";
 const char *const AI_COLUMN_TABLE_COL_DEPENDENCIES = "dependencies";
 const char *const AI_COLUMN_TABLE_COL_SYNC_MODE = "sync_mode";
 const char *const AI_COLUMN_TABLE_COL_MAX_RETRIES = "max_retries";
-const char *const AI_COLUMN_TABLE_COL_STATUS_COLUMN_ID = "status_column_id";
-const char *const AI_COLUMN_TABLE_COL_SRCVER_COLUMN_ID = "srcver_column_id";
+const char *const AI_COLUMN_TABLE_COL_STATUS_COLUMN_ID = "state_column_id";
+const char *const AI_COLUMN_TABLE_COL_SRCVER_COLUMN_ID = "request_column_id";
+const char *const AI_COLUMN_TABLE_COL_RESULT_SPEC_COLUMN_ID = "result_spec_column_id";
 const char *const AI_COLUMN_TABLE_COL_DEF_VERSION = "def_version";
 const char *const AI_COLUMN_TABLE_COL_AI_FUNCTION = "ai_function";
 
@@ -126,6 +127,7 @@ void ObAIColumnDef::reset()
   column_id_ = OB_INVALID_ID;
   status_column_id_ = OB_INVALID_ID;
   srcver_column_id_ = OB_INVALID_ID;
+  result_spec_column_id_ = OB_INVALID_ID;
   def_version_ = 0;
   max_retries_ = 0;
   func_type_ = 0;  // ObAIColumnFuncType::INVALID
@@ -495,7 +497,7 @@ int ObAIColumnWorker::refresh_definitions_(ObInnerSQLConnection &conn)
   // the cached definitions own memory in def_allocator_, they are dropped above
   def_allocator_.reuse();
   if (OB_FAIL(sql.assign_fmt(
-          "SELECT %s, %s, %s, %s, %s, `%s`, `%s`, %s, %s, %s, %s, %s, %s FROM %s "
+          "SELECT %s, %s, %s, %s, %s, `%s`, `%s`, %s, %s, %s, %s, %s, %s, %s FROM %s "
           "ORDER BY %s, %s",
           AI_COLUMN_TABLE_COL_TABLE_ID,
           AI_COLUMN_TABLE_COL_COLUMN_ID,
@@ -508,6 +510,7 @@ int ObAIColumnWorker::refresh_definitions_(ObInnerSQLConnection &conn)
           AI_COLUMN_TABLE_COL_MAX_RETRIES,
           AI_COLUMN_TABLE_COL_STATUS_COLUMN_ID,
           AI_COLUMN_TABLE_COL_SRCVER_COLUMN_ID,
+          AI_COLUMN_TABLE_COL_RESULT_SPEC_COLUMN_ID,
           AI_COLUMN_TABLE_COL_DEF_VERSION,
           AI_COLUMN_TABLE_COL_AI_FUNCTION,
           OB_ALL_AI_COLUMN_TNAME,
@@ -536,8 +539,9 @@ int ObAIColumnWorker::refresh_definitions_(ObInnerSQLConnection &conn)
         const int64_t COL_MAX_RETRIES = 8;
         const int64_t COL_STATUS_COLUMN_ID = 9;
         const int64_t COL_SRCVER_COLUMN_ID = 10;
-        const int64_t COL_DEF_VERSION = 11;
-        const int64_t COL_AI_FUNCTION = 12;
+        const int64_t COL_RESULT_SPEC_COLUMN_ID = 11;
+        const int64_t COL_DEF_VERSION = 12;
+        const int64_t COL_AI_FUNCTION = 13;
         int64_t cur_table_idx = -1;
         while (OB_SUCC(ret)) {
           int tmp_ret = result->next();
@@ -555,6 +559,7 @@ int ObAIColumnWorker::refresh_definitions_(ObInnerSQLConnection &conn)
             int64_t max_retries = 0;
             int64_t status_column_id = -1;
             int64_t srcver_column_id = -1;
+            int64_t result_spec_column_id = -1;
             int64_t def_version = 0;
             int64_t func_type = 0;
             ObString db_name;
@@ -570,6 +575,7 @@ int ObAIColumnWorker::refresh_definitions_(ObInnerSQLConnection &conn)
             } else if (OB_FAIL(result->get_int(COL_MAX_RETRIES, max_retries))) {
             } else if (OB_FAIL(result->get_int(COL_STATUS_COLUMN_ID, status_column_id))) {
             } else if (OB_FAIL(result->get_int(COL_SRCVER_COLUMN_ID, srcver_column_id))) {
+            } else if (OB_FAIL(result->get_int(COL_RESULT_SPEC_COLUMN_ID, result_spec_column_id))) {
             } else if (OB_FAIL(result->get_int(COL_DEF_VERSION, def_version))) {
             } else if (OB_FAIL(result->get_obj(COL_AI_FUNCTION, obj))) {
             } else if (OB_FAIL(read_column_text_(obj, ai_function))) {
@@ -627,6 +633,7 @@ int ObAIColumnWorker::refresh_definitions_(ObInnerSQLConnection &conn)
               def.column_id_ = column_id;
               def.status_column_id_ = static_cast<uint64_t>(status_column_id);
               def.srcver_column_id_ = static_cast<uint64_t>(srcver_column_id);
+              def.result_spec_column_id_ = static_cast<uint64_t>(result_spec_column_id);
               def.def_version_ = def_version;
               def.max_retries_ = (max_retries < 0) ? 0 : max_retries;
               def.sync_mode_ = sync_mode;

@@ -567,8 +567,8 @@ protected:
       common::ObIAllocator &allocator,
       ObSQLSessionInfo *session_info,
       ObSchemaChecker *schema_checker);
-  // Build the two hidden companion columns of an AI column and fill
-  // status_column_id_/srcver_column_id_ of the ai spec.
+  // Build the hidden companion columns of an AI column and fill
+  // status_column_id_/srcver_column_id_/result_spec_column_id_ of the ai spec.
   // Public because the rootserver (ObDDLService::add_new_column_to_table_schema)
   // builds them for ALTER TABLE ... ADD COLUMN, where the column ids are assigned.
 public:
@@ -576,6 +576,7 @@ public:
       share::schema::ObColumnSchemaV2 &ai_column,
       const uint64_t status_column_id,
       const uint64_t srcver_column_id,
+      const uint64_t result_spec_column_id,
       common::ObIAllocator &allocator,
       ObIArray<share::schema::ObColumnSchemaV2> &hidden_columns);
 protected:

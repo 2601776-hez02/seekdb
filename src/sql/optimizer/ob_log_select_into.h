@@ -164,6 +164,14 @@ public:
   {
     return external_properties_;
   }
+  inline void set_header_line(common::ObObj &header_line)
+  {
+    header_line_ = header_line;
+  }
+  inline common::ObObj get_header_line() const
+  {
+    return header_line_;
+  }
   const common::ObIArray<ObRawExpr*> &get_select_exprs() const { return select_exprs_; }
   common::ObIArray<ObRawExpr*> &get_select_exprs() { return select_exprs_; }
   virtual int est_cost() override;
@@ -188,6 +196,7 @@ private:
   common::ObCollationType cs_type_;
   bool is_overwrite_;
   common::ObString external_properties_;
+  common::ObObj header_line_;
 };
 }
 }

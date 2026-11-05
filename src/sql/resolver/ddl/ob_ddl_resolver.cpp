@@ -8499,6 +8499,7 @@ const ParseNode *ObDDLResolver::find_ai_column_node(const ParseNode &column_defi
 int ObDDLResolver::build_ai_column_hidden_columns(ObColumnSchemaV2 &ai_column,
                                                  const uint64_t status_column_id,
                                                  const uint64_t srcver_column_id,
+                                                 const uint64_t result_spec_column_id,
                                                  common::ObIAllocator &allocator,
                                                  ObIArray<ObColumnSchemaV2> &hidden_columns)
 {
@@ -8506,22 +8507,27 @@ int ObDDLResolver::build_ai_column_hidden_columns(ObColumnSchemaV2 &ai_column,
   ObAIColumnSpec ai_spec = ai_column.get_ai_spec();
   if (!ai_column.is_ai_column()
       || OB_INVALID_ID == status_column_id
-      || OB_INVALID_ID == srcver_column_id) {
+      || OB_INVALID_ID == srcver_column_id
+      || OB_INVALID_ID == result_spec_column_id) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument to build ai column hidden columns", K(ret),
-             K(ai_column.get_column_name_str()), K(status_column_id), K(srcver_column_id));
+             K(ai_column.get_column_name_str()), K(status_column_id), K(srcver_column_id),
+             K(result_spec_column_id));
   } else {
     ai_spec.status_column_id_ = status_column_id;
     ai_spec.srcver_column_id_ = srcver_column_id;
+    ai_spec.result_spec_column_id_ = result_spec_column_id;
     if (OB_FAIL(ai_column.set_ai_spec(ai_spec))) {
       LOG_WARN("fail to set ai column spec", K(ret));
     }
     // __ai_status_<c>: TINYINT, 0/1/2/3 = invalid/pending/ready/failed
     // __ai_srcver_<c>: BIGINT, the max sequence number this value was generated from
+    // __ai_resultspec_<c>: BIGINT, the result spec the value was produced with
     const char *const prefixes[] = {
-        OB_AI_COLUMN_STATUS_COLUMN_PREFIX, OB_AI_COLUMN_SRCVER_COLUMN_PREFIX};
-    const uint64_t column_ids[] = {status_column_id, srcver_column_id};
-    for (int64_t i = 0; OB_SUCC(ret) && i < 2; ++i) {
+        OB_AI_COLUMN_STATUS_COLUMN_PREFIX, OB_AI_COLUMN_SRCVER_COLUMN_PREFIX,
+        OB_AI_COLUMN_RESULT_SPEC_COLUMN_PREFIX};
+    const uint64_t column_ids[] = {status_column_id, srcver_column_id, result_spec_column_id};
+    for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
       ObColumnSchemaV2 hidden_column;
       char name_buf[OB_MAX_COLUMN_NAME_LENGTH] = {'\0'};
       const int64_t name_pos = snprintf(name_buf, sizeof(name_buf), "%s%.*s", prefixes[i],

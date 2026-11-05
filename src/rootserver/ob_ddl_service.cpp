@@ -7780,6 +7780,7 @@ int ObDDLService::add_new_column_to_table_schema(
         ObAIColumnSpec ai_spec = alter_column_schema.get_ai_spec();
         ai_spec.status_column_id_ = max_used_column_id + 1;
         ai_spec.srcver_column_id_ = max_used_column_id + 2;
+        ai_spec.result_spec_column_id_ = max_used_column_id + 3;
         if (OB_FAIL(alter_column_schema.set_ai_spec(ai_spec))) {
           LOG_WARN("fail to set ai column spec", K(ret), K(alter_column_schema));
         }

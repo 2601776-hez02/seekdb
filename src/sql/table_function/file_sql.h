@@ -85,6 +85,9 @@ struct Column
 {
   std::string name_;
   ColumnType type_ = ColumnType::SQL_NULL;
+  // True when at least one row of the source had no usable value for this
+  // column.  DESCRIBE SELECT reports it in the `null` column.
+  bool nullable_ = false;
 };
 
 // One decoded cell.  Every logical type also fills text_, which keeps the

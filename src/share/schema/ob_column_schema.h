@@ -63,6 +63,7 @@ const char *const OB_AI_COLUMN_FUNC_RERANK = "AI_RERANK";
 // AI column: name prefix of the hidden companion columns
 const char *const OB_AI_COLUMN_STATUS_COLUMN_PREFIX = "__ai_status_";
 const char *const OB_AI_COLUMN_SRCVER_COLUMN_PREFIX = "__ai_srcver_";
+const char *const OB_AI_COLUMN_RESULT_SPEC_COLUMN_PREFIX = "__ai_resultspec_";
 // AI column: default value of option max_retries
 static const int64_t OB_DEFAULT_AI_COLUMN_MAX_RETRIES = 3;
 static const int64_t OB_MAX_AI_COLUMN_MAX_RETRIES = 100;
@@ -101,6 +102,7 @@ struct ObAIColumnSpec
     def_version_ = 0;
     status_column_id_ = OB_INVALID_ID;
     srcver_column_id_ = OB_INVALID_ID;
+    result_spec_column_id_ = OB_INVALID_ID;
     func_type_ = ObAIColumnFuncType::INVALID;
     model_name_.reset();
     ai_function_.reset();
@@ -124,6 +126,7 @@ struct ObAIColumnSpec
       def_version_ = other.def_version_;
       status_column_id_ = other.status_column_id_;
       srcver_column_id_ = other.srcver_column_id_;
+      result_spec_column_id_ = other.result_spec_column_id_;
       func_type_ = other.func_type_;
       if (OB_FAIL(ob_write_string(alloc, other.model_name_, model_name_))) {
       } else if (OB_FAIL(ob_write_string(alloc, other.ai_function_, ai_function_))) {
@@ -166,12 +169,15 @@ struct ObAIColumnSpec
   int add_dep_column_id(const uint64_t column_id) { return dep_column_ids_.push_back(column_id); }
   void set_allocator(common::ObIAllocator *allocator) { allocator_ = allocator; }
   common::ObIAllocator *get_allocator() const { return allocator_; }
-  TO_STRING_KV(K_(def_version), K_(status_column_id), K_(srcver_column_id), K_(func_type),
+  TO_STRING_KV(K_(def_version), K_(status_column_id), K_(srcver_column_id),
+               K_(result_spec_column_id), K_(func_type),
                K_(model_name), K_(ai_function), K_(option), K_(dep_column_ids), K_(type_hint));
 
   uint64_t def_version_;      // bumped on every DDL which changes this definition
   uint64_t status_column_id_;
   uint64_t srcver_column_id_;
+  // Third hidden companion column: the result spec used when the model is called.
+  uint64_t result_spec_column_id_;
   int64_t func_type_;         // see ObAIColumnFuncType
   common::ObString model_name_;   // logical model name, i.e. the first argument of the ai function
   common::ObString ai_function_;  // "AI_COMPLETE" / "AI_EMBED" / "AI_RERANK"

@@ -63,6 +63,13 @@ int ObSelectIntoItem::deep_copy(ObIAllocator &allocator,
   buffer_size_ = other.buffer_size_;
   user_vars_.assign(other.user_vars_);
   if (OB_FAIL(ob_write_string(allocator, other.external_properties_, external_properties_))) {
+  } else if (!other.header_line_.is_null()) {
+    ObString header_line;
+    if (OB_FAIL(ob_write_string(allocator, other.header_line_.get_string(), header_line))) {
+    } else {
+      header_line_.set_varchar(header_line);
+      header_line_.set_collation_type(ObCharset::get_system_collation());
+    }
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < other.pl_vars_.count(); ++i) {
     ObRawExpr* pl_var;

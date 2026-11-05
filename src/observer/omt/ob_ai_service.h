@@ -70,6 +70,7 @@ struct ObAIColumnDef
   uint64_t column_id_;
   uint64_t status_column_id_;
   uint64_t srcver_column_id_;
+  uint64_t result_spec_column_id_;
   int64_t def_version_;
   int64_t max_retries_;
   int64_t func_type_;

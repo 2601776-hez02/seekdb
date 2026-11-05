@@ -38,7 +38,7 @@ OB_SERIALIZE_MEMBER(ObSelectIntoOpInput, task_id_, sqc_id_);
 OB_SERIALIZE_MEMBER((ObSelectIntoSpec, ObOpSpec), into_type_, user_vars_, outfile_name_,
     field_str_, line_str_, closed_cht_, is_optional_, select_exprs_, is_single_, max_file_size_,
     escaped_cht_, cs_type_, parallel_, buffer_size_, is_overwrite_,
-    external_properties_);
+    external_properties_, header_line_);
 
 
 int ObSelectIntoOp::inner_open()
@@ -186,6 +186,26 @@ int ObSelectIntoOp::calc_outfile_path()
   }
   return ret;
 }
+int ObSelectIntoOp::write_csv_header(ObExternalFileWriter *data_writer)
+{
+  int ret = OB_SUCCESS;
+  ObCsvFileWriter *csv_data_writer = NULL;
+  if (header_written_ || MY_SPEC.header_line_.is_null() ||
+      MY_SPEC.header_line_.get_string().empty()) {
+    // no header requested
+  } else if (OB_ISNULL(csv_data_writer = static_cast<ObCsvFileWriter *>(data_writer))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    ObObj header_obj = MY_SPEC.header_line_;
+    if (OB_FAIL(write_obj_to_file(header_obj, *csv_data_writer))) {
+    } else if (OB_FAIL(csv_data_writer->flush_shared_buf(shared_buf_))) {
+    } else {
+      header_written_ = true;
+    }
+  }
+  return ret;
+}
+
 int ObSelectIntoOp::inner_get_next_row()
 {
   int ret = 0 == top_limit_cnt_ ? OB_ITER_END : OB_SUCCESS;
@@ -199,6 +219,10 @@ int ObSelectIntoOp::inner_get_next_row()
   if (OB_SUCC(ret) && ObExternalFileFormat::FormatType::CSV_FORMAT == format_type_
       && T_INTO_VARIABLES != into_type
       && OB_FAIL(create_the_only_data_writer(data_writer))) {
+  }
+  if (OB_SUCC(ret) && T_INTO_OUTFILE == into_type
+      && ObExternalFileFormat::FormatType::CSV_FORMAT == format_type_
+      && OB_FAIL(write_csv_header(data_writer))) {
   }
   while (OB_SUCC(ret) && row_count < top_limit_cnt_) {
     clear_evaluated_flag();
@@ -253,6 +277,7 @@ int ObSelectIntoOp::inner_get_next_batch(const int64_t max_row_cnt)
     if (OB_FAIL(create_the_only_data_writer(data_writer))) {
     } else if (OB_ISNULL(data_writer)) {
       ret = OB_ERR_UNEXPECTED;
+    } else if (T_INTO_OUTFILE == into_type && OB_FAIL(write_csv_header(data_writer))) {
     }
   }
 

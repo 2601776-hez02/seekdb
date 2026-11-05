@@ -12870,8 +12870,8 @@ int ObDDLService::alter_table(obcall::ObAlterTableArg &alter_table_arg,
                        scope_name.length(), scope_name.ptr());
         LOG_WARN("retry target column does not exist", KR(ret), K(retry_column_name));
       } else if (OB_UNLIKELY(!retry_column_schema->is_ai_column())) {
-        ret = OB_INVALID_ARGUMENT;
-        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "OB_AI_COLUMN: RETRY requires an AI column");
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
         LOG_WARN("retry target is not an ai column", KR(ret), K(retry_column_name));
       } else if (OB_FAIL(rewrite_ai_column_retry_where_cond(
                    alter_table_arg.get_ai_column_where_cond(), retry_column_name,

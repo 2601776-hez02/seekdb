@@ -277,6 +277,7 @@ private:
                        const common::ObIArray<ObAIColumnWorkItem> &items,
                        const char *request_id,
                        int64_t &task_id);
+  int delete_task_row_(ObInnerSQLConnection &conn, const int64_t task_id);
   int update_task_row_(ObInnerSQLConnection &conn,
                        const int64_t task_id,
                        const int64_t task_status,

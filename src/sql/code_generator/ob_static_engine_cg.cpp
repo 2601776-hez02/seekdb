@@ -5823,7 +5823,9 @@ static int collect_ai_column_check_targets(const ObDMLStmt &stmt,
         phy_plan.set_plan_references_ai_column(true);
         const int tmp_ret = phy_plan.add_ai_column_check_target(table_item->database_name_,
                                                                 table_item->table_name_,
-                                                                column_schema->get_column_name_str());
+                                                                column_schema->get_column_name_str(),
+                                                                table_item->ref_id_,
+                                                                column_expr->get_column_id());
         if (OB_SUCCESS != tmp_ret) {
           // the check list is a bounded buffer, never fail the statement for it
           LOG_WARN("failed to record ai column check target", K(tmp_ret),

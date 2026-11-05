@@ -879,7 +879,7 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
         && alter_table_stmt->get_alter_table_action_count() > 1) {
       ret = OB_NOT_SUPPORTED;
       LOG_USER_ERROR(OB_NOT_SUPPORTED,
-          "OB_AI_COLUMN: RETRY AI COLUMN together with other alter table actions is");
+          "combining AI COLUMN RETRY with another ALTER action");
       SQL_RESV_LOG(WARN, "retry ai column with other alter table actions", KR(ret),
                    K(alter_table_stmt->get_alter_table_action_count()));
     }
@@ -946,8 +946,8 @@ int ObAlterTableResolver::resolve_retry_ai_column(const ParseNode &action_node)
                      scope_name.length(), scope_name.ptr());
       SQL_RESV_LOG(WARN, "retry target column does not exist", KR(ret), K(column_name));
     } else if (OB_UNLIKELY(!column_schema->is_ai_column())) {
-      ret = OB_INVALID_ARGUMENT;
-      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "OB_AI_COLUMN: RETRY requires an AI column");
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
       SQL_RESV_LOG(WARN, "retry target is not an ai column", KR(ret), K(column_name));
     } else if (OB_ISNULL(where_node = action_node.children_[2])) {
       // no WHERE clause: every row of the AI column is re-queued

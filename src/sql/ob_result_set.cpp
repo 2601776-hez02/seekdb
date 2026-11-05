@@ -445,6 +445,9 @@ bool ObResultSet::transaction_set_violation_and_retry(int &err, int64_t &retry_t
 }
 
 // AI COLUMN: strict read. When the session variable ai_column_strict_read is on,
+// AI COLUMN: parse one decimal id field of a check target record.
+static int parse_ai_column_check_id(const ObString &str, uint64_t &id);
+
 // a statement that references an ai column may only run when every row of that
 // column is READY. The check is column level: even if the statement's own
 // predicates select only ready rows, the statement fails as long as any row of
@@ -479,12 +482,41 @@ int ObResultSet::check_ai_column_strict_read(ObPhysicalPlan &plan)
       }
       ObString database_name = record.split_on(ObPhysicalPlan::AI_COLUMN_TARGET_FIELD_SEP);
       ObString table_name = record.split_on(ObPhysicalPlan::AI_COLUMN_TARGET_FIELD_SEP);
-      ObString column_name = record;
-      if (OB_UNLIKELY(database_name.empty() || table_name.empty() || column_name.empty())) {
+      ObString column_name = record.split_on(ObPhysicalPlan::AI_COLUMN_TARGET_FIELD_SEP);
+      ObString table_id_str = record.split_on(ObPhysicalPlan::AI_COLUMN_TARGET_FIELD_SEP);
+      ObString column_id_str = record;
+      uint64_t table_id = 0;
+      uint64_t column_id = 0;
+      if (OB_UNLIKELY(database_name.empty() || table_name.empty() || column_name.empty()
+                      || table_id_str.empty() || column_id_str.empty())) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("invalid ai column check target", K(ret), K(record));
-      } else if (OB_FAIL(check_ai_column_ready(inner_sql, database_name, table_name, column_name))) {
+      } else if (OB_FAIL(parse_ai_column_check_id(table_id_str, table_id))) {
+        LOG_WARN("invalid ai column check target table id", K(ret), K(table_id_str));
+      } else if (OB_FAIL(parse_ai_column_check_id(column_id_str, column_id))) {
+        LOG_WARN("invalid ai column check target column id", K(ret), K(column_id_str));
+      } else if (OB_FAIL(check_ai_column_ready(inner_sql, database_name, table_name,
+                                               column_name, table_id, column_id))) {
       }
+    }
+  }
+  return ret;
+}
+
+// AI COLUMN: parse one decimal id field of a check target record.
+static int parse_ai_column_check_id(const ObString &str, uint64_t &id)
+{
+  int ret = OB_SUCCESS;
+  id = 0;
+  if (OB_UNLIKELY(str.empty())) {
+    ret = OB_INVALID_ARGUMENT;
+  }
+  for (int32_t i = 0; OB_SUCC(ret) && i < str.length(); ++i) {
+    const char c = str.ptr()[i];
+    if (OB_UNLIKELY(c < '0' || c > '9')) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      id = id * 10 + static_cast<uint64_t>(c - '0');
     }
   }
   return ret;
@@ -495,16 +527,19 @@ int ObResultSet::check_ai_column_strict_read(ObPhysicalPlan &plan)
 int ObResultSet::check_ai_column_ready(query::ObSessionInnerSql &inner_sql,
                                        const ObString &database_name,
                                        const ObString &table_name,
-                                       const ObString &column_name)
+                                       const ObString &column_name,
+                                       const uint64_t table_id,
+                                       const uint64_t column_id)
 {
   int ret = OB_SUCCESS;
   ObSqlString sql;
   // the status column naming is the single source of truth,
   // see OB_AI_COLUMN_STATUS_COLUMN_PREFIX in share/schema/ob_column_schema.h.
-  // A row is "not ready" when the status column is NULL (never generated, e.g. a
-  // row that predates the ai column), 0 (invalid), 1 (pending) or 4 (running).
+  // A row is "not ready" unless its status is READY (2), i.e. NULL (never
+  // generated, e.g. a row that predates the ai column), 0 (invalid), 1 (pending),
+  // 3 (FAILED, retries exhausted) or 4 (running) all block a strict read.
   if (OB_FAIL(sql.assign_fmt("SELECT `%s%.*s` AS `ai_status` FROM `%.*s`.`%.*s` "
-                             "WHERE `%s%.*s` IS NULL OR `%s%.*s` IN (0, 1, 4) LIMIT 1",
+                             "WHERE `%s%.*s` IS NULL OR `%s%.*s` <> 2 LIMIT 1",
                              OB_AI_COLUMN_STATUS_COLUMN_PREFIX,
                              column_name.length(), column_name.ptr(),
                              database_name.length(), database_name.ptr(),
@@ -543,11 +578,12 @@ int ObResultSet::check_ai_column_ready(query::ObSessionInnerSql &inner_sql,
                                        table_name.length(), table_name.ptr()))) {
           LOG_WARN("failed to build ai column not ready message", K(ret));
         } else {
-          ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
-          LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID,
-                         static_cast<int32_t>(message.length()), message.ptr());
+          // the official contract of a strict read on a not ready AI column
+          ret = OB_ERR_AI_COLUMN_HAS_UNFINISHED_TASKS;
+          LOG_USER_ERROR(OB_ERR_AI_COLUMN_HAS_UNFINISHED_TASKS,
+                         static_cast<int64_t>(table_id), static_cast<int64_t>(column_id));
           LOG_WARN("ai column strict read failed", K(ret), "message", message.ptr(),
-                   K(not_ready_status));
+                   K(not_ready_status), K(table_id), K(column_id));
         }
       }
     }

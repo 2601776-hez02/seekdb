@@ -659,13 +659,21 @@ OB_SERIALIZE_MEMBER(ObPhysicalPlan,
 
 int ObPhysicalPlan::add_ai_column_check_target(const common::ObString &database_name,
                                                const common::ObString &table_name,
-                                               const common::ObString &column_name)
+                                               const common::ObString &column_name,
+                                               const uint64_t table_id,
+                                               const uint64_t column_id)
 {
   int ret = OB_SUCCESS;
+  char id_buf[2][24];
+  int64_t id_len[2] = {0, 0};
   const int64_t len = static_cast<int64_t>(strlen(ai_column_check_targets_));
+  id_len[0] = snprintf(id_buf[0], sizeof(id_buf[0]), "%lu", table_id);
+  id_len[1] = snprintf(id_buf[1], sizeof(id_buf[1]), "%lu", column_id);
   const int64_t need = database_name.length() + table_name.length() + column_name.length()
-                     + 3 /* three separators */ + 1 /* record separator when len > 0 */;
-  if (OB_UNLIKELY(database_name.empty() || table_name.empty() || column_name.empty())) {
+                     + id_len[0] + id_len[1]
+                     + 5 /* five separators */ + 1 /* record separator when len > 0 */;
+  if (OB_UNLIKELY(database_name.empty() || table_name.empty() || column_name.empty()
+                  || id_len[0] <= 0 || id_len[1] <= 0)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid ai column check target", K(ret), K(database_name), K(table_name), K(column_name));
   } else if (OB_UNLIKELY(len + need >= MAX_AI_COLUMN_CHECK_TARGETS_LEN)) {
@@ -684,6 +692,12 @@ int ObPhysicalPlan::add_ai_column_check_target(const common::ObString &database_
     *pos++ = AI_COLUMN_TARGET_FIELD_SEP;
     MEMCPY(pos, column_name.ptr(), column_name.length());
     pos += column_name.length();
+    // the ids are reported back to the client when the strict read check fails
+    for (int64_t i = 0; i < 2; ++i) {
+      *pos++ = AI_COLUMN_TARGET_FIELD_SEP;
+      MEMCPY(pos, id_buf[i], id_len[i]);
+      pos += id_len[i];
+    }
     *pos = '\0';
   }
   return ret;

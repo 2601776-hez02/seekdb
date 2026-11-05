@@ -228,11 +228,14 @@ public:
   inline bool get_plan_references_ai_column() const { return plan_references_ai_column_; }
   inline void set_plan_references_ai_column(bool v) { plan_references_ai_column_ = v; }
   inline const char *get_ai_column_check_targets() const { return ai_column_check_targets_; }
-  // append one (database, table, column) triple, returns OB_SIZE_OVERFLOW when the
-  // buffer is full, in that case the caller keeps the flag and logs a warning.
+  // append one (database, table, column, table id, column id) record, returns
+  // OB_SIZE_OVERFLOW when the buffer is full, in that case the caller keeps the
+  // flag and logs a warning.
   int add_ai_column_check_target(const common::ObString &database_name,
                                  const common::ObString &table_name,
-                                 const common::ObString &column_name);
+                                 const common::ObString &column_name,
+                                 const uint64_t table_id,
+                                 const uint64_t column_id);
   // ---- end of AI COLUMN strict read support ------------------------------
   void set_is_wise_join(const bool is_wise_join) { is_wise_join_ = is_wise_join; }
   bool is_wise_join() const { return is_wise_join_; }

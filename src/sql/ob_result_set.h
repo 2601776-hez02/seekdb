@@ -351,7 +351,9 @@ private:
   int check_ai_column_ready(query::ObSessionInnerSql &inner_sql,
                             const common::ObString &database_name,
                             const common::ObString &table_name,
-                            const common::ObString &column_name);
+                            const common::ObString &column_name,
+                            const uint64_t table_id,
+                            const uint64_t column_id);
   int do_close_plan(int errcode, ObExecContext &ctx);
   int deal_feedback_info(ObPhysicalPlan *physical_plan, bool is_rollback, ObExecContext &ctx);
   bool transaction_set_violation_and_retry(int &err, int64_t &retry);

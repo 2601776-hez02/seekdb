@@ -8587,6 +8587,7 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
   int64_t func_type = ObAIColumnFuncType::INVALID;
   const char *func_name = NULL;
   ObString expr_str;
+  ObSEArray<uint64_t, 4> dep_column_ids;
   // fallback buffer used to print the expression when the parser did not keep its text
   char expr_buf[4096] = {'\0'};
   int64_t expr_buf_len = 0;
@@ -8622,6 +8623,7 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     ObResolverParams params;
     ObRawExprFactory expr_factory(allocator);
     ObRawExpr *raw_expr = NULL;
+    ObSEArray<ObRawExpr *, 8> dep_exprs;
     params.expr_factory_ = &expr_factory;
     params.allocator_ = &allocator;
     params.session_info_ = session_info;
@@ -8642,7 +8644,30 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
       LOG_USER_ERROR(OB_INVALID_ARGUMENT,
           "OB_AI_COLUMN: the AI column definition must be exactly one "
           "AI_COMPLETE/AI_EMBED/AI_RERANK call");
-    } else if (OB_FAIL(check_ai_column_dependency(column, table_schema))) {
+    } else if (OB_FAIL(ObRawExprUtils::extract_column_exprs(raw_expr, dep_exprs))) {
+      LOG_WARN("fail to extract ai column dependency expressions", K(ret));
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < dep_exprs.count(); ++i) {
+        ObColumnRefRawExpr *dep_expr = NULL;
+        if (OB_ISNULL(dep_exprs.at(i)) || !dep_exprs.at(i)->is_column_ref_expr()) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("unexpected ai column dependency expression", K(ret), K(i));
+        } else if (FALSE_IT(dep_expr = static_cast<ObColumnRefRawExpr *>(dep_exprs.at(i)))) {
+        } else if (dep_expr->get_table_id() != table_schema.get_table_id()) {
+          // a column of another table can not be a dependency
+        } else if (OB_ISNULL(table_schema.get_column_schema(dep_expr->get_column_id()))) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("ai column dependency column is not found", K(ret), KPC(dep_expr));
+        } else if (table_schema.get_column_schema(dep_expr->get_column_id())->is_hidden()) {
+          // the hidden ai companion columns are not dependencies
+        } else if (OB_FAIL(column.add_cascaded_column_id(dep_expr->get_column_id()))) {
+          LOG_WARN("fail to record ai column dependency column id", K(ret));
+        } else if (OB_FAIL(dep_column_ids.push_back(dep_expr->get_column_id()))) {
+          LOG_WARN("fail to record ai column dependency column id", K(ret));
+        }
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(check_ai_column_dependency(column, table_schema))) {
     }
   }
   // 3. keep the expression text in the default value slot, exactly like a generated column.
@@ -8694,11 +8719,8 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     } else if (OB_FAIL(ai_spec.set_type_hint(type_hint, allocator))) {
       LOG_WARN("fail to set ai column type hint", K(ret));
     } else {
-      // the dependency column ids are the ones already collected on the column schema
-      ObSEArray<uint64_t, 4> dep_column_ids;
-      if (OB_FAIL(column.get_cascaded_column_ids(dep_column_ids))) {
-        LOG_WARN("fail to get ai column dependency column ids", K(ret));
-      } else if (OB_FAIL(ai_spec.dep_column_ids_.assign(dep_column_ids))) {
+      // the dependency column ids are the ones collected from the expression above
+      if (OB_FAIL(ai_spec.dep_column_ids_.assign(dep_column_ids))) {
         LOG_WARN("fail to assign ai column dependency column ids", K(ret));
       } else if (OB_FAIL(column.set_ai_spec(ai_spec))) {
         LOG_WARN("fail to set ai column spec", K(ret));

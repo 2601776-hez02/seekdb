@@ -1,4 +1,5 @@
-id,name,score,active,day
-1,alice,1.5,true,2024-01-15
-2,"bob, jr",2,false,2024-02-29
-3,carol,NA,,2024-03-01
+id,name,score,active,day,created,note,id
+1,Alice,98.5,true,2026-08-01,2026-08-01 10:11:12,"hello,
+world",101
+2,Bob,87,false,,,plain,102
+3,Chen,90.25,true,2026-08-03,2026-08-03T12:13:14,"say ""hi""",103

@@ -8658,7 +8658,16 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("fail to print ai column expression", K(ret), K(expr_buf_len));
       } else {
-        expr_str.assign_ptr(expr_buf, static_cast<int32_t>(expr_buf_len));
+        // The printed text has to outlive this function: it becomes the default
+        // value of the column schema, so it is copied out of the stack buffer.
+        char *printed = static_cast<char *>(allocator.alloc(expr_buf_len));
+        if (OB_ISNULL(printed)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+          LOG_WARN("fail to allocate ai column expression text", K(ret), K(expr_buf_len));
+        } else {
+          MEMCPY(printed, expr_buf, expr_buf_len);
+          expr_str.assign_ptr(printed, static_cast<int32_t>(expr_buf_len));
+        }
       }
     }
     if (OB_FAIL(ret)) {

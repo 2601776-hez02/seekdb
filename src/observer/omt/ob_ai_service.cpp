@@ -62,9 +62,9 @@ namespace
 const char *const AI_TYPE_HINT_STRING =
     "Return only the value, no explanation, no quotes.";
 const char *const AI_TYPE_HINT_JSON =
-    "Return a valid JSON document only, no explanation, no markdown.";
+    "Return exactly one valid JSON value, no explanation, no markdown.";
 const char *const AI_TYPE_HINT_NUMBER =
-    "Return only the number, no explanation, no units.";
+    "Return only the base-10 integer or number value, no explanation, no units.";
 const char *const AI_TYPE_HINT_DATETIME =
     "Return only the date or datetime value, no explanation.";
 
@@ -98,7 +98,7 @@ const char *const AI_COLUMN_TABLE_COL_COLUMN_ID = "column_id";
 const char *const AI_COLUMN_TABLE_COL_DATABASE_NAME = "database_name";
 const char *const AI_COLUMN_TABLE_COL_TABLE_NAME = "table_name";
 const char *const AI_COLUMN_TABLE_COL_COLUMN_NAME = "column_name";
-const char *const AI_COLUMN_TABLE_COL_EXPRESSION = "expression";
+const char *const AI_COLUMN_TABLE_COL_EXPRESSION = "normalized_expr";
 const char *const AI_COLUMN_TABLE_COL_DEPENDENCIES = "dependencies";
 const char *const AI_COLUMN_TABLE_COL_SYNC_MODE = "sync_mode";
 const char *const AI_COLUMN_TABLE_COL_MAX_RETRIES = "max_retries";
@@ -144,6 +144,7 @@ void ObAIColumnDef::reset()
   status_column_name_.reset();
   srcver_column_name_.reset();
   expr_.reset();
+  expr_hint_.reset();
   type_hint_.reset();
   dep_column_ids_.reuse();
 }
@@ -638,12 +639,24 @@ int ObAIColumnWorker::refresh_definitions_(ObInnerSQLConnection &conn)
               def.max_retries_ = (max_retries < 0) ? 0 : max_retries;
               def.sync_mode_ = sync_mode;
               def.func_type_ = func_type;
+              // normalized_expr carries the expression followed by the result
+              // type hint on its own line; only the expression is SQL.
+              ObString expr_sql = expr;
+              ObString expr_hint;
+              const char *const newline = static_cast<const char *>(
+                  memrchr(expr.ptr(), '\n', static_cast<size_t>(expr.length())));
+              if (OB_NOT_NULL(newline) && newline > expr.ptr()) {
+                expr_sql.assign_ptr(expr.ptr(), static_cast<int32_t>(newline - expr.ptr()));
+                expr_hint.assign_ptr(newline + 1,
+                                     static_cast<int32_t>(expr.ptr() + expr.length() - newline - 1));
+              }
               ObSqlString status_name;
               ObSqlString srcver_name;
               if (OB_FAIL(deep_copy_str_(def_allocator_, db_name, def.db_name_))) {
               } else if (OB_FAIL(deep_copy_str_(def_allocator_, table_name, def.table_name_))) {
               } else if (OB_FAIL(deep_copy_str_(def_allocator_, column_name, def.column_name_))) {
-              } else if (OB_FAIL(deep_copy_str_(def_allocator_, expr, def.expr_))) {
+              } else if (OB_FAIL(deep_copy_str_(def_allocator_, expr_sql, def.expr_))) {
+              } else if (OB_FAIL(deep_copy_str_(def_allocator_, expr_hint, def.expr_hint_))) {
               } else if (OB_FAIL(parse_dependencies_(dependencies, def.dep_column_ids_))) {
               } else if (OB_FAIL(status_name.assign_fmt("%s%.*s",
                                                         OB_AI_COLUMN_STATUS_COLUMN_PREFIX,
@@ -769,6 +782,11 @@ int ObAIColumnWorker::refresh_table_schema_(ObAIColumnTargetTable &table)
         // from the declared result type when the spec does not carry it.
         if (def.is_vector_) {
           def.type_hint_.reset();
+        } else if (!def.expr_hint_.empty()) {
+          // the hint persisted in normalized_expr is authoritative
+          if (OB_FAIL(deep_copy_str_(def_allocator_, def.expr_hint_, def.type_hint_))) {
+            LOG_WARN("fail to copy the stored ai column type hint", KR(ret), K(def.column_id_));
+          }
         } else if (!ai_column->get_ai_spec().type_hint_.empty()) {
           if (OB_FAIL(deep_copy_str_(def_allocator_,
                                      ai_column->get_ai_spec().type_hint_,

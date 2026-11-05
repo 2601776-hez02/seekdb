@@ -89,6 +89,7 @@ struct ObAIColumnDef
   common::ObString status_column_name_;  // __ai_status_<c>
   common::ObString srcver_column_name_;  // __ai_srcver_<c>
   common::ObString expr_;                // column expression text
+  common::ObString expr_hint_;           // hint stored after the expression (may be empty)
   common::ObString type_hint_;           // result type hint, appended to the prompt (design 7.1)
   common::ObSEArray<uint64_t, 4> dep_column_ids_;
 };

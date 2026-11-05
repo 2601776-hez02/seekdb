@@ -4746,6 +4746,7 @@ int ObTableSqlService::add_ai_column_meta(common::ObISQLClient &sql_client,
     ObDMLSqlSplicer dml;
     ObSqlString result_type;
     ObSqlString dependencies;
+    ObSqlString normalized_expr;
     ObString expr_str;
     ObDMLExecHelper exec(sql_client);
     const ObAIColumnSpec &ai_spec = column_schema.get_ai_spec();
@@ -4754,6 +4755,12 @@ int ObTableSqlService::add_ai_column_meta(common::ObISQLClient &sql_client,
     } else if (OB_FAIL(get_ai_column_dependencies_str(ai_spec, dependencies))) {
     } else if (OB_FAIL(column_schema.get_cur_default_value().get_string(expr_str))) {
       LOG_WARN("fail to get ai column expression text", K(ret), K(column_schema));
+    } else if (OB_FAIL(normalized_expr.append(expr_str))) {
+      LOG_WARN("fail to build the normalized ai column expression", K(ret));
+    } else if (!ai_spec.type_hint_.empty()
+               && (OB_FAIL(normalized_expr.append("\n"))
+                   || OB_FAIL(normalized_expr.append(ai_spec.type_hint_)))) {
+      LOG_WARN("fail to append the ai column result type hint", K(ret));
     } else if (OB_FAIL(dml.add_pk_column("table_id", table_schema.get_table_id()))
                || OB_FAIL(dml.add_pk_column("column_id", column_schema.get_column_id()))
                || OB_FAIL(dml.add_column("database_name", ObHexEscapeSqlStr(database_name)))
@@ -4763,7 +4770,8 @@ int ObTableSqlService::add_ai_column_meta(common::ObISQLClient &sql_client,
                           ObHexEscapeSqlStr(column_schema.get_column_name_str())))
                || OB_FAIL(dml.add_column("ai_function", ObHexEscapeSqlStr(ai_spec.ai_function_)))
                || OB_FAIL(dml.add_column("model_name", ObHexEscapeSqlStr(ai_spec.model_name_)))
-               || OB_FAIL(dml.add_column("expression", ObHexEscapeSqlStr(expr_str)))
+               || OB_FAIL(dml.add_column("normalized_expr",
+                          ObHexEscapeSqlStr(normalized_expr.string())))
                || OB_FAIL(dml.add_column("result_type", ObHexEscapeSqlStr(result_type.string())))
                || OB_FAIL(dml.add_column("dependencies", ObHexEscapeSqlStr(dependencies.string())))
                || OB_FAIL(dml.add_column("sync_mode",

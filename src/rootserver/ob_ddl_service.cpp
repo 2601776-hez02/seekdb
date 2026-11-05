@@ -6334,6 +6334,7 @@ int ObDDLService::resolve_timestamp_column(AlterColumnSchema *alter_column_schem
   if (OB_ISNULL(alter_column_schema)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (ObTimestampType != new_column_schema.get_data_type()
+      || new_column_schema.is_ai_column()
       || (OB_DDL_ADD_COLUMN == alter_column_schema->alter_type_
           && new_column_schema.is_generated_column())
       || new_column_schema.is_generated_column()

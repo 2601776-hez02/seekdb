@@ -3728,7 +3728,10 @@ int ObDDLResolver::check_default_value(ObObj &default_value,
   const ObObj input_default_value = default_value;
   if (OB_ISNULL(session_info)) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (column.is_generated_column()) {
+  } else if (column.is_generated_column() || column.is_ai_column()) {
+    // an AI column keeps its expression in the default slot, exactly like a
+    // generated column, so the expression has to be resolved instead of being
+    // measured against the column length.
     ObString expr_str;
     ObRawExpr *expr = NULL;
     ObRawExprFactory expr_factory(allocator);
@@ -8111,9 +8114,9 @@ const char *const AI_COLUMN_SYNC_MODE_ASYNC = "async";
 const char *const AI_COLUMN_TYPE_HINT_STRING =
     "Return only the value, no explanation, no quotes.";
 const char *const AI_COLUMN_TYPE_HINT_JSON =
-    "Return a valid JSON document only, no explanation, no markdown.";
+    "Return exactly one valid JSON value, no explanation, no markdown.";
 const char *const AI_COLUMN_TYPE_HINT_NUMBER =
-    "Return only the number, no explanation, no units.";
+    "Return only the base-10 integer or number value, no explanation, no units.";
 const char *const AI_COLUMN_TYPE_HINT_DATETIME =
     "Return only the date or datetime value, no explanation.";
 
@@ -8312,9 +8315,10 @@ int check_ai_column_embed_dim(const ParseNode &expr_node, const ObColumnSchemaV2
     LOG_USER_ERROR(OB_INVALID_ARGUMENT,
         "OB_AI_COLUMN: the dimension argument of AI_EMBED must be a positive integer");
   } else if (arg_list->children_[2]->value_ != vector_dim) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_USER_ERROR(OB_INVALID_ARGUMENT,
-        "OB_AI_COLUMN: the dimension argument of AI_EMBED does not match the declared vector dimension");
+    // reported the way a vector column reports a width mismatch
+    ret = OB_ERR_INVALID_VECTOR_DIM;
+    LOG_USER_ERROR(OB_ERR_INVALID_VECTOR_DIM, static_cast<uint32_t>(vector_dim),
+                   static_cast<uint32_t>(arg_list->children_[2]->value_));
     LOG_WARN("ai embed dim mismatch", K(ret), K(vector_dim), "dim_arg", arg_list->children_[2]->value_);
   }
   return ret;
@@ -8459,17 +8463,18 @@ int check_ai_column_dependency(const ObColumnSchemaV2 &column, const ObTableSche
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("ai column dependency is not found in the table", K(ret), K(dep_column_ids.at(i)));
     } else if (dep_column->is_ai_column()) {
-      ret = OB_INVALID_ARGUMENT;
-      LOG_USER_ERROR(OB_INVALID_ARGUMENT,
-          "OB_AI_COLUMN: an AI column can not be referenced by another AI column");
+      // an AI column can not be the input of another AI column: the result is
+      // produced asynchronously, so the dependency would be unsatisfiable.
+      // No user error is set, so the client sees the plain "Not supported
+      // feature or function" message of ER_NOT_SUPPORTED_YET.
+      ret = OB_NOT_SUPPORTED;
+      LOG_WARN("an ai column is referenced by another ai column", K(ret), KPC(dep_column));
     } else if (dep_column->is_ai_status_column() || dep_column->is_hidden()) {
-      ret = OB_INVALID_ARGUMENT;
-      LOG_USER_ERROR(OB_INVALID_ARGUMENT,
-          "OB_AI_COLUMN: an AI column can not reference a hidden column");
+      ret = OB_NOT_SUPPORTED;
+      LOG_WARN("an ai column references a hidden column", K(ret), KPC(dep_column));
     } else if (dep_column->is_generated_column()) {
-      ret = OB_INVALID_ARGUMENT;
-      LOG_USER_ERROR(OB_INVALID_ARGUMENT,
-          "OB_AI_COLUMN: an AI column can not reference a generated column");
+      ret = OB_NOT_SUPPORTED;
+      LOG_WARN("an ai column references a generated column", K(ret), KPC(dep_column));
     }
   }
   return ret;

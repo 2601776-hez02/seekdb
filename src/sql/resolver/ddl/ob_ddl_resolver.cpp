@@ -8297,14 +8297,11 @@ int check_ai_column_embed_dim(const ParseNode &expr_node, const ObColumnSchemaV2
   if (OB_FAIL(get_ai_column_vector_dim(column, is_vector, vector_dim))) {
   } else if (!is_vector) {
     // nothing to check for a non vector result type
-  } else if (OB_ISNULL(arg_list) || OB_ISNULL(arg_list->children_)) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_USER_ERROR(OB_INVALID_ARGUMENT,
-        "OB_AI_COLUMN: AI_EMBED on a VECTOR column requires the dimension argument");
-  } else if (arg_list->num_child_ < 3 || OB_ISNULL(arg_list->children_[2])) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_USER_ERROR(OB_INVALID_ARGUMENT,
-        "OB_AI_COLUMN: AI_EMBED on a VECTOR column requires the dimension argument");
+  } else if (OB_ISNULL(arg_list) || OB_ISNULL(arg_list->children_)
+             || arg_list->num_child_ < 3 || OB_ISNULL(arg_list->children_[2])) {
+    // The dimension argument is optional: for a VECTOR column the declared
+    // column type already fixes the width, so AI_EMBED without an explicit
+    // dimension is valid and the endpoint decides what it returns.
   } else if (T_INT != arg_list->children_[2]->type_) {
     // the lexer turns an INTNUM token into a T_INT node (sql_parser_mysql_mode.l)
     ret = OB_INVALID_ARGUMENT;

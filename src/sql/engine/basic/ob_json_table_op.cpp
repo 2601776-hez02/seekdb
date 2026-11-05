@@ -686,16 +686,17 @@ int ObJsonTableOp::inner_close()
 {
   INIT_SUCC(ret);
   if (OB_NOT_NULL(root_)) {
-    if (OB_FAIL(root_->reset(&jt_ctx_))) {
-    }
     root_->destroy();
+    root_ = nullptr;
   }
   if (OB_NOT_NULL(def_root_)) { 
     def_root_->destroy();
+    def_root_ = nullptr;
   }
   jt_ctx_.row_alloc_.clear();
   if (OB_NOT_NULL(jt_ctx_.table_func_) && OB_NOT_NULL(jt_ctx_.op_exec_alloc_)) {
     jt_ctx_.op_exec_alloc_->free(jt_ctx_.table_func_);
+    jt_ctx_.table_func_ = nullptr;
   }
   return ret;
 }

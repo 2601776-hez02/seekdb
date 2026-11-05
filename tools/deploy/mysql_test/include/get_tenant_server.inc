@@ -17,10 +17,10 @@
 connect (obsys,$OBMYSQL_MS0,admin,$OBMYSQL_PWD,test,$OBMYSQL_PORT);
 connection obsys;
 
-let $__svr_ip__ = `select svr_ip from oceanbase.__all_virtual_server_stat`;
-let $__svr_port__ = `select svr_port from oceanbase.__all_virtual_server_stat`;
+let $__svr_ip__ = `select svr_ip from server_stat()`;
+let $__svr_port__ = `select svr_port from server_stat()`;
 
-let $__inner_port__ = `select sql_port from oceanbase.__all_virtual_server_stat`;
+let $__inner_port__ = `select sql_port from server_stat()`;
 
 let $TE_SERVER_IP = $__svr_ip__;
 let $TE_SERVER_PORT = $__inner_port__;

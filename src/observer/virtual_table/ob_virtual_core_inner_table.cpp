@@ -64,15 +64,10 @@ int ObVritualCoreInnerTable::init(
 int ObVritualCoreInnerTable::inner_open()
 {
   int ret = OB_SUCCESS;
-  const ObTableSchema *table_schema = NULL;
   if (!inited_) {
     ret = OB_NOT_INIT;
   } else if (NULL == allocator_) {
     ret = OB_NOT_INIT;
-  } else if (OB_FAIL(schema_guard_->get_table_schema( table_id_, table_schema))) {
-  } else if (NULL == table_schema) {
-    ret = OB_TABLE_NOT_EXIST;
-    LOG_WARN("get_table_schema failed", KT_(table_id), KR(ret));
   } else {
     {
       
@@ -149,7 +144,7 @@ int ObVritualCoreInnerTable::inner_open()
                 // Skip obsolete history rows and tombstones.
               } else {
                 columns.reuse();
-                if (OB_FAIL(get_full_row(table_schema, core_table, columns))) {
+                if (OB_FAIL(get_full_row(core_table, columns))) {
                 } else if (OB_FAIL(project_row(columns, cur_row_))) {
                 } else if (OB_FAIL(scanner_.add_row(cur_row_))) {
                 }
@@ -183,64 +178,52 @@ int ObVritualCoreInnerTable::inner_get_next_row(ObNewRow *&row)
   return ret;
 }
 
-int ObVritualCoreInnerTable::get_full_row(const ObTableSchema *table,
-    const ObCoreTableProxy &core_table,
-    ObIArray<Column> &columns)
+int ObVritualCoreInnerTable::get_full_row(const ObCoreTableProxy &core_table,
+                                        ObIArray<Column> &columns)
 {
   int ret = OB_SUCCESS;
-  if (!inited_) {
+  if (!inited_ || nullptr == definition_) {
     ret = OB_NOT_INIT;
-  } else if (NULL == table) {
-    // core_table doesn't need to check
-    ret = OB_INVALID_ARGUMENT;
-  } else {
-    const ObColumnSchemaV2 *column_schema = NULL;
-    const char *column_name = NULL;
-    ObString str_column;
-    for (int64_t i = 0; OB_SUCC(ret) && i < output_column_ids_.count(); ++i) {
-      if (NULL == (column_schema = table->get_column_schema(output_column_ids_.at(i)))) {
-        ret = OB_SCHEMA_ERROR;
-      } else if (NULL == (column_name = column_schema->get_column_name())) {
-        ret = OB_ERR_UNEXPECTED;
-      } else {
-        int inner_ret = OB_SUCCESS;
-        if (ObVarcharType == column_schema->get_data_type()
-            || ObLongTextType == column_schema->get_data_type()) {
-          str_column.reset();
-          if (OB_SUCCESS == (inner_ret = core_table.get_varchar(
-              column_name, str_column))) {
-            if (ObVarcharType == column_schema->get_data_type()) {
-              ADD_COLUMN(set_varchar, table, column_name, str_column, columns);
-            } else if (ObLongTextType == column_schema->get_data_type()) {
-              ADD_TEXT_COLUMN(ObLongTextType, table, column_name, str_column, columns);
-            }
-          } else if (OB_ERR_NULL_VALUE == inner_ret) {
-            ADD_NULL_COLUMN(table, column_name, columns);
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < output_column_ids_.count(); ++i) {
+    const sql::TableFunctionColumn *definition = get_output_column(output_column_ids_.at(i));
+    if (OB_ISNULL(definition)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      Column column;
+      column.column_id_ = definition->id_;
+      const ObObjType type = definition->type_.get_obj_type();
+      if (ObVarcharType == type || ObLongTextType == type) {
+        ObString value;
+        ret = core_table.get_varchar(definition->name_, value);
+        if (OB_SUCC(ret)) {
+          if (ObLongTextType == type) {
+            column.column_value_.set_lob_value(type, value.ptr(), value.length());
           } else {
-            ret = inner_ret;
+            column.column_value_.set_varchar(value);
           }
-        } else if (ObIntType == column_schema->get_data_type()
-            || ObTinyIntType == column_schema->get_data_type()
-            || ObUInt64Type == column_schema->get_data_type()) {
-          int64_t int_column = 0;
-          if (OB_SUCCESS == (inner_ret = core_table.get_int(
-              column_name, int_column))) {
-            if (ObIntType == column_schema->get_data_type()) {
-              ADD_COLUMN(set_int, table, column_name, int_column, columns);
-            } else if (ObTinyIntType == column_schema->get_data_type()) {
-              ADD_COLUMN(set_tinyint, table, column_name, static_cast<int8_t>(int_column), columns);
-            } else {
-              ADD_COLUMN(set_uint64, table, column_name, int_column, columns);
-            }
-          } else if (OB_ERR_NULL_VALUE == inner_ret) {
-            ADD_NULL_COLUMN(table, column_name, columns);
-          } else {
-            ret = inner_ret;
-          }
-        } else {
-          ret = OB_ERR_UNEXPECTED;
+          column.column_value_.set_collation_type(definition->type_.get_collation_type());
         }
+      } else if (ObIntType == type || ObTinyIntType == type || ObUInt64Type == type) {
+        int64_t value = 0;
+        ret = core_table.get_int(definition->name_, value);
+        if (OB_SUCC(ret)) {
+          if (ObTinyIntType == type) {
+            column.column_value_.set_tinyint(static_cast<int8_t>(value));
+          } else if (ObUInt64Type == type) {
+            column.column_value_.set_uint64(static_cast<uint64_t>(value));
+          } else {
+            column.column_value_.set_int(value);
+          }
+        }
+      } else {
+        ret = OB_ERR_UNEXPECTED;
       }
+      if (OB_ERR_NULL_VALUE == ret) {
+        ret = OB_SUCCESS;
+        column.column_value_.set_null();
+      }
+      if (OB_SUCC(ret)) { ret = columns.push_back(column); }
     }
   }
   return ret;

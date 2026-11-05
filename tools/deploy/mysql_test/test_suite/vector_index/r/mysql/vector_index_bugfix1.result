@@ -734,7 +734,7 @@ call dbms_stats.set_table_stats('TEST', 'T_ISSUE1439_OR_SELECTIVITY', numrows=>2
 alter system flush plan cache;
 select p.operator, p.cardinality
 from oceanbase.`V$OB_PLAN_CACHE_PLAN_STAT` s
-join oceanbase.__all_virtual_sql_plan p on p.plan_id = s.plan_id
+join sql_plan() p on p.plan_id = s.plan_id
 where instr(s.statement, 't_issue1439_or_selectivity') > 0
 and p.operator like 'VECTOR INDEX ADAPTIVE SCAN%'
 order by length(s.statement), p.plan_id;
@@ -744,7 +744,7 @@ VECTOR INDEX ADAPTIVE SCAN (PRE-FILTER)	2
 alter system flush plan cache;
 select p.operator, p.cardinality, s.hit_count
 from oceanbase.`V$OB_PLAN_CACHE_PLAN_STAT` s
-join oceanbase.__all_virtual_sql_plan p on p.plan_id = s.plan_id
+join sql_plan() p on p.plan_id = s.plan_id
 where instr(s.statement, 't_issue1439_or_selectivity') > 0
 and p.operator like 'VECTOR INDEX ADAPTIVE SCAN%'
 order by p.cardinality, p.plan_id;

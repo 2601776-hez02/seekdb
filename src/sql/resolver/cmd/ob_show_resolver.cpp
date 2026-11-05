@@ -20,6 +20,8 @@
 #include "sql/resolver/ob_resolver_utils.h"
 #include "sql/resolver/cmd/ob_show_table_status_sql.h"
 #include "sql/printer/ob_schema_printer.h"
+#include "sql/table_function/table_function.h"
+#include "sql/pl/ob_pl_user_type.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -128,8 +130,153 @@ int ObShowResolver::check_db_access_for_show_sql(const ObShowResolverContext &sh
   return ret;
 }
 
+namespace {
+// Hex literals avoid dependence on NO_BACKSLASH_ESCAPES, ANSI_QUOTES or data
+// containing quote characters. Descriptions never execute provider scans.
+int append_table_function_text(ObSqlString &sql, const ObString &text)
+{
+  int ret = OB_SUCCESS;
+  OZ (sql.append("CONVERT(X'"));
+  for (int64_t i = 0; OB_SUCC(ret) && i < text.length(); ++i) {
+    OZ (sql.append_fmt("%02x", static_cast<unsigned char>(text.ptr()[i])));
+  }
+  OZ (sql.append("' USING utf8mb4)"));
+  return ret;
+}
+int describe_table_function_type(ObResolverParams &params, const ObDataType &type, ObString &name)
+{
+  int ret = OB_SUCCESS;
+  if (type.get_obj_type() == ObExtendType) {
+    const pl::ObUserDefinedType *declaration = nullptr;
+    pl::ObPLPackageGuard guard;
+    OZ (ObResolverUtils::get_user_type(params.allocator_, params.session_info_, params.plan_cache_,
+        params.sql_proxy_, params.schema_checker_->get_schema_guard(), guard, type.get_udt_id(), declaration));
+    CK (declaration != nullptr);
+    if (OB_SUCC(ret)) { OZ (ob_write_string(*params.allocator_, declaration->get_name(), name)); }
+  } else if (type.get_obj_type() == ObCollectionSQLType) {
+    ObSubSchemaValue value;
+    OZ (params.session_info_->get_cur_exec_ctx()->get_sqludt_meta_by_subschema_id(type.get_meta_type().get_subschema_id(), value));
+    if (OB_SUCC(ret)) {
+      const ObSqlCollectionInfo *declaration = reinterpret_cast<const ObSqlCollectionInfo *>(value.value_);
+      OZ (ob_write_string(*params.allocator_, declaration->get_def_string(), name));
+    }
+  } else {
+    char buffer[1024];
+    int64_t length = 0;
+    ObSEArray<ObString, 0> extra;
+    OZ (ob_sql_type_str(type.get_meta_type(), type.get_accuracy(), extra, LS_BYTE, buffer, sizeof(buffer), length));
+    OZ (ob_write_string(*params.allocator_, ObString(length, buffer), name));
+  }
+  return ret;
+}
+
+void replace_description_call(ParseNode *&node, ParseNode *call)
+{
+  if (node != nullptr) {
+    if (node->type_ == T_TABLE_FUNCTION_CALL) { node = call; }
+    else {
+      for (int64_t i = 0; i < node->num_child_; ++i) { replace_description_call(node->children_[i], call); }
+    }
+  }
+}
+}
+
+int ObShowResolver::resolve_table_function_description(const ParseNode &node)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<const TableFunctionDescriptor *, 16> descriptors;
+  ObSEArray<ObString, 16> names;
+  ObSEArray<ObString, 16> types;
+  ObSqlString sql;
+  bool concrete = false;
+  if (node.type_ == T_SHOW_TABLE_FUNCTIONS) {
+    OZ (TableFunctionRegistry::get_all(descriptors));
+  } else {
+    const ParseNode *argument = node.children_[0];
+    concrete = argument->type_ == T_TABLE_FUNCTION_CALL || argument->type_ == T_JSON_TABLE_EXPRESSION;
+    ParseNode json_name = {};
+    json_name.str_value_ = "json_table";
+    json_name.str_len_ = 10;
+    const ParseNode *name = argument->type_ == T_JSON_TABLE_EXPRESSION ? &json_name :
+      (concrete ? argument->children_[0] : argument);
+    const ObString function_name(name->str_len_, name->str_value_);
+    if (concrete) {
+      const ParseNode *arguments = argument->type_ == T_JSON_TABLE_EXPRESSION ? nullptr : argument->children_[1];
+      const int64_t argc = arguments == nullptr ? 0 : arguments->num_child_;
+      const TableFunctionDescriptor *descriptor = nullptr;
+      OZ (TableFunctionRegistry::match(function_name, argc, descriptor));
+      OZ (descriptors.push_back(descriptor));
+    } else {
+      OZ (TableFunctionRegistry::get_overloads(function_name, descriptors));
+      if (OB_SUCC(ret) && descriptors.empty()) {
+        ret = OB_ERR_FUNCTION_UNKNOWN;
+        LOG_USER_ERROR(OB_ERR_FUNCTION_UNKNOWN, "TABLE FUNCTION", function_name.length(), function_name.ptr());
+      }
+    }
+    if (OB_SUCC(ret) && concrete) {
+      ObParser parser(*allocator_, session_info_->get_sql_mode(), session_info_->get_charsets4parser());
+      ParseResult parsed;
+      OZ (parser.parse(ObString("SELECT * FROM generator(0)"), parsed));
+      if (OB_SUCC(ret)) {
+        replace_description_call(parsed.result_tree_, const_cast<ParseNode *>(argument));
+        ObResolverParams bind_params = params_;
+        ObSelectResolver binder(bind_params);
+        OZ (binder.resolve(*parsed.result_tree_->children_[0]));
+        ObSelectStmt *bound = binder.get_select_stmt();
+        CK (bound != nullptr);
+        for (int64_t i = 0; OB_SUCC(ret) && i < bound->get_select_item_size(); ++i) {
+          OZ (names.push_back(bound->get_select_item(i).alias_name_));
+          ObDataType type;
+          type.set_meta_type(bound->get_select_item(i).expr_->get_result_meta());
+          type.set_accuracy(bound->get_select_item(i).expr_->get_accuracy());
+          ObString type_name;
+          OZ (describe_table_function_type(params_, type, type_name));
+          OZ (types.push_back(type_name));
+        }
+      }
+    }
+  }
+  int64_t rows = 0;
+  for (int64_t i = 0; OB_SUCC(ret) && i < descriptors.count(); ++i) {
+    const TableFunctionDescriptor &descriptor = *descriptors.at(i);
+    const int64_t columns = concrete ? names.count() : descriptor.column_count_;
+    const int64_t count = node.type_ == T_SHOW_TABLE_FUNCTIONS || columns == 0 ? 1 : columns;
+    for (int64_t j = 0; OB_SUCC(ret) && j < count; ++j) {
+      if (rows++ != 0) { OZ (sql.append(" UNION ALL ")); }
+      OZ (sql.append("SELECT "));
+      if (node.type_ == T_SHOW_TABLE_FUNCTIONS) {
+        OZ (append_table_function_text(sql, ObString::make_string(descriptor.name_)));
+        OZ (sql.append(" AS function_name,"));
+      }
+      OZ (append_table_function_text(sql, ObString::make_string(descriptor.signature_)));
+      OZ (sql.append(" AS signature,"));
+      if (node.type_ == T_DESCRIBE_TABLE_FUNCTION) {
+        if (columns == 0) {
+          OZ (sql.append("NULL AS column_position,NULL AS column_name,NULL AS column_type,"));
+        } else {
+          OZ (sql.append_fmt("%ld AS column_position,", j + 1));
+          OZ (append_table_function_text(sql, concrete ? names.at(j) : ObString::make_string(descriptor.columns_[j].name_)));
+          OZ (sql.append(" AS column_name,"));
+          ObString type_name;
+          if (concrete) { type_name = types.at(j); }
+          else { OZ (describe_table_function_type(params_, descriptor.columns_[j].type_, type_name)); }
+          OZ (append_table_function_text(sql, type_name));
+          OZ (sql.append(" AS column_type,"));
+        }
+      }
+      OZ (append_table_function_text(sql, ObString::make_string(descriptor.description_)));
+      OZ (sql.append(" AS description"));
+    }
+  }
+  if (OB_SUCC(ret)) { ret = parse_and_resolve_select_sql(sql.string()); }
+  return ret;
+}
+
 int ObShowResolver::resolve(const ParseNode &parse_tree)
 {
+  if (parse_tree.type_ == T_SHOW_TABLE_FUNCTIONS || parse_tree.type_ == T_DESCRIBE_TABLE_FUNCTION) {
+    return resolve_table_function_description(parse_tree);
+  }
   int ret = OB_SUCCESS;
   uint64_t real_id = OB_INVALID_ID;
   ObString database_name;
@@ -227,13 +374,13 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
                       show_resv_ctx.show_database_name_.ptr(),
                       static_cast<ObString::obstr_size_t>(condition_node->children_[0]->str_len_), // cast int64_t to obstr_size_t
                       condition_node->children_[0]->str_value_);
-                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_TABLES_LIKE, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_SHOW_TABLES_TNAME, show_db_id);
+                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_TABLES_LIKE, show_db_id, show_db_id);
                 }
               } else {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_TABLES,
                                 show_resv_ctx.show_database_name_.length(),
                                 show_resv_ctx.show_database_name_.ptr());
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_TABLES, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_SHOW_TABLES_TNAME, show_db_id);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_TABLES, show_db_id, show_db_id);
               }
             } else {
               if (NULL != condition_node && T_LIKE_CLAUSE == condition_node->type_) {
@@ -249,15 +396,13 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
                       static_cast<ObString::obstr_size_t>(condition_node->children_[0]->str_len_), // cast int64_t to obstr_size_t
                       condition_node->children_[0]->str_value_);
                   GEN_SQL_STEP_2(ObShowSqlSet::SHOW_FULL_TABLES_LIKE,
-                                  OB_SYS_DATABASE_NAME,
-                                  OB_ALL_VIRTUAL_SHOW_TABLES_TNAME,
-                                  show_db_id);
+                                  show_db_id, show_db_id);
                 }
               } else {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_FULL_TABLES,
                                 show_resv_ctx.show_database_name_.length(),
                                 show_resv_ctx.show_database_name_.ptr());
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_FULL_TABLES, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_SHOW_TABLES_TNAME, show_db_id);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_FULL_TABLES, show_db_id, show_db_id);
               }
             }
 
@@ -309,7 +454,7 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
                                    static_cast<ObString::obstr_size_t>(
                                        show_resv_ctx.condition_node_->children_[0]->str_len_), // cast int64_t to obstr_size_t
                                    show_resv_ctx.condition_node_->children_[0]->str_value_);
-                    GEN_SQL_STEP_2(ObShowSqlSet::SHOW_DATABASES_STATUS_LIKE, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_DATABASE_STATUS_TNAME);
+                    GEN_SQL_STEP_2(ObShowSqlSet::SHOW_DATABASES_STATUS_LIKE);
                 } else {
                     GEN_SQL_STEP_1(ObShowSqlSet::SHOW_DATABASES_LIKE,
                                    static_cast<ObString::obstr_size_t>(
@@ -327,7 +472,7 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             } else {
               if (show_db_status) {
                   GEN_SQL_STEP_1(ObShowSqlSet::SHOW_DATABASES_STATUS);
-                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_DATABASES_STATUS, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_DATABASE_STATUS_TNAME);
+                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_DATABASES_STATUS);
               } else {
                   GEN_SQL_STEP_1(ObShowSqlSet::SHOW_DATABASES);
                   // Add OB_PUBLIC_SCHEMA_NAME to match three parameters
@@ -355,10 +500,10 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             show_resv_ctx.global_scope_ = 1 == parse_tree.children_[0]->value_ ? true : false;
             if (true == show_resv_ctx.global_scope_) {
               GEN_SQL_STEP_1(ObShowSqlSet::SHOW_GLOBAL_VARIABLES);
-              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_GLOBAL_VARIABLES, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_GLOBAL_VARIABLE_TNAME);
+              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_GLOBAL_VARIABLES);
             } else {
               GEN_SQL_STEP_1(ObShowSqlSet::SHOW_VARIABLES);
-              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_VARIABLES, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_SESSION_VARIABLE_TNAME);
+              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_VARIABLES);
             }
           }
         }();
@@ -401,18 +546,18 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
               } else if (is_full) {
                 if (is_extended) {
                   GEN_SQL_STEP_1(ObShowSqlSet::SHOW_EXTENDED_FULL_COLUMNS);
-                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_EXTENDED_FULL_COLUMNS, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_TABLE_COLUMN_TNAME, show_table_id);
+                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_EXTENDED_FULL_COLUMNS, show_table_id, show_table_id);
                 } else {
                   GEN_SQL_STEP_1(ObShowSqlSet::SHOW_FULL_COLUMNS);
-                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_FULL_COLUMNS, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_TABLE_COLUMN_TNAME, show_table_id);
+                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_FULL_COLUMNS, show_table_id, show_table_id);
                 }
               } else {
                 if (is_extended) {
                   GEN_SQL_STEP_1(ObShowSqlSet::SHOW_EXTENDED_COLUMNS);
-                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_EXTENDED_COLUMNS, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_TABLE_COLUMN_TNAME, show_table_id);
+                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_EXTENDED_COLUMNS, show_table_id, show_table_id);
                 } else {
                   GEN_SQL_STEP_1(ObShowSqlSet::SHOW_COLUMNS);
-                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_COLUMNS, OB_SYS_DATABASE_NAME,OB_ALL_VIRTUAL_TABLE_COLUMN_TNAME, show_table_id);
+                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_COLUMNS, show_table_id, show_table_id);
                 }
               }
             }
@@ -443,10 +588,10 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
               }
             } else if (NULL != parse_tree.children_[0]) {
               GEN_SQL_STEP_1(ObShowSqlSet::SHOW_CREATE_DATABASE_EXISTS);
-              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_DATABASE_EXISTS, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_SHOW_CREATE_DATABASE_TNAME, show_db_id);
+              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_DATABASE_EXISTS, show_db_id, show_db_id);
             } else {
               GEN_SQL_STEP_1(ObShowSqlSet::SHOW_CREATE_DATABASE);
-              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_DATABASE, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_SHOW_CREATE_DATABASE_TNAME, show_db_id);
+              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_DATABASE, show_db_id, show_db_id);
             }
           }
         }();
@@ -491,10 +636,10 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
               show_resv_ctx.stmt_type_ = (parse_tree.type_ == T_SHOW_CREATE_TABLE) ? stmt::T_SHOW_CREATE_TABLE : stmt::T_SHOW_CREATE_VIEW;
               if (parse_tree.type_ == T_SHOW_CREATE_VIEW || is_view) {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_CREATE_VIEW);
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_VIEW, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_SHOW_CREATE_TABLE_TNAME, show_table_id);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_VIEW, show_table_id, show_table_id);
               } else {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_CREATE_TABLE);
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_TABLE, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_SHOW_CREATE_TABLE_TNAME, show_table_id);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_TABLE, show_table_id, show_table_id);
               }
             }
           }
@@ -543,10 +688,10 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
               show_resv_ctx.stmt_type_ = (parse_tree.type_ == T_SHOW_CREATE_PROCEDURE) ? stmt::T_SHOW_CREATE_PROCEDURE : stmt::T_SHOW_CREATE_FUNCTION;
               if (parse_tree.type_ == T_SHOW_CREATE_PROCEDURE) {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_CREATE_PROCEDURE);
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_PROCEDURE, OB_SYS_DATABASE_NAME,OB_ALL_VIRTUAL_SHOW_CREATE_PROCEDURE_TNAME, show_routine_id, proc_type);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_PROCEDURE, show_routine_id, show_routine_id, proc_type);
               } else {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_CREATE_FUNCTION);
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_FUNCTION, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_SHOW_CREATE_PROCEDURE_TNAME, show_routine_id, proc_type);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_FUNCTION, show_routine_id, show_routine_id, proc_type);
               }
             }
           }
@@ -579,10 +724,8 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             if (OB_SUCC(ret)) {
               show_resv_ctx.stmt_type_ = stmt::T_SHOW_CREATE_TRIGGER;
               GEN_SQL_STEP_1(ObShowSqlSet::SHOW_CREATE_TRIGGER);
-              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_TRIGGER,  
-                            OB_SYS_DATABASE_NAME, 
-                            OB_ALL_VIRTUAL_SHOW_CREATE_TRIGGER_TNAME,
-                            show_tg_id);
+              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CREATE_TRIGGER,
+                            show_tg_id, show_tg_id);
             }
           }
         }();
@@ -646,10 +789,10 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             if (OB_SUCC(ret)) {
               if (is_extended) {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_EXTENDED_INDEXES);
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_EXTENDED_INDEXES, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_TABLE_INDEX_TNAME, show_table_id);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_EXTENDED_INDEXES, show_table_id, show_table_id);
               } else {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_INDEXES);
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_INDEXES, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_TABLE_INDEX_TNAME, show_table_id);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_INDEXES, show_table_id, show_table_id);
               }
             }
           }
@@ -710,7 +853,7 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             show_resv_ctx.condition_node_ = parse_tree.children_[0];
             show_resv_ctx.stmt_type_ = stmt::T_SHOW_CHARSET;
             GEN_SQL_STEP_1(ObShowSqlSet::SHOW_CHARSET);
-            GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CHARSET, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_CHARSET_TNAME);
+            GEN_SQL_STEP_2(ObShowSqlSet::SHOW_CHARSET);
           }
         }();
         break;
@@ -723,7 +866,7 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             show_resv_ctx.condition_node_ = parse_tree.children_[0];
             show_resv_ctx.stmt_type_ = stmt::T_SHOW_COLLATION;
             GEN_SQL_STEP_1(ObShowSqlSet::SHOW_COLLATION);
-            GEN_SQL_STEP_2(ObShowSqlSet::SHOW_COLLATION, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_COLLATION_TNAME);
+            GEN_SQL_STEP_2(ObShowSqlSet::SHOW_COLLATION);
           }
         }();
         break;
@@ -756,10 +899,10 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
               session_info_->set_is_row_traceformat(is_row_traceformat);
               if (is_row_traceformat) {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_TRACE);
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_TRACE, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_SHOW_TRACE_TNAME);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_TRACE);
               } else {
                   GEN_SQL_STEP_1(ObShowSqlSet::SHOW_TRACE_JSON);
-                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_TRACE_JSON, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_SHOW_TRACE_TNAME);
+                  GEN_SQL_STEP_2(ObShowSqlSet::SHOW_TRACE_JSON);
               }
             }
           }
@@ -840,14 +983,11 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
               GEN_SQL_STEP_1(ObShowSqlSet::SHOW_GRANTS, show_user_name.length(), show_user_name.ptr(), show_host_name.length(), show_host_name.ptr());
               if (role_list_str.length() > 0) {
                 GEN_SQL_STEP_2(ObShowSqlSet::SHOW_GRANTS_USING_ROLES,
-                               OB_SYS_DATABASE_NAME,
-                               OB_ALL_VIRTUAL_PRIVILEGE_GRANT_TNAME,
+                               role_list_str.string().length(), role_list_str.string().ptr(),
                                role_list_str.string().length(), role_list_str.string().ptr());
               } else {
                 GEN_SQL_STEP_2(ObShowSqlSet::SHOW_GRANTS,
-                               OB_SYS_DATABASE_NAME,
-                               OB_ALL_VIRTUAL_PRIVILEGE_GRANT_TNAME,
-                               show_user_id);
+                               show_user_id, show_user_id);
               }
             }
           }
@@ -868,12 +1008,12 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
           if (0 == parse_tree.children_[0]->value_) {
             {
               GEN_SQL_STEP_1(ObShowSqlSet::SHOW_SYS_PROCESSLIST);
-              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_SYS_PROCESSLIST, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_PROCESSLIST_TNAME);
+              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_SYS_PROCESSLIST);
             }
           } else if (1 == parse_tree.children_[0]->value_) {
             {
               GEN_SQL_STEP_1(ObShowSqlSet::SHOW_SYS_FULL_PROCESSLIST);
-              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_SYS_FULL_PROCESSLIST, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_PROCESSLIST_TNAME);
+              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_SYS_FULL_PROCESSLIST);
             }
           } else {
             ret = OB_ERR_UNEXPECTED;
@@ -998,10 +1138,10 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             if (NULL == parse_tree.children_[0]) { // show  warnings|errors
               if (parse_tree.type_ == T_SHOW_WARNINGS) {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_WARNINGS);
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_WARNINGS, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_WARNING_TNAME);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_WARNINGS);
               } else if (parse_tree.type_ == T_SHOW_ERRORS) {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_ERRORS);
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_ERRORS, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_WARNING_TNAME);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_ERRORS);
               } else {
                 ret = OB_ERR_UNEXPECTED;
                 LOG_WARN("unexpected node type", K(parse_tree.type_));
@@ -1020,7 +1160,7 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
                 if (parse_tree.type_ == T_SHOW_WARNINGS) {
                   if (OB_FAIL(sql_gen.init(params_.allocator_))) {
                   } else if (OB_FAIL(sql_gen.gen_select_str(ObShowSqlSet::SHOW_WARNINGS_SELECT))) {
-                  } else if (OB_FAIL(sql_gen.gen_from_str(ObShowSqlSet::SHOW_WARNINGS_SUBQUERY, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_WARNING_TNAME))) {
+                  } else if (OB_FAIL(sql_gen.gen_from_str(ObShowSqlSet::SHOW_WARNINGS_SUBQUERY))) {
                   } else if (OB_FAIL(sql_gen.gen_limit_str(offset, row_count))) {
                   } else {
                     sql_gen.assign_sql_str(select_sql);
@@ -1028,7 +1168,7 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
                 } else if (parse_tree.type_ == T_SHOW_ERRORS) {
                   if (OB_FAIL(sql_gen.init(params_.allocator_))) {
                   } else if (OB_FAIL(sql_gen.gen_select_str(ObShowSqlSet::SHOW_ERRORS_SELECT))) {
-                  } else if (OB_FAIL(sql_gen.gen_from_str(ObShowSqlSet::SHOW_ERRORS_SUBQUERY, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_WARNING_TNAME))) {
+                  } else if (OB_FAIL(sql_gen.gen_from_str(ObShowSqlSet::SHOW_ERRORS_SUBQUERY))) {
                   } else if (OB_FAIL(sql_gen.gen_limit_str(offset, row_count))) {
                   } else {
                     sql_gen.assign_sql_str(select_sql);
@@ -1042,10 +1182,10 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
                       T_FUN_COUNT == parse_tree.children_[0]->type_){
               if (parse_tree.type_ == T_SHOW_WARNINGS) {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_COUNT_WARNINGS);
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_COUNT_WARNINGS, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_WARNING_TNAME);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_COUNT_WARNINGS);
               } else if (parse_tree.type_ == T_SHOW_ERRORS) {
                 GEN_SQL_STEP_1(ObShowSqlSet::SHOW_COUNT_ERRORS);
-                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_COUNT_ERRORS, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_WARNING_TNAME);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_COUNT_ERRORS);
               } else {
                 ret = OB_ERR_UNEXPECTED;
                 LOG_WARN("unexpected node type", K(parse_tree.type_));
@@ -1067,9 +1207,7 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
           show_resv_ctx.stmt_type_ = stmt::T_SHOW_PARAMETERS;
           show_resv_ctx.condition_node_ = parse_tree.children_[0];
           GEN_SQL_STEP_1(ObShowSqlSet::SHOW_PARAMETERS_WITH_DEFAULT_VALUE);
-          GEN_SQL_STEP_2(ObShowSqlSet::SHOW_PARAMETERS_WITH_DEFAULT_VALUE,
-              OB_SYS_DATABASE_NAME,
-              OB_ALL_VIRTUAL_PARAMETER_STAT_TNAME);
+          GEN_SQL_STEP_2(ObShowSqlSet::SHOW_PARAMETERS_WITH_DEFAULT_VALUE);
         }
         break;
       }
@@ -1085,10 +1223,10 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
             show_resv_ctx.global_scope_ = 1 == parse_tree.children_[0]->value_ ? true : false;
             if (true == show_resv_ctx.global_scope_) {
               GEN_SQL_STEP_1(ObShowSqlSet::SHOW_GLOBAL_STATUS);
-              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_GLOBAL_STATUS, OB_INFORMATION_SCHEMA_NAME, OB_SESSION_STATUS_TNAME);
+              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_GLOBAL_STATUS);
             } else {
               GEN_SQL_STEP_1(ObShowSqlSet::SHOW_SESSION_STATUS);
-              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_SESSION_STATUS, OB_INFORMATION_SCHEMA_NAME, OB_SESSION_STATUS_TNAME);
+              GEN_SQL_STEP_2(ObShowSqlSet::SHOW_SESSION_STATUS);
             }
           }
         }();
@@ -1158,7 +1296,7 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
           } else {
             show_resv_ctx.stmt_type_ = stmt::T_SHOW_PRIVILEGES;
             GEN_SQL_STEP_1(ObShowSqlSet::SHOW_PRIVILEGES);
-            GEN_SQL_STEP_2(ObShowSqlSet::SHOW_PRIVILEGES, OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_PRIVILEGE_TNAME);
+            GEN_SQL_STEP_2(ObShowSqlSet::SHOW_PRIVILEGES);
           }
         }();
         break;
@@ -1742,7 +1880,7 @@ int ObShowResolver::resolve_show_from_routine(const ParseNode *from_routine_node
     }
     if (OB_SUCC(ret)) {
       if (OB_UNLIKELY(NULL == routine_info)) {
-        ret = OB_ERR_SP_DOES_NOT_EXIST;
+        ret = OB_ERR_FUNCTION_UNKNOWN;
       } else {
         show_routine_id = routine_info->get_routine_id();
         routine_type = routine_info->get_routine_type();
@@ -2382,82 +2520,82 @@ namespace sql
 DEFINE_SHOW_CLAUSE(SUBQERY_ALIAS, "subquery_alias");
 DEFINE_SHOW_CLAUSE_SET(SHOW_TABLES,
                        "SELECT table_name AS `Tables_in_%.*s` ",
-                       "SELECT table_name FROM %s.%s WHERE database_id = %ld ORDER BY table_name COLLATE utf8mb4_bin ASC",
+                       "SELECT table_name FROM show_tables(%ld) WHERE database_id = %ld ORDER BY table_name COLLATE utf8mb4_bin ASC",
                        NULL,
                        "table_name");
 DEFINE_SHOW_CLAUSE_SET(SHOW_TABLES_LIKE,
                        "SELECT table_name AS `Tables_in_%.*s (%.*s)` ",
-                       "SELECT table_name FROM %s.%s WHERE database_id = %ld ORDER BY table_name COLLATE utf8mb4_bin ASC",
+                       "SELECT table_name FROM show_tables(%ld) WHERE database_id = %ld ORDER BY table_name COLLATE utf8mb4_bin ASC",
                        NULL,
                        "table_name");
 DEFINE_SHOW_CLAUSE_SET(SHOW_FULL_TABLES,
                        "SELECT table_name AS `Tables_in_%.*s`, table_type AS `Table_type` ",
-                       "SELECT table_name, table_type FROM %s.%s WHERE database_id = %ld ORDER BY table_name COLLATE utf8mb4_bin ASC",
+                       "SELECT table_name, table_type FROM show_tables(%ld) WHERE database_id = %ld ORDER BY table_name COLLATE utf8mb4_bin ASC",
                        NULL,
                        "table_name");
 DEFINE_SHOW_CLAUSE_SET(SHOW_FULL_TABLES_LIKE,
                        "SELECT table_name AS `Tables_in_%.*s (%.*s)`, table_type AS `Table_type` ",
-                       "SELECT table_name, table_type FROM %s.%s WHERE database_id = %ld ORDER BY table_name COLLATE utf8mb4_bin ASC",
+                       "SELECT table_name, table_type FROM show_tables(%ld) WHERE database_id = %ld ORDER BY table_name COLLATE utf8mb4_bin ASC",
                        NULL,
                        "table_name");
 DEFINE_SHOW_CLAUSE_SET(SHOW_CHARSET,
                        NULL,
-                       "SELECT charset AS Charset, description AS `Description`, default_collation AS `Default collation`, max_length AS `Maxlen` FROM %s.%s",
-                       R"(SELECT "CHARSET" AS "CHARSET", "DESCRIPTION" AS "DESCRIPTION", "DEFAULT_COLLATION" AS "DEFAULT COLLATION", "MAX_LENGTH" AS "MAXLEN" FROM %s.%s)",
+                       "SELECT charset AS Charset, description AS `Description`, default_collation AS `Default collation`, max_length AS `Maxlen` FROM charset()",
+                       R"(SELECT "CHARSET" AS "CHARSET", "DESCRIPTION" AS "DESCRIPTION", "DEFAULT_COLLATION" AS "DEFAULT COLLATION", "MAX_LENGTH" AS "MAXLEN" FROM charset())",
                        "Charset");
 DEFINE_SHOW_CLAUSE_SET(SHOW_VARIABLES,
                        NULL,
-                       "SELECT /*+parallel(1)*/ variable_name AS `Variable_name`, value AS `Value` FROM %s.%s ORDER BY variable_name ASC",
-                       R"(SELECT /*+parallel(1)*/ "VARIABLE_NAME" AS "VARIABLE_NAME", "VALUE" AS "VALUE" FROM %s.%s ORDER BY VARIABLE_NAME ASC)",
+                       "SELECT /*+parallel(1)*/ variable_name AS `Variable_name`, value AS `Value` FROM session_variable() ORDER BY variable_name ASC",
+                       R"(SELECT /*+parallel(1)*/ "VARIABLE_NAME" AS "VARIABLE_NAME", "VALUE" AS "VALUE" FROM session_variable() ORDER BY VARIABLE_NAME ASC)",
                        "Variable_name");
 DEFINE_SHOW_CLAUSE_SET(SHOW_GLOBAL_VARIABLES,
                        NULL,
-                       "SELECT /*+parallel(1)*/ variable_name AS `Variable_name`, value AS `Value` FROM %s.%s ORDER BY variable_name ASC",
-                       R"(SELECT /*+parallel(1)*/ "VARIABLE_NAME" AS "VARIABLE_NAME", "VALUE" AS "VALUE" FROM %s.%s ORDER BY VARIABLE_NAME ASC)",
+                       "SELECT /*+parallel(1)*/ variable_name AS `Variable_name`, value AS `Value` FROM global_variable() ORDER BY variable_name ASC",
+                       R"(SELECT /*+parallel(1)*/ "VARIABLE_NAME" AS "VARIABLE_NAME", "VALUE" AS "VALUE" FROM global_variable() ORDER BY VARIABLE_NAME ASC)",
                        "Variable_name");
 DEFINE_SHOW_CLAUSE_SET(SHOW_COLUMNS,
                        NULL,
                        "SELECT field AS `Field`, type AS `Type`, `NULL` AS `Null`, `KEY` AS `Key`, `DEFAULT` AS `Default`, extra AS `Extra` \
-                        FROM %s.%s  where table_id = %ld AND is_hidden = False",
+                        FROM table_columns(%ld)  where table_id = %ld AND is_hidden = False",
                         R"(SELECT "FIELD" AS "FIELD", "TYPE" AS "TYPE", "NULL" AS "NULL", "KEY" AS "KEY", "DEFAULT" AS "DEFAULT", "EXTRA" AS "EXTRA" )"
-                        R"(FROM %s.%s  WHERE TABLE_ID = %ld AND IS_HIDDEN = 0)",
+                        R"(FROM table_columns(%ld)  WHERE TABLE_ID = %ld AND IS_HIDDEN = 0)",
                        "Field");
 DEFINE_SHOW_CLAUSE_SET(SHOW_FULL_COLUMNS,
                        NULL,
                        "SELECT field AS `Field`, type AS `Type`, collation AS `Collation`, `NULL` AS `Null`, `KEY` AS `Key`, `DEFAULT` AS `Default`, extra AS `Extra`, `PRIVILEGES` AS `Privileges`, `COMMENT` AS `Comment` \
-                       FROM %s.%s  where table_id = %ld AND is_hidden = False",
+                       FROM table_columns(%ld)  where table_id = %ld AND is_hidden = False",
                        R"(SELECT "FIELD" AS "FIELD", "TYPE" AS "TYPE", "COLLATION" AS "COLLATION", "NULL" AS "NULL", KEY AS "KEY", "DEFAULT" AS "DEFAULT", EXTRA AS "EXTRA", "PRIVILEGES" AS "PRIVILEGES", "COMMENT" AS "COMMENT" )"
-                       R"(FROM %s.%s  WHERE TABLE_ID = %ld AND IS_HIDDEN = 0)",
+                       R"(FROM table_columns(%ld)  WHERE TABLE_ID = %ld AND IS_HIDDEN = 0)",
                        "Field");
 DEFINE_SHOW_CLAUSE_SET(SHOW_EXTENDED_COLUMNS,
                        NULL,
                        "SELECT field AS `Field`, type AS `Type`, `NULL` AS `Null`, `KEY` AS `Key`, `DEFAULT` AS `Default`, extra AS `Extra` \
-                        FROM %s.%s  where table_id = %ld",
+                        FROM table_columns(%ld)  where table_id = %ld",
                         R"(SELECT "FIELD" AS "FIELD", "TYPE" AS "TYPE", "NULL" AS "NULL", "KEY" AS "KEY", "DEFAULT" AS "DEFAULT", "EXTRA" AS "EXTRA" )"
-                        R"(FROM %s.%s  WHERE TABLE_ID = %ld)",
+                        R"(FROM table_columns(%ld)  WHERE TABLE_ID = %ld)",
                        "Field");
 DEFINE_SHOW_CLAUSE_SET(SHOW_EXTENDED_FULL_COLUMNS,
                        NULL,
                        "SELECT field AS `Field`, type AS `Type`, collation AS `Collation`, `NULL` AS `Null`, `KEY` AS `Key`, `DEFAULT` AS `Default`, extra AS `Extra`, `PRIVILEGES` AS `Privileges`, `COMMENT` AS `Comment` \
-                       FROM %s.%s  where table_id = %ld",
+                       FROM table_columns(%ld)  where table_id = %ld",
                        R"(SELECT "FIELD" AS "FIELD", "TYPE" AS "TYPE", "COLLATION" AS "COLLATION", "NULL" AS "NULL", KEY AS "KEY", "DEFAULT" AS "DEFAULT", EXTRA AS "EXTRA", "PRIVILEGES" AS "PRIVILEGES", "COMMENT" AS "COMMENT" )"
-                       R"(FROM %s.%s  WHERE TABLE_ID = %ld)",
+                       R"(FROM table_columns(%ld)  WHERE TABLE_ID = %ld)",
                        "Field");
 DEFINE_SHOW_CLAUSE_SET(SHOW_CREATE_DATABASE,
                        NULL,
-                       "SELECT `database_name` AS `Database`, create_database AS `Create Database` FROM %s.%s  WHERE database_id = %ld",
+                       "SELECT `database_name` AS `Database`, create_database AS `Create Database` FROM show_create_database(%ld)  WHERE database_id = %ld",
                        NULL,
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_CREATE_DATABASE_EXISTS,
                        NULL,
-                       "SELECT `database_name` AS `Database`, create_database_with_if_not_exists AS `Create Database` FROM %s.%s WHERE database_id = %ld",
+                       "SELECT `database_name` AS `Database`, create_database_with_if_not_exists AS `Create Database` FROM show_create_database(%ld) WHERE database_id = %ld",
                        NULL,
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_INDEXES,
                        NULL,
-                       "SELECT `TABLE` AS `Table`, NON_UNIQUE AS Non_unique, KEY_NAME AS Key_name, SEQ_IN_INDEX AS Seq_in_index, COLUMN_NAME AS Column_name, COLLATION AS Collation, CARDINALITY AS Cardinality, SUB_PART AS Sub_part, PACKED AS Packed, `NULL` AS `Null`, INDEX_TYPE AS Index_type, `COMMENT` AS `Comment`, INDEX_COMMENT AS Index_comment, IS_VISIBLE AS Visible, EXPRESSION AS Expression FROM %s.%s  where table_id = %ld AND is_column_visible = true",
+                       "SELECT `TABLE` AS `Table`, NON_UNIQUE AS Non_unique, KEY_NAME AS Key_name, SEQ_IN_INDEX AS Seq_in_index, COLUMN_NAME AS Column_name, COLLATION AS Collation, CARDINALITY AS Cardinality, SUB_PART AS Sub_part, PACKED AS Packed, `NULL` AS `Null`, INDEX_TYPE AS Index_type, `COMMENT` AS `Comment`, INDEX_COMMENT AS Index_comment, IS_VISIBLE AS Visible, EXPRESSION AS Expression FROM table_indexes(%ld)  where table_id = %ld AND is_column_visible = true",
                        R"(SELECT "TABLE" AS "TABLE", "NON_UNIQUE" AS "NON_UNIQUE", "KEY_NAME" AS "KEY_NAME", "SEQ_IN_INDEX" AS "SEQ_IN_INDEX", "COLUMN_NAME" AS "COLUMN_NAME", "COLLATION" AS "COLLATION", "CARDINALITY" AS "CARDINALITY", "SUB_PART" AS "SUB_PART", "PACKED" AS "PACKED", "NULL" AS "NULL", "INDEX_TYPE" AS "INDEX_TYPE", "COMMENT" AS "COMMENT", )"
-                       R"(INDEX_COMMENT" AS "INDEX_COMMENT", "IS_VISIBLE" AS "VISIBLE", "EXPRESSION" AS "EXPRESSION" FROM %s.%s  WHERE TABLE_ID = %ld AND IS_COLUMN_VISIBLE = 1")",
+                       R"(INDEX_COMMENT" AS "INDEX_COMMENT", "IS_VISIBLE" AS "VISIBLE", "EXPRESSION" AS "EXPRESSION" FROM table_indexes(%ld)  WHERE TABLE_ID = %ld AND IS_COLUMN_VISIBLE = 1")",
                        NULL);
 // SHOW AI COLUMNS FROM t: one row for each AI column of the table
 DEFINE_SHOW_CLAUSE_SET(SHOW_AI_COLUMNS,
@@ -2467,21 +2605,21 @@ DEFINE_SHOW_CLAUSE_SET(SHOW_AI_COLUMNS,
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_EXTENDED_INDEXES,
                        NULL,
-                       "SELECT `TABLE` AS `Table`, NON_UNIQUE AS Non_unique, KEY_NAME AS Key_name, SEQ_IN_INDEX AS Seq_in_index, COLUMN_NAME AS Column_name, COLLATION AS Collation, CARDINALITY AS Cardinality, SUB_PART AS Sub_part, PACKED AS Packed, `NULL` AS `Null`, INDEX_TYPE AS Index_type, `COMMENT` AS `Comment`, INDEX_COMMENT AS Index_comment, IS_VISIBLE AS Visible, EXPRESSION AS Expression FROM %s.%s  where table_id = %ld",
+                       "SELECT `TABLE` AS `Table`, NON_UNIQUE AS Non_unique, KEY_NAME AS Key_name, SEQ_IN_INDEX AS Seq_in_index, COLUMN_NAME AS Column_name, COLLATION AS Collation, CARDINALITY AS Cardinality, SUB_PART AS Sub_part, PACKED AS Packed, `NULL` AS `Null`, INDEX_TYPE AS Index_type, `COMMENT` AS `Comment`, INDEX_COMMENT AS Index_comment, IS_VISIBLE AS Visible, EXPRESSION AS Expression FROM table_indexes(%ld)  where table_id = %ld",
                        R"(SELECT "TABLE" AS "TABLE", "NON_UNIQUE" AS "NON_UNIQUE", "KEY_NAME" AS "KEY_NAME", "SEQ_IN_INDEX" AS "SEQ_IN_INDEX", "COLUMN_NAME" AS "COLUMN_NAME", "COLLATION" AS "COLLATION", "CARDINALITY" AS "CARDINALITY", "SUB_PART" AS "SUB_PART", "PACKED" AS "PACKED", "NULL" AS "NULL", "INDEX_TYPE" AS "INDEX_TYPE", "COMMENT" AS "COMMENT", )"
-                       R"(INDEX_COMMENT" AS "INDEX_COMMENT", "IS_VISIBLE" AS "VISIBLE", "EXPRESSION" AS "EXPRESSION" FROM %s.%s  WHERE TABLE_ID = %ld")",
+                       R"(INDEX_COMMENT" AS "INDEX_COMMENT", "IS_VISIBLE" AS "VISIBLE", "EXPRESSION" AS "EXPRESSION" FROM table_indexes(%ld)  WHERE TABLE_ID = %ld")",
                        NULL);
 
 DEFINE_SHOW_CLAUSE_SET(SHOW_TRACE,
                        NULL,
-                       "SELECT span_name as `Operation`, start_ts as `StartTime`, concat(cast(elapse/1000 as number(20, 3)), ' ms')  as `ElapseTime` from %s.%s",
-                       R"(SELECT span_name as "OPERATION", to_char(start_ts,'yyyy-mm-dd hh24:mi:ss') as "START_TIME", concat(to_char(elapse/1000, 'FM99999999999999990.000'), ' ms') as "ELAPSE_TIME" FROM %s.%s)",
+                       "SELECT span_name as `Operation`, start_ts as `StartTime`, concat(cast(elapse/1000 as number(20, 3)), ' ms')  as `ElapseTime` from show_trace()",
+                       R"(SELECT span_name as "OPERATION", to_char(start_ts,'yyyy-mm-dd hh24:mi:ss') as "START_TIME", concat(to_char(elapse/1000, 'FM99999999999999990.000'), ' ms') as "ELAPSE_TIME" FROM show_trace())",
                        NULL);
 
 DEFINE_SHOW_CLAUSE_SET(SHOW_TRACE_JSON,
                        NULL,
-                       "select json_arrayagg(json_object('trace_id', trace_id, 'parent', parent_span_id, 'span_id', span_id, 'span_name', span_name, 'start_ts', start_ts, 'end_ts', end_ts, 'elapse', elapse, 'tags', cast(case when tags='' then NULL else tags end as json), 'logs', cast(case when logs='' then NULL else logs end as json))) as ShowTraceJSON from %s.%s",
-                       R"(select json_arrayagg(json_object('trace_id' : trace_id, 'parent' : parent_span_id, 'span_id' : span_id, 'span_name' : span_name, 'start_ts' : cast(start_ts as varchar(100)), 'end_ts' : cast(end_ts as varchar(100)), 'elapse' : elapse, 'tags' : cast(tags as json), 'logs' : cast(logs as json) returning json) returning json)  as SHOW_TRACE_JSON from %s.%s)",
+                       "select json_arrayagg(json_object('trace_id', trace_id, 'parent', parent_span_id, 'span_id', span_id, 'span_name', span_name, 'start_ts', start_ts, 'end_ts', end_ts, 'elapse', elapse, 'tags', cast(case when tags='' then NULL else tags end as json), 'logs', cast(case when logs='' then NULL else logs end as json))) as ShowTraceJSON from show_trace()",
+                       R"(select json_arrayagg(json_object('trace_id' : trace_id, 'parent' : parent_span_id, 'span_id' : span_id, 'span_name' : span_name, 'start_ts' : cast(start_ts as varchar(100)), 'end_ts' : cast(end_ts as varchar(100)), 'elapse' : elapse, 'tags' : cast(tags as json), 'logs' : cast(logs as json) returning json) returning json)  as SHOW_TRACE_JSON from show_trace())",
                        NULL);
 
 DEFINE_SHOW_CLAUSE_SET(SHOW_ENGINES,
@@ -2509,24 +2647,24 @@ DEFINE_SHOW_CLAUSE_SET(SHOW_OPEN_TABLES,
 
 DEFINE_SHOW_CLAUSE_SET(SHOW_PRIVILEGES,
                        NULL,
-                       "SELECT * FROM %s.%s ",
-                       "SELECT * FROM %s.%s ",
+                       "SELECT * FROM privilege() ",
+                       "SELECT * FROM privilege() ",
                        NULL);
         
 DEFINE_SHOW_CLAUSE_SET(SHOW_COLLATION,
                        NULL,
-                       "SELECT collation AS `Collation`, charset AS `Charset`, id AS `Id`, is_default AS `Default`, is_compiled AS `Compiled`, sortlen AS `Sortlen` FROM %s.%s ",
-                       R"(SELECT "COLLATION" AS "COLLATION", "CHARSET" AS "CHARSET", "ID" AS "ID", "IS_DEFAULT" AS "DEFAULT", "IS_COMPILED" AS "COMPILED", "SORTLEN" AS "SORTLEN" FROM %s.%s )",
+                       "SELECT collation AS `Collation`, charset AS `Charset`, id AS `Id`, is_default AS `Default`, is_compiled AS `Compiled`, sortlen AS `Sortlen` FROM collation() ",
+                       R"(SELECT "COLLATION" AS "COLLATION", "CHARSET" AS "CHARSET", "ID" AS "ID", "IS_DEFAULT" AS "DEFAULT", "IS_COMPILED" AS "COMPILED", "SORTLEN" AS "SORTLEN" FROM collation() )",
                        "Collation");
 DEFINE_SHOW_CLAUSE_SET(SHOW_GRANTS,
                        "SELECT grants AS `Grants for %.*s@%.*s` ",
-                       "SELECT grants FROM %s.%s WHERE user_id = %ld",
-                       R"(SELECT "GRANTS" AS "GRANTS" FROM %s.%s WHERE USER_ID = %ld)",
+                       "SELECT grants FROM privilege_grant(%ld) WHERE user_id = %ld",
+                       R"(SELECT "GRANTS" AS "GRANTS" FROM privilege_grant(%ld) WHERE USER_ID = %ld)",
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_GRANTS_USING_ROLES,
                        "SELECT grants AS `Grants for %.*s@%.*s` ",
-                       "SELECT grants FROM %s.%s WHERE user_id in (%.*s)",
-                       R"(SELECT "GRANTS" AS "GRANTS" FROM %s.%s WHERE USER_ID IN (%.*s))",
+                       "SELECT grants FROM privilege_grant(%.*s) WHERE user_id in (%.*s)",
+                       R"(SELECT "GRANTS" AS "GRANTS" FROM privilege_grant(%.*s) WHERE USER_ID IN (%.*s))",
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_PROCESSLIST,
                        NULL,
@@ -2540,13 +2678,13 @@ DEFINE_SHOW_CLAUSE_SET(SHOW_FULL_PROCESSLIST,
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_SYS_PROCESSLIST,
                        NULL,
-                       "SELECT id AS `Id`, user AS `User`, host AS `Host`, db AS `db`, command AS `Command`, cast(time as SIGNED) AS `Time`, state AS `State`, info AS `Info` FROM %s.%s",
-                       R"(SELECT "ID" AS "ID", "USER" AS "USER", "HOST" AS "HOST", "DB" AS "DB", "COMMAND" AS "COMMAND", CAST("TIME" AS INT) AS "TIME", "STATE" AS "STATE", "INFO" AS "INFO" FROM %s.%s)",
+                       "SELECT id AS `Id`, user AS `User`, host AS `Host`, db AS `db`, command AS `Command`, cast(time as SIGNED) AS `Time`, state AS `State`, info AS `Info` FROM processlist()",
+                       R"(SELECT "ID" AS "ID", "USER" AS "USER", "HOST" AS "HOST", "DB" AS "DB", "COMMAND" AS "COMMAND", CAST("TIME" AS INT) AS "TIME", "STATE" AS "STATE", "INFO" AS "INFO" FROM processlist())",
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_SYS_FULL_PROCESSLIST,
                        NULL,
-                       "SELECT id AS `Id`, user AS `User`, host AS `Host`, db AS `db`, command AS `Command`, cast(time as SIGNED) AS `Time`, state AS `State`, info AS `Info`, sql_port AS `Port` FROM oceanbase.__all_virtual_server_stat, %s.%s",
-                       R"(SELECT "ID" AS "ID", "USER" AS "USER", "HOST" AS "HOST", "DB" AS "DB", "COMMAND" AS "COMMAND", CAST("TIME" AS INT) AS "TIME", "STATE" AS "STATE", "INFO" AS "INFO", "SQL_PORT" AS "PORT" FROM %s.%s)",
+                       "SELECT id AS `Id`, user AS `User`, host AS `Host`, db AS `db`, command AS `Command`, cast(time as SIGNED) AS `Time`, state AS `State`, info AS `Info`, sql_port AS `Port` FROM server_stat(), processlist()",
+                       R"(SELECT "ID" AS "ID", "USER" AS "USER", "HOST" AS "HOST", "DB" AS "DB", "COMMAND" AS "COMMAND", CAST("TIME" AS INT) AS "TIME", "STATE" AS "STATE", "INFO" AS "INFO", "SQL_PORT" AS "PORT" FROM processlist())",
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_TABLE_STATUS,
                        NULL,
@@ -2570,33 +2708,33 @@ DEFINE_SHOW_CLAUSE_SET(SHOW_TRIGGERS_LIKE,
                        "Table");
 DEFINE_SHOW_CLAUSE_SET(SHOW_WARNINGS,
                        NULL,
-                       "SELECT `level` AS `Level`, `code` AS `Code`, `message` AS `Message` FROM %s.%s ",
+                       "SELECT `level` AS `Level`, `code` AS `Code`, `message` AS `Message` FROM warning() ",
                        NULL,
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_COUNT_WARNINGS,
                        NULL,
-                       "SELECT count(*) AS `@@session.warning_count` FROM %s.%s ",
+                       "SELECT count(*) AS `@@session.warning_count` FROM warning() ",
                        NULL,
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_ERRORS,
                        NULL,
-                       "SELECT `level` AS `Level`, `code` AS `Code`, `message` AS `Message` FROM %s.%s  WHERE `level` = \'Error\'",
+                       "SELECT `level` AS `Level`, `code` AS `Code`, `message` AS `Message` FROM warning()  WHERE `level` = \'Error\'",
                        NULL,
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_COUNT_ERRORS,
                        NULL,
-                       "SELECT count(*) AS `@@session.error_count` FROM %s.%s  WHERE `level` = \'Error\'",
+                       "SELECT count(*) AS `@@session.error_count` FROM warning()  WHERE `level` = \'Error\'",
                        NULL,
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_PARAMETERS,
                        NULL,
-                       "SELECT svr_type, name, data_type, value, info, section, scope, source, edit_level from %s.%s where name not like '\\_%%'",
-                       R"(SELECT "SVR_TYPE", "NAME", "DATA_TYPE", "VALUE", "INFO", "SECTION", "SCOPE", "SOURCE", "EDIT_LEVEL" FROM %s.%s WHERE NAME NOT LIKE '\_%%' ESCAPE '\')",
+                       "SELECT svr_type, name, data_type, value, info, section, scope, source, edit_level from parameter_stat() where name not like '\\_%%'",
+                       R"(SELECT "SVR_TYPE", "NAME", "DATA_TYPE", "VALUE", "INFO", "SECTION", "SCOPE", "SOURCE", "EDIT_LEVEL" FROM parameter_stat() WHERE NAME NOT LIKE '\_%%' ESCAPE '\')",
                        "name");
 DEFINE_SHOW_CLAUSE_SET(SHOW_PARAMETERS_WITH_DEFAULT_VALUE,
                        NULL,
-                      "SELECT svr_type, name, data_type, value, info, section, scope, source, edit_level, default_value, isdefault from %s.%s where (name not like '\\_%%' or isdefault=0)",
-                      R"(SELECT "SVR_TYPE", "NAME", "DATA_TYPE", "VALUE", "INFO", "SECTION", "SCOPE", "SOURCE", "EDIT_LEVEL", "DEFAULT_VALUE", "ISDEFAULT" FROM %s.%s WHERE (NAME NOT LIKE '\_%%' ESCAPE '\' or ISDEFAULT=0))",
+                      "SELECT svr_type, name, data_type, value, info, section, scope, source, edit_level, default_value, isdefault from parameter_stat() where (name not like '\\_%%' or isdefault=0)",
+                      R"(SELECT "SVR_TYPE", "NAME", "DATA_TYPE", "VALUE", "INFO", "SECTION", "SCOPE", "SOURCE", "EDIT_LEVEL", "DEFAULT_VALUE", "ISDEFAULT" FROM parameter_stat() WHERE (NAME NOT LIKE '\_%%' ESCAPE '\' or ISDEFAULT=0))",
                       "name");
 DEFINE_SHOW_CLAUSE_SET(SHOW_PARAMETERS_UNSYS,
                        NULL,
@@ -2610,12 +2748,12 @@ DEFINE_SHOW_CLAUSE_SET(SHOW_PARAMETERS_COMPAT,
                        "name");
 DEFINE_SHOW_CLAUSE_SET(SHOW_SESSION_STATUS,
                        NULL,
-                       "select variable_name as Variable_name, variable_value as Value from %s.%s",
+                       "select variable_name as Variable_name, variable_value as Value from session_status()",
                        NULL,
                        "Variable_name");
 DEFINE_SHOW_CLAUSE_SET(SHOW_GLOBAL_STATUS,
                        NULL,
-                       "select variable_name as Variable_name, variable_value as Value from %s.%s",
+                       "select variable_name as Variable_name, variable_value as Value from session_status()",
                        NULL,
                        "Variable_name");
 DEFINE_SHOW_CLAUSE_SET(SHOW_DATABASES,
@@ -2630,38 +2768,38 @@ DEFINE_SHOW_CLAUSE_SET(SHOW_DATABASES_LIKE,
                        "Database");
 DEFINE_SHOW_CLAUSE_SET(SHOW_DATABASES_STATUS,
                        NULL,
-                       "select db as `Database`, case when sum(read_only) = 0 then \'read write\' when sum(read_only) < count(read_only) then \'partially read only\' else \'read only\' end as `Status` from %s.%s where (0 = sys_privilege_check('db_acc') or 0 = sys_privilege_check('db_acc', `db`, '')) group by db",
+                       "select db as `Database`, case when sum(read_only) = 0 then \'read write\' when sum(read_only) < count(read_only) then \'partially read only\' else \'read only\' end as `Status` from database_status() where (0 = sys_privilege_check('db_acc') or 0 = sys_privilege_check('db_acc', `db`, '')) group by db",
                        NULL,
                        "Database");
 DEFINE_SHOW_CLAUSE_SET(SHOW_DATABASES_STATUS_LIKE,
                        "SELECT `Database` AS `Database (%.*s)`, `Status` ",
-                       "select db as `Database`, case when sum(read_only) = 0 then \'read write\' when sum(read_only) < count(read_only) then \'partially read only\' else \'read only\' end as `Status` from %s.%s where (0 = sys_privilege_check('db_acc') or 0 = sys_privilege_check('db_acc', `db`, '')) group by db",
+                       "select db as `Database`, case when sum(read_only) = 0 then \'read write\' when sum(read_only) < count(read_only) then \'partially read only\' else \'read only\' end as `Status` from database_status() where (0 = sys_privilege_check('db_acc') or 0 = sys_privilege_check('db_acc', `db`, '')) group by db",
                        NULL,
                        "Database");
 DEFINE_SHOW_CLAUSE_SET(SHOW_CREATE_TABLE,
                        NULL,
-                       "SELECT table_name AS `Table`, create_table AS `Create Table` FROM %s.%s  WHERE table_id = %ld",
-                       R"(SELECT "TABLE_NAME" AS "TABLE", "CREATE_TABLE" AS "CREATE TABLE" FROM %s.%s  WHERE TABLE_ID = %ld)",
+                       "SELECT table_name AS `Table`, create_table AS `Create Table` FROM show_create_table(%ld)  WHERE table_id = %ld",
+                       R"(SELECT "TABLE_NAME" AS "TABLE", "CREATE_TABLE" AS "CREATE TABLE" FROM show_create_table(%ld)  WHERE TABLE_ID = %ld)",
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_CREATE_VIEW,
                        NULL,
-                       "SELECT table_name AS `View`, create_table AS `Create View` , character_set_client, collation_connection FROM %s.%s WHERE table_id = %ld",
-                       R"(SELECT "TABLE_NAME" AS "VIEW", "CREATE_TABLE" AS "CREATE VIEW" , "CHARACTER_SET_CLIENT", "COLLATION_CONNECTION" FROM %s.%s WHERE TABLE_ID = %ld)",
+                       "SELECT table_name AS `View`, create_table AS `Create View` , character_set_client, collation_connection FROM show_create_table(%ld) WHERE table_id = %ld",
+                       R"(SELECT "TABLE_NAME" AS "VIEW", "CREATE_TABLE" AS "CREATE VIEW" , "CHARACTER_SET_CLIENT", "COLLATION_CONNECTION" FROM show_create_table(%ld) WHERE TABLE_ID = %ld)",
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_CREATE_PROCEDURE,
                        NULL,
-                       "SELECT routine_name AS `Procedure`, sql_mode, create_routine AS `Create Procedure`, character_set_client, collation_connection, collation_database AS `Database Collation` FROM %s.%s  WHERE routine_id = %ld and proc_type = %ld",
-                       R"(SELECT "ROUTINE_NAME" AS "PROCEDURE", "SQL_MODE", "CREATE_ROUTINE" AS "CREATE PROCEDURE", "CHARACTER_SET_CLIENT", "COLLATION_CONNECTION", "COLLATION_DATABASE" AS "DATABASE COLLATION" FROM %s.%s  WHERE ROUTINE_ID = %ld AND PROC_TYPE = %ld)",
+                       "SELECT routine_name AS `Procedure`, sql_mode, create_routine AS `Create Procedure`, character_set_client, collation_connection, collation_database AS `Database Collation` FROM show_create_procedure(%ld)  WHERE routine_id = %ld and proc_type = %ld",
+                       R"(SELECT "ROUTINE_NAME" AS "PROCEDURE", "SQL_MODE", "CREATE_ROUTINE" AS "CREATE PROCEDURE", "CHARACTER_SET_CLIENT", "COLLATION_CONNECTION", "COLLATION_DATABASE" AS "DATABASE COLLATION" FROM show_create_procedure(%ld)  WHERE ROUTINE_ID = %ld AND PROC_TYPE = %ld)",
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_CREATE_FUNCTION,
                        NULL,
-                       "SELECT routine_name AS `Function`, sql_mode, create_routine AS `Create Function`, character_set_client, collation_connection, collation_database AS `Database Collation` FROM %s.%s  WHERE routine_id = %ld and proc_type = %ld",
-                       R"(SELECT "ROUTINE_NAME" AS "FUNCTION", "SQL_MODE", "CREATE_ROUTINE" AS "CREATE FUNCTION", "CHARACTER_SET_CLIENT", "COLLATION_CONNECTION", "COLLATION_DATABASE" AS "DATABASE COLLATION" FROM %s.%s  WHERE ROUTINE_ID = %ld AND PROC_TYPE = %ld)",
+                       "SELECT routine_name AS `Function`, sql_mode, create_routine AS `Create Function`, character_set_client, collation_connection, collation_database AS `Database Collation` FROM show_create_procedure(%ld)  WHERE routine_id = %ld and proc_type = %ld",
+                       R"(SELECT "ROUTINE_NAME" AS "FUNCTION", "SQL_MODE", "CREATE_ROUTINE" AS "CREATE FUNCTION", "CHARACTER_SET_CLIENT", "COLLATION_CONNECTION", "COLLATION_DATABASE" AS "DATABASE COLLATION" FROM show_create_procedure(%ld)  WHERE ROUTINE_ID = %ld AND PROC_TYPE = %ld)",
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_CREATE_TRIGGER,
                        NULL,
-                       "SELECT trigger_name AS `Trigger`, sql_mode, create_trigger AS `SQL Original Statement`, character_set_client, collation_connection, collation_database AS `Database Collation` FROM %s.%s  WHERE trigger_id = %ld",
-                       R"(SELECT trigger_name AS "TRIGGER", "SQL_MODE", "CREATE_TRIGGER", "CHARACTER_SET_CLIENT", "COLLATION_CONNECTION", "COLLATION_DATABASE" FROM %s.%s  WHERE trigger_id = %ld)",
+                       "SELECT trigger_name AS `Trigger`, sql_mode, create_trigger AS `SQL Original Statement`, character_set_client, collation_connection, collation_database AS `Database Collation` FROM show_create_trigger(%ld)  WHERE trigger_id = %ld",
+                       R"(SELECT trigger_name AS "TRIGGER", "SQL_MODE", "CREATE_TRIGGER", "CHARACTER_SET_CLIENT", "COLLATION_CONNECTION", "COLLATION_DATABASE" FROM show_create_trigger(%ld)  WHERE trigger_id = %ld)",
                        NULL);
 DEFINE_SHOW_CLAUSE_SET(SHOW_RECYCLEBIN,
                        "SELECT OBJECT_NAME, ORIGINAL_NAME, TYPE, CREATETIME",

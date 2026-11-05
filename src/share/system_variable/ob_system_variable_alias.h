@@ -741,6 +741,7 @@ namespace share
   static const char* const OB_SV_SPARSE_DROP_RATIO_SEARCH = "ob_sparse_drop_ratio_search";
   static const char* const OB_SV_AI_COLUMN_STRICT_READ = "ai_column_strict_read";
   static const char* const OB_SV__AI_COLUMN_TYPE_HINT = "_ai_column_type_hint";
+  static const char* const OB_SV_ENABLE_FILE_SQL = "enable_file_sql";
 
 }
 }

@@ -270,7 +270,7 @@ int ObSysTableChecker::init_sys_table_name_map()
       = { &share::ObInnerTableSchema::all_core_table_schema, NULL};
   const schema_create_func *creator_ptr_array[] = {
     all_core_table_schema_creator, share::core_table_schema_creators,
-    share::sys_table_schema_creators, share::virtual_table_schema_creators,
+    share::sys_table_schema_creators,
     share::sys_view_schema_creators, NULL };
 
   ObTableSchema table_schema;

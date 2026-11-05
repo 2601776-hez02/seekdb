@@ -47,8 +47,7 @@ public:
   virtual int inner_open();
   virtual int inner_get_next_row(common::ObNewRow *&row);
 private:
-  int get_full_row(const share::schema::ObTableSchema *table,
-                   const share::ObCoreTableProxy &core_table,
+  int get_full_row(const share::ObCoreTableProxy &core_table,
                    common::ObIArray<Column> &columns);
 
   bool inited_;

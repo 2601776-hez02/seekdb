@@ -4883,6 +4883,7 @@ def_table_schema(
 def_local_table(
   table_name = '__all_deadlock_event_history',
   table_id = '12209',
+  virtual_table = True,
   namespace = 'deadlock_history',
   namespace_id = 2,
   columns = [
@@ -5016,6 +5017,7 @@ def_table_schema(
 def_local_table(
   table_name = '__all_tablet_meta_table',
   table_id = '12240',
+  virtual_table = True,
   namespace = 'tablet_meta',
   namespace_id = 3,
   columns = [
@@ -5095,6 +5097,7 @@ def_table_schema(
 def_local_table(
   table_name = '__all_tablet_local_checksum',
   table_id = '12258',
+  virtual_table = True,
   namespace = 'tablet_checksum',
   namespace_id = 4,
   columns = [
@@ -5318,6 +5321,7 @@ def_table_schema(
 def_local_table(
   table_name = '__all_merge_info',
   table_id = '12291',
+  virtual_table = True,
   namespace = 'merge_info',
   namespace_id = 0,
   columns = [
@@ -5536,6 +5540,7 @@ def_table_schema(
 def_local_table(
   table_name = '__all_column_checksum_error_info',
   table_id = '12330',
+  virtual_table = True,
   namespace = 'checksum_error',
   namespace_id = 1,
   columns = [
@@ -6417,6 +6422,7 @@ def_table_schema(
 def_local_table(
   table_name = '__all_rootservice_job',
   table_id = '12563',
+  virtual_table = True,
   namespace = 'admin_job',
   namespace_id = 5,
   columns = [
@@ -6447,6 +6453,66 @@ def_table_schema(
     ('fetch_scn', 'int'),
   ],
 )
+
+def_local_table(
+  table_name = '__all_storage_runtime',
+  namespace = 'storage_runtime',
+  namespace_id = 6,
+  columns = [
+    ('id', 'int', 'false'),
+    ('initialized', 'int', 'false'),
+    ('payload', 'varbinary:65536', 'false'),
+  ],
+  primary_key = ['id'],
+)
+
+def_local_table(
+  table_name = '__all_storage_ls',
+  namespace = 'storage_ls',
+  namespace_id = 7,
+  columns = [
+    ('id', 'int', 'false'),
+    ('payload', 'varbinary:65536', 'false'),
+  ],
+  primary_key = ['id'],
+)
+
+def_local_table(
+  table_name = '__all_storage_tablet',
+  namespace = 'storage_tablet',
+  namespace_id = 8,
+  columns = [
+    ('tablet_id', 'int', 'false'),
+    ('kind', 'int', 'false'),
+    ('payload', 'varbinary:1048576', 'false'),
+  ],
+  primary_key = ['tablet_id'],
+)
+
+def_local_table(
+  table_name = '__all_palf_meta',
+  namespace = 'palf_meta',
+  namespace_id = 9,
+  columns = [
+    ('id', 'int', 'false'),
+    ('payload', 'varbinary:65536', 'false'),
+    ('expected_next_block_id', 'int', 'false'),
+  ],
+  primary_key = ['id'],
+)
+
+def_local_table(
+  table_name = '__all_telemetry',
+  namespace = 'telemetry',
+  namespace_id = 10,
+  columns = [
+    ('id', 'int', 'false'),
+    ('payload', 'varchar:65536', 'false'),
+    ('sent', 'int', 'false'),
+  ],
+  primary_key = ['id'],
+)
+
 
 # Reserved position (placeholder before this line)
 # Placeholder suggestion for this section: Use actual table names for placeholders
@@ -6543,7 +6609,7 @@ def_table_schema(
          b.charset AS DEFAULT_CHARACTER_SET_NAME,
          b.collation AS DEFAULT_COLLATION_NAME,
          CAST(NULL AS CHAR(512)) as SQL_PATH
-  FROM oceanbase.__all_database a inner join oceanbase.__all_virtual_collation b ON a.collation_type = b.collation_type
+  FROM oceanbase.__all_database a inner join collation() b ON a.collation_type = b.collation_type
   WHERE in_recyclebin = 0
     and a.database_name not in ('__recyclebin', '__public')
     and 0 = sys_privilege_check('db_acc', a.database_name)
@@ -6564,7 +6630,7 @@ def_table_schema(
   gm_columns = [],
   rowkey_columns = [],
   view_definition = """
-  SELECT CHARSET AS CHARACTER_SET_NAME, DEFAULT_COLLATION AS DEFAULT_COLLATE_NAME, DESCRIPTION, max_length AS MAXLEN FROM oceanbase.__all_virtual_charset
+  SELECT CHARSET AS CHARACTER_SET_NAME, DEFAULT_COLLATION AS DEFAULT_COLLATE_NAME, DESCRIPTION, max_length AS MAXLEN FROM charset()
 """.replace("\n", " "),
 
 
@@ -6581,7 +6647,7 @@ def_table_schema(
   gm_columns = [],
   rowkey_columns = [],
   view_definition = """
-  SELECT `variable_name` as VARIABLE_NAME, `value` as VARIABLE_VALUE  FROM oceanbase.__all_virtual_global_variable
+  SELECT `variable_name` as VARIABLE_NAME, `value` as VARIABLE_VALUE  FROM global_variable()
 """.replace("\n", " "),
 
 
@@ -6715,23 +6781,23 @@ def_table_schema(
               i.comment                                                     AS INDEX_COMMENT,
               CASE WHEN (i.index_attributes_set & 1) THEN 'NO' ELSE 'YES' END AS IS_VISIBLE,
               d_col2.cur_default_value_v2                                   AS EXPRESSION
-          FROM   oceanbase.__ALL_VIRTUAL_CORE_ALL_TABLE i
-          JOIN   oceanbase.__ALL_VIRTUAL_CORE_ALL_TABLE t
+          FROM   core_all_table() i
+          JOIN   core_all_table() t
           ON     i.data_table_id=t.table_id
           AND    i.database_id = t.database_id
           AND    i.table_type = 5
           AND    i.index_type NOT IN (11, 12, 14, 15, 17, 18, 20)
           AND    t.table_type in (0,3)
-          JOIN   oceanbase.__ALL_VIRTUAL_CORE_COLUMN_TABLE c
+          JOIN   core_column_table() c
           ON     i.table_id=c.table_id
           AND    c.index_position > 0
           JOIN   oceanbase.__all_database db
           ON     i.database_id = db.database_id
-          LEFT JOIN oceanbase.__ALL_VIRTUAL_CORE_COLUMN_TABLE d_col
+          LEFT JOIN core_column_table() d_col
           ON    i.data_table_id = d_col.table_id
           AND   (case when (c.is_hidden = 1 and substr(c.column_name, 1, 8) = '__substr') then
                    substr(c.column_name, 8 + instr(substr(c.column_name, 8), '_')) else 0 end) = d_col.column_id
-          LEFT JOIN oceanbase.__ALL_VIRTUAL_CORE_COLUMN_TABLE d_col2
+          LEFT JOIN core_column_table() d_col2
           ON    i.data_table_id = d_col2.table_id
           AND   c.column_id = d_col2.column_id
           AND   d_col2.cur_default_value_v2 is not null
@@ -6754,8 +6820,8 @@ def_table_schema(
                   t.comment        AS INDEX_COMMENT,
                   'YES'            AS IS_VISIBLE,
                   NULL             AS EXPRESSION
-          FROM   oceanbase.__ALL_VIRTUAL_CORE_ALL_TABLE t
-          JOIN   oceanbase.__ALL_VIRTUAL_CORE_COLUMN_TABLE c
+          FROM   core_all_table() t
+          JOIN   core_column_table() c
           ON     t.table_id=c.table_id
           AND    c.rowkey_position > 0
           AND    c.is_hidden = 0
@@ -6873,7 +6939,7 @@ def_table_schema(
                                     union all select 201001 as database_id, 5 as table_id, '__all_ddl_operation'     as table_name, 45 as collation_type, 0 as table_type, '' as comment, 'DYNAMIC' as store_format, 0 as table_mode
                 union all select 201001 as database_id, 12 as table_id, '__all_table_history'    as table_name, 45 as collation_type, 0 as table_type, '' as comment, 'DYNAMIC' as store_format, 0 as table_mode
                 union all select 201001 as database_id, 13 as table_id, '__all_column_history'   as table_name, 45 as collation_type, 0 as table_type, '' as comment, 'DYNAMIC' as store_format, 0 as table_mode) c
-                                        join oceanbase.__all_virtual_core_all_table d
+                                        join core_all_table() d
                                           on d.table_name = '__all_core_table'
                                         where 1 = 1
                                         union all
@@ -6890,7 +6956,7 @@ def_table_schema(
                                         from oceanbase.__all_table where table_mode >> 12 & 15 in (0,1) and index_attributes_set & 16 = 0) a
                                         join oceanbase.__all_database b
                                         on a.database_id = b.database_id
-                                        join oceanbase.__all_virtual_collation d
+                                        join collation() d
                                         on a.collation_type = d.collation_type
                                         left join (
                                           select table_id,
@@ -6927,7 +6993,7 @@ def_table_schema(
   table_type = 'SYSTEM_VIEW',
   gm_columns = [],
   rowkey_columns = [],
-  view_definition = """select collation as COLLATION_NAME, charset as CHARACTER_SET_NAME, id as ID, `is_default` as IS_DEFAULT, is_compiled as IS_COMPILED, sortlen as SORTLEN from oceanbase.__all_virtual_collation
+  view_definition = """select collation as COLLATION_NAME, charset as CHARACTER_SET_NAME, id as ID, `is_default` as IS_DEFAULT, is_compiled as IS_COMPILED, sortlen as SORTLEN from collation()
 """.replace("\n", " "),
 
 
@@ -6943,7 +7009,7 @@ def_table_schema(
   table_type = 'SYSTEM_VIEW',
   gm_columns = [],
   rowkey_columns = [],
-  view_definition = """select collation as COLLATION_NAME, charset as CHARACTER_SET_NAME from oceanbase.__all_virtual_collation
+  view_definition = """select collation as COLLATION_NAME, charset as CHARACTER_SET_NAME from collation()
 """.replace("\n", " "),
 
 
@@ -6959,7 +7025,7 @@ def_table_schema(
   table_type = 'SYSTEM_VIEW',
   gm_columns = [],
   rowkey_columns = [],
-  view_definition = """SELECT id AS ID, user AS USER, concat(user_client_ip, ':', user_client_port) AS HOST, db AS DB, command AS COMMAND, cast(time as SIGNED) AS TIME, state AS STATE, info AS INFO FROM oceanbase.__all_virtual_processlist WHERE  1
+  view_definition = """SELECT id AS ID, user AS USER, concat(user_client_ip, ':', user_client_port) AS HOST, db AS DB, command AS COMMAND, cast(time as SIGNED) AS TIME, state AS STATE, info AS INFO FROM processlist() WHERE  1
 """.replace("\n", " "),
 
 
@@ -7269,7 +7335,7 @@ def_table_schema(
                                           left join oceanbase.__all_routine_param as rp on rp.subprogram_id = r.subprogram_id
                                           and rp.routine_id = r.routine_id
                                           and rp.param_position = 0
-                                          left join oceanbase.__all_virtual_data_type v on rp.param_type = v.data_type
+                                          left join data_type() v on rp.param_type = v.data_type
                                         where (0 = sys_privilege_check('routine_acc')
                                                or 0 = sys_privilege_check('routine_acc', mp.DB, r.routine_name, r.routine_type))
                                         """.replace("\n", " ")
@@ -7467,7 +7533,7 @@ SELECT
      sum(hold) AS HOLD,
      sum(USED) AS USED
 FROM
-    oceanbase.__all_virtual_memory_info
+    memory_info()
 WHERE
         mod_type='user'
 GROUP BY ctx_name, mod_name
@@ -7503,7 +7569,7 @@ def_table_schema(
                           TEMP_TABLES, OBJECT_TYPE,HINTS_INFO,HINTS_ALL_WORKED, PL_SCHEMA_ID,
                           IS_BATCHED_MULTI_STMT, RULE_NAME,
                           FIRST_GET_PLAN_TIME, FIRST_EXE_USEC
-                          FROM oceanbase.__all_virtual_plan_stat WHERE OBJECT_STATUS = 0 AND is_in_pc=true
+                          FROM plan_stat() WHERE OBJECT_STATUS = 0 AND is_in_pc=true
                       """.replace("\n", " "),
 
 
@@ -7697,7 +7763,7 @@ def_table_schema(
            CAST(REMAINING_TIME AS SIGNED) AS TIME_REMAINING,
            CAST(USEC_TO_TIME(LAST_UPDATE_TIME) AS DATETIME) AS LAST_UPDATE_TIME,
            CAST(MESSAGE AS CHAR(512)) AS MESSAGE
-    FROM oceanbase.__all_virtual_long_ops_status
+    FROM long_ops_status()
 """.replace("\n", " ")
 )
 
@@ -7735,7 +7801,7 @@ SELECT /*+LEADING((D T) VC) USE_NL(VC) NO_USE_NL_MATERIALIZATION(VC)*/
        VC.PRIVILEGES,
        VC.COLUMN_COMMENT,
        VC.GENERATION_EXPRESSION,
-       VC.SRS_ID FROM OCEANBASE.__ALL_TABLE T INNER JOIN OCEANBASE.__ALL_DATABASE D INNER JOIN OCEANBASE.__ALL_VIRTUAL_INFORMATION_COLUMNS VC
+       VC.SRS_ID FROM OCEANBASE.__ALL_TABLE T INNER JOIN OCEANBASE.__ALL_DATABASE D INNER JOIN information_columns(D.DATABASE_NAME, T.TABLE_NAME) VC
 WHERE (T.OBJECT_STATUS = 0 OR (T.TABLE_ID > 20000 AND T.TABLE_ID < 30000) OR (T.GMT_CREATE != T.GMT_MODIFIED AND T.TABLE_TYPE = 3))
       AND T.DATABASE_ID = D.DATABASE_ID
       AND D.DATABASE_NAME = VC.TABLE_SCHEMA
@@ -7770,7 +7836,7 @@ SELECT /*+LEADING((D T) VC) USE_NL(VC) NO_USE_NL_MATERIALIZATION(VC)*/
              UNION ALL SELECT 4 AS TABLE_ID, 201001 AS DATABASE_ID, '__all_column' AS TABLE_NAME FROM DUAL
              UNION ALL SELECT 5 AS TABLE_ID, 201001 AS DATABASE_ID, '__all_ddl_operation' AS TABLE_NAME FROM DUAL
              UNION ALL SELECT 12 AS TABLE_ID, 201001 AS DATABASE_ID, '__all_table_history' AS TABLE_NAME FROM DUAL
-             UNION ALL SELECT 13 AS TABLE_ID, 201001 AS DATABASE_ID, '__all_column_history' AS TABLE_NAME FROM DUAL) T INNER JOIN OCEANBASE.__ALL_DATABASE D INNER JOIN OCEANBASE.__ALL_VIRTUAL_INFORMATION_COLUMNS VC
+             UNION ALL SELECT 13 AS TABLE_ID, 201001 AS DATABASE_ID, '__all_column_history' AS TABLE_NAME FROM DUAL) T INNER JOIN OCEANBASE.__ALL_DATABASE D INNER JOIN information_columns(D.DATABASE_NAME, T.TABLE_NAME) VC
 WHERE T.DATABASE_ID = D.DATABASE_ID
       AND D.DATABASE_NAME = VC.TABLE_SCHEMA
       AND T.TABLE_NAME = VC.TABLE_NAME
@@ -7870,7 +7936,7 @@ def_table_schema(
       MAX_TEMPSEG_SIZE,
       LAST_TEMPSEG_SIZE,
       1 AS CON_ID
-    FROM OCEANBASE.__ALL_VIRTUAL_SQL_WORKAREA_HISTORY_STAT
+    FROM sql_workarea_history_stat()
 """.replace("\n", " ")
 )
 
@@ -7909,7 +7975,7 @@ def_table_schema(
       CAST(NULL AS SIGNED) AS `SEGRFNO#`,
       CAST(NULL AS SIGNED) AS `SEGBLK#`,
       1 AS CON_ID
-    FROM OCEANBASE.__ALL_VIRTUAL_SQL_WORKAREA_ACTIVE
+    FROM sql_workarea_active()
 """.replace("\n", " ")
 )
 
@@ -7932,7 +7998,7 @@ def_table_schema(
       MULTIPASSES_EXECUTIONS,
       TOTAL_EXECUTIONS,
       1 AS CON_ID
-    FROM OCEANBASE.__ALL_VIRTUAL_SQL_WORKAREA_HISTOGRAM
+    FROM sql_workarea_histogram()
 """.replace("\n", " ")
 )
 
@@ -7976,7 +8042,7 @@ SELECT
  M.IS_ACTIVE,
  M.CONTAIN_UNCOMMITTED_ROW
 FROM
- oceanbase.__all_virtual_table_mgr M
+ table_mgr() M
 """.replace("\n", " ")
 )
 
@@ -8009,7 +8075,7 @@ def_table_schema(
         MACRO_BLOCK_COUNT,
         CASE MACRO_BLOCK_COUNT WHEN 0 THEN 0.00 ELSE ROUND(MULTIPLEXED_MACRO_BLOCK_COUNT/MACRO_BLOCK_COUNT*100, 2) END AS REUSE_PCT,
         PARALLEL_DEGREE
-    FROM oceanbase.__ALL_VIRTUAL_TABLET_COMPACTION_HISTORY
+    FROM tablet_compaction_history()
 """.replace("\n", " ")
 )
 
@@ -8042,7 +8108,7 @@ def_table_schema(
           PEER_TARGET_USED,
           LOCAL_TARGET_USED,
           LOCAL_PARALLEL_SESSION_COUNT
-        FROM oceanbase.__all_virtual_px_target_monitor
+        FROM px_target_monitor()
 """.replace("\n", " ")
 )
 
@@ -8216,7 +8282,7 @@ def_table_schema(
                               CHECKSUM,
                               STATUS,
                               EXTRA
-                   FROM oceanbase.__all_virtual_files""".replace("\n", " "),
+                   FROM files()""".replace("\n", " "),
   normal_columns = [
   ]
   )
@@ -8256,7 +8322,7 @@ def_table_schema(
          (CASE D.READ_ONLY WHEN 0 THEN 'NO' ELSE 'YES' END) AS READ_ONLY,
          D.COMMENT AS COMMENT
   FROM OCEANBASE.__ALL_DATABASE AS D
-  LEFT JOIN OCEANBASE.__ALL_VIRTUAL_COLLATION AS C
+  LEFT JOIN collation() AS C
   ON D.COLLATION_TYPE = C.COLLATION_TYPE
   """.replace("\n", " ")
   )
@@ -8290,7 +8356,7 @@ def_table_schema(
                 WHEN 0 THEN ''
                 WHEN 1 THEN 'CHECKSUM_ERROR'
                 ELSE 'UNKNOWN' END) AS INFO
-  FROM OCEANBASE.__ALL_VIRTUAL_MERGE_INFO
+  FROM merge_info()
   """.replace("\n", " ")
   )
 
@@ -8352,8 +8418,8 @@ def_table_schema(
                                  'N' AS SECONDARY,
                                  0 AS NAMESPACE,
                                  NULL AS EDITION_NAME
-                          FROM OCEANBASE.__ALL_VIRTUAL_CORE_ALL_TABLE A
-                          JOIN OCEANBASE.__ALL_VIRTUAL_CORE_ALL_TABLE B
+                          FROM core_all_table() A
+                          JOIN core_all_table() B
                             ON B.TABLE_NAME = '__all_core_table'
                     
                           UNION ALL
@@ -9476,7 +9542,7 @@ def_table_schema(
                         ROLE,
                                             SYNC_SCN,
                         READABLE_SCN
-                      FROM oceanbase.__all_virtual_server_stat
+                      FROM server_stat()
                     
                     """.replace("\n", " ")
 )
@@ -9511,7 +9577,7 @@ def_table_schema(
                             THEN 'YES'
                             ELSE 'NO'
                             END AS CHAR(3)) AS ISDEFAULT
-                    FROM oceanbase.__all_virtual_parameter_stat
+                    FROM parameter_stat()
                     """.replace("\n", " ")
 )
 
@@ -9560,7 +9626,7 @@ def_table_schema(
                       cast(total_cpu_time as SIGNED) as TOTAL_CPU_TIME,
                       TOP_INFO,
                       MEMORY_USAGE
-                    FROM oceanbase.__all_virtual_processlist
+                    FROM processlist()
                     """.replace("\n", " ")
 )
 
@@ -9607,7 +9673,7 @@ def_table_schema(
       pending_log_size AS PENDING_LOG_SIZE,
       flushed_log_size AS FLUSHED_LOG_SIZE,
       LAST_REQUEST_TIME
-    FROM oceanbase.__all_virtual_trans_stat
+    FROM trans_stat()
     WHERE is_exiting = 0
 """.replace("\n", " ")
   )
@@ -9664,7 +9730,7 @@ def_table_schema(
                           BASE_MAJOR_STATUS,
                           MDS_FILTER_INFO,
                           EXECUTE_TIME
-                        FROM oceanbase.__all_virtual_tablet_compaction_history
+                        FROM tablet_compaction_history()
                     """.replace("\n", " ")
 )
 
@@ -9685,7 +9751,7 @@ def_table_schema(
       STATUS,
       CREATE_TIME,
       DIAGNOSE_INFO
-    FROM oceanbase.__all_virtual_compaction_diagnose_info
+    FROM compaction_diagnose_info()
     WHERE
       STATUS != "RS_UNCOMPACTED"
     AND
@@ -9766,7 +9832,7 @@ def_table_schema(
                                     NULL AS SUBPARTITION_POSITION,
                                     'TABLE' AS OBJECT_TYPE
                                 FROM
-                                  OCEANBASE.__ALL_VIRTUAL_CORE_ALL_TABLE
+                                  core_all_table()
                                 WHERE TABLE_TYPE IN (0,2,3,6)
                               UNION ALL
                               SELECT DATABASE_ID,
@@ -9875,8 +9941,8 @@ def_table_schema(
                                   c.COLUMN_NAME,
                                   c.IS_HIDDEN
                                 FROM
-                                  oceanbase.__all_virtual_core_all_table t,
-                                  oceanbase.__all_virtual_core_column_table c
+                                  core_all_table() t,
+                                  core_column_table() c
                                 WHERE c.table_id = t.table_id
                            UNION ALL
                            SELECT t.database_id,
@@ -10037,7 +10103,7 @@ def_table_schema(
                                   TABLE_ID,
                                   TABLE_NAME
                                 FROM
-                                  oceanbase.__all_virtual_core_all_table
+                                  core_all_table()
                            UNION ALL
                            SELECT database_id,
                                   table_id,
@@ -10176,7 +10242,7 @@ def_table_schema(
                                   NULL AS SUBPARTITION_POSITION,
                                   'TABLE' AS OBJECT_TYPE
                               FROM
-                                OCEANBASE.__ALL_VIRTUAL_CORE_ALL_TABLE
+                                core_all_table()
                           UNION ALL
                             SELECT DATABASE_ID,
                                    TABLE_ID,
@@ -10291,7 +10357,7 @@ def_table_schema(
                                       NULL AS SUBPARTITION_POSITION,
                                       'INDEX' AS OBJECT_TYPE
                                 FROM
-                                  OCEANBASE.__ALL_VIRTUAL_CORE_ALL_TABLE T
+                                  core_all_table() T
                                 WHERE T.TABLE_TYPE = 5 AND T.INDEX_TYPE NOT IN (11, 12, 14, 15, 17, 18, 20)
                               UNION ALL
                                SELECT DATABASE_ID,
@@ -10393,7 +10459,7 @@ def_table_schema(
           CAST(NULL AS SIGNED) AS LASTUSED,
           CAST(NULL AS SIGNED) AS FLAGS,
           CAST(NULL AS SIGNED) AS CON_ID
-          FROM oceanbase.__all_virtual_dml_stats
+          FROM dml_stats()
 """.replace("\n", " ")
 )
 
@@ -10434,7 +10500,7 @@ def_table_schema(
      FROM
      OCEANBASE.__ALL_MONITOR_MODIFIED T
      FULL JOIN
-     OCEANBASE.__ALL_VIRTUAL_DML_STATS VT
+     dml_stats() VT
      ON T.TABLET_ID = VT.TABLET_ID
     )V
     JOIN OCEANBASE.__ALL_TABLE T
@@ -10556,7 +10622,7 @@ def_table_schema(
       A.OUTLINE_SQL,
       A.SQL_ID,
       A.OUTLINE_CONTENT
-    FROM oceanbase.__all_virtual_outline A, oceanbase.__all_outline B
+    FROM outline() A, oceanbase.__all_outline B
     WHERE A.OUTLINE_ID = B.OUTLINE_ID AND B.FORMAT_OUTLINE = 0
 """.replace("\n", " "),
 
@@ -10597,7 +10663,7 @@ def_table_schema(
          EXTRA_VALUE2,
          EXTRA_NAME3,
          EXTRA_VALUE3
-  FROM OCEANBASE.__ALL_VIRTUAL_DEADLOCK_EVENT_HISTORY
+  FROM deadlock_event_history()
   """.replace("\n", " ")
   )
 
@@ -10624,7 +10690,7 @@ def_table_schema(
     END_SCN,
     MAX_LSN,
     MAX_SCN
-  FROM oceanbase.__all_virtual_log_stat
+  FROM log_stat()
 """.replace("\n", " ")
   )
 
@@ -11058,7 +11124,7 @@ def_table_schema(
                                             join oceanbase.__all_routine as r on rp.subprogram_id = r.subprogram_id
                                             and rp.routine_id = r.routine_id
                                             join oceanbase.__all_database as d on r.database_id = d.database_id
-                                            left join oceanbase.__all_virtual_data_type v on rp.param_type = v.data_type
+                                            left join data_type() v on rp.param_type = v.data_type
                                           WHERE
                                             in_recyclebin = 0
                                             and database_name != '__recyclebin'
@@ -11782,7 +11848,7 @@ def_table_schema(
       WHEN can_early_lock_release = 1 THEN 'TRUE'
       ELSE 'UNKNOWN'
       END AS CAN_EARLY_LOCK_RELEASE
-    FROM oceanbase.__all_virtual_trans_scheduler
+    FROM trans_scheduler()
 """.replace("\n", " ")
   )
 
@@ -11819,13 +11885,13 @@ def_table_schema(
       CAST(trg.gmt_create AS DATETIME(2)) AS CREATED,
       CAST(sql_mode_convert(trg.sql_mode) AS CHAR(8192)) AS SQL_MODE,
       CAST(trg.trigger_priv_user AS CHAR(93)) AS DEFINER,
-      CAST((select charset from oceanbase.__all_virtual_collation
+      CAST((select charset from collation()
           where id = substring_index(substring_index(trg.package_exec_env, ',', 2), ',', -1)) AS CHAR(32)
             ) AS CHARACTER_SET_CLIENT,
-      CAST((select collation from oceanbase.__all_virtual_collation
+      CAST((select collation from collation()
             where collation_type = substring_index(substring_index(trg.package_exec_env, ',', 3), ',', -1)) AS CHAR(32)
             ) AS COLLATION_CONNECTION,
-      CAST((select collation from oceanbase.__all_virtual_collation
+      CAST((select collation from collation()
             where collation_type = substring_index(substring_index(trg.package_exec_env, ',', 4), ',', -1)) AS CHAR(32)
             ) AS DATABASE_COLLATION
       FROM oceanbase.__all_trigger trg
@@ -12033,7 +12099,7 @@ def_table_schema(
           CAST(RUNNING_TABLE_NAME AS CHAR(256)) AS RUNNING_TABLE_NAME,
           CAST(RUNNING_TABLE_DURATION_TIME AS SIGNED) AS RUNNING_TABLE_DURATION_TIME,
           CAST(SPARE2 AS CHAR(256)) AS RUNNING_TABLE_PROGRESS
-          FROM oceanbase.__all_virtual_opt_stat_gather_monitor
+          FROM opt_stat_gather_monitor()
 """.replace("\n", " ")
 )
 
@@ -12102,7 +12168,7 @@ def_table_schema(
     TIME_AFTER_RECV AS CTIME,
     1 AS BLOCK
     FROM
-    oceanbase.__ALL_VIRTUAL_LOCK_WAIT_STAT
+    lock_wait_stat()
 
     UNION ALL
 
@@ -12118,7 +12184,7 @@ def_table_schema(
     TIME_AFTER_RECV AS CTIME,
     0 AS BLOCK
     FROM
-    oceanbase.__ALL_VIRTUAL_TRANS_LOCK_STAT
+    trans_lock_stat()
     WHERE ROWKEY IS NOT NULL AND ROWKEY <> ''
 
     UNION ALL
@@ -12135,7 +12201,7 @@ def_table_schema(
     MIN(TIME_AFTER_RECV) AS CTIME,
     0 AS BLOCK
     FROM
-    oceanbase.__ALL_VIRTUAL_TRANS_LOCK_STAT
+    trans_lock_stat()
     GROUP BY TRANS_ID, SESSION_ID
 
     UNION ALL
@@ -12155,7 +12221,7 @@ def_table_schema(
     OBJ_LOCK.TIME_AFTER_CREATE AS CTIME,
     0 AS BLOCK
     FROM
-    oceanbase.__ALL_VIRTUAL_OBJ_LOCK AS OBJ_LOCK
+    obj_lock() AS OBJ_LOCK
     LEFT JOIN
     oceanbase.V$OB_TRANSACTION_WRITE_STATE TRX_WRITE_PART
     ON
@@ -12181,7 +12247,7 @@ def_table_schema(
       TS_TYPE,
       TS_VALUE
     FROM
-      oceanbase.__all_virtual_timestamp_service as a
+      timestamp_service() as a
 """.replace("\n", " ")
 )
 
@@ -12207,7 +12273,7 @@ def_table_schema(
           CAST(HOLD_SIZE AS SIGNED) as HOLD_SIZE,
           CAST(TIMEOUT_TS AS DATETIME) as TIMEOUT_TS,
           CAST(START_TIME AS DATETIME) as START_TIME
-        FROM oceanbase.__all_virtual_px_p2p_datahub
+        FROM px_p2p_datahub()
 
 """.replace("\n", " "),
 
@@ -12234,7 +12300,7 @@ WITH V AS
   FROM
   OCEANBASE.__ALL_MONITOR_MODIFIED T
   FULL JOIN
-  OCEANBASE.__ALL_VIRTUAL_DML_STATS VT
+  dml_stats() VT
   ON T.TABLE_ID = VT.TABLE_ID
   AND T.TABLET_ID = VT.TABLET_ID
 )
@@ -12393,7 +12459,7 @@ def_table_schema(
                                              trans_state as TRANS_STATE,
                                              user_client_port as USER_CLIENT_PORT,
                                              cast(total_cpu_time as SIGNED) as TOTAL_CPU_TIME
-                                         from oceanbase.__all_virtual_session_info
+                                         from session_info()
                     """.replace("\n", " "),
   normal_columns  = []
   )
@@ -12439,7 +12505,7 @@ def_table_schema(
            OUTLINE_VERSION,
            OUTLINE_ID,
            OUTLINE_DATA AS CONCURRENT_DATA
-    FROM oceanbase.__all_virtual_plan_stat WHERE OBJECT_STATUS = 0 AND TYPE >= 5 AND TYPE < 10 AND is_in_pc=true
+    FROM plan_stat() WHERE OBJECT_STATUS = 0 AND TYPE >= 5 AND TYPE < 10 AND is_in_pc=true
 """.replace("\n", " "),
 
 
@@ -12495,7 +12561,7 @@ def_table_schema(
       A.OUTLINE_SQL,
       A.FORMAT_SQL_ID,
       A.OUTLINE_CONTENT
-    FROM oceanbase.__all_virtual_outline A, oceanbase.__all_outline B
+    FROM outline() A, oceanbase.__all_outline B
     WHERE A.OUTLINE_ID = B.OUTLINE_ID AND B.FORMAT_OUTLINE != 0
 """.replace("\n", " "),
     normal_columns = [
@@ -12589,7 +12655,7 @@ def_table_schema(
           ELSE 'NO'
           END AS CHAR(3)) AS ISDEFAULT
   FROM oceanbase.__all_sys_variable a
-  join oceanbase.__all_virtual_sys_variable_default_value b
+  join sys_variable_default_value() b
   where a.name = b.variable_name;
   """.replace("\n", " ")
   )
@@ -12824,7 +12890,7 @@ def_table_schema(
                         A.NORM_IOPS AS NORM_IOPS,
                         A.REAL_IOPS AS REAL_IOPS
                       FROM
-                        OCEANBASE.__ALL_VIRTUAL_GROUP_IO_STAT AS A
+                        group_io_stat() AS A
                     """.replace("\n", " ")
 )
 
@@ -13530,7 +13596,7 @@ def_table_schema(
         sum(avtps.occupy_size) as OCCUPY_SIZE,
         sum(avtps.required_size) as REQUIRED_SIZE
       from
-      oceanbase.__all_virtual_tablet_pointer_status avtps
+      tablet_pointer_status() avtps
       INNER JOIN oceanbase.__all_tablet_to_table attl
         ON      attl.tablet_id = avtps.tablet_id
       INNER JOIN oceanbase.__all_table at
@@ -13672,7 +13738,7 @@ def_table_schema(
     LAST_ACCESS_TIME,
     LAST_MODIFY_TIME,
     BIRTH_TIME
-  FROM oceanbase.__all_virtual_temp_file
+  FROM temp_file()
 """.replace("\n", " ")
   )
 
@@ -13832,7 +13898,7 @@ SELECT
     (VECTOR_MEM_USED + RAW_MALLOC_SIZE + INDEX_METADATA_SIZE) as VECTOR_MEM_USED,
     VECTOR_MEM_LIMIT
 FROM
-    oceanbase.__all_virtual_vector_mem_info
+    vector_mem_info()
 """.replace("\n", " ")
   )
 
@@ -13935,7 +14001,7 @@ def_table_schema(
       job_type AS JOB_TYPE,
       job_status AS JOB_STATUS,
       result_code AS RESULT_CODE
-    FROM oceanbase.__all_virtual_rootservice_job
+    FROM rootservice_job()
   """.replace("\n", " ")
   )
 
@@ -13956,7 +14022,7 @@ def_table_schema(
       FETCH_TX,
       FETCH_LSN,
       FETCH_SCN
-    FROM oceanbase.__all_virtual_change_stream_refresh_stat
+    FROM change_stream_refresh_stat()
   """.replace("\n", " ")
 )
 

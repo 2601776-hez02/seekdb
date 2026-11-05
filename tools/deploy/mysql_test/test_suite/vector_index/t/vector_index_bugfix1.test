@@ -630,7 +630,7 @@ order by l2_distance(embedding, '[0,0,0]') approximate limit 10;
 --enable_query_log
 select p.operator, p.cardinality
 from oceanbase.`V$OB_PLAN_CACHE_PLAN_STAT` s
-join oceanbase.__all_virtual_sql_plan p on p.plan_id = s.plan_id
+join sql_plan() p on p.plan_id = s.plan_id
 where instr(s.statement, 't_issue1439_or_selectivity') > 0
   and p.operator like 'VECTOR INDEX ADAPTIVE SCAN%'
 order by length(s.statement), p.plan_id;
@@ -655,7 +655,7 @@ order by l2_distance(embedding, '[0,0,0]') approximate limit 10;
 --enable_query_log
 select p.operator, p.cardinality, s.hit_count
 from oceanbase.`V$OB_PLAN_CACHE_PLAN_STAT` s
-join oceanbase.__all_virtual_sql_plan p on p.plan_id = s.plan_id
+join sql_plan() p on p.plan_id = s.plan_id
 where instr(s.statement, 't_issue1439_or_selectivity') > 0
   and p.operator like 'VECTOR INDEX ADAPTIVE SCAN%'
 order by p.cardinality, p.plan_id;

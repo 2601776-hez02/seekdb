@@ -8,14 +8,14 @@ insert into t1 values(1, '[0.203846,0.205289,0.880265,0.824340,0.615737,0.496899
 insert into t2 values(1, [1,1,1]);
 insert into t2 values(2, [2,2,2]);
 select count(distinct inc_index_tablet_id) as count
-from oceanbase.__all_virtual_vector_index_info a, oceanbase.__all_table b
+from vector_index_info() a, oceanbase.__all_table b
 where a.data_table_id = b.table_id and b.table_name in ('t1', 't2');
 count
 3
 drop table t1;
 drop index idx1 on t2;
 select count(*) as count
-from oceanbase.__all_virtual_vector_index_info a, oceanbase.__all_table b
+from vector_index_info() a, oceanbase.__all_table b
 where a.data_table_id = b.table_id and b.table_name in ('t1', 't2');
 count
 0
@@ -34,7 +34,7 @@ c1	c2
 2	[2,2,2]
 1	[1,1,1]
 select count(*) as count
-from oceanbase.__all_virtual_vector_index_info v
+from vector_index_info() v
 join oceanbase.__all_table i on v.rowkey_vid_tablet_id = i.tablet_id
 join oceanbase.__all_table t on t.table_id = i.data_table_id
 where t.table_name = 't3';
@@ -45,7 +45,7 @@ c1	c2
 2	[2,2,2]
 1	[1,1,1]
 select count(*) as count
-from oceanbase.__all_virtual_vector_index_info v
+from vector_index_info() v
 join oceanbase.__all_table i on v.rowkey_vid_tablet_id = i.tablet_id
 join oceanbase.__all_table t on t.table_id = i.data_table_id
 where t.table_name = 't4';
@@ -54,14 +54,14 @@ count
 drop table t3, t4;
 PURGE RECYCLEBIN;
 select count(*) as count
-from oceanbase.__all_virtual_vector_index_info v
+from vector_index_info() v
 join oceanbase.__all_table i on v.rowkey_vid_tablet_id = i.tablet_id
 join oceanbase.__all_table t on t.table_id = i.data_table_id
 where t.table_name = 't3';
 count
 0
 select count(*) as count
-from oceanbase.__all_virtual_vector_index_info v
+from vector_index_info() v
 join oceanbase.__all_table i on v.rowkey_vid_tablet_id = i.tablet_id
 join oceanbase.__all_table t on t.table_id = i.data_table_id
 where t.table_name = 't4';

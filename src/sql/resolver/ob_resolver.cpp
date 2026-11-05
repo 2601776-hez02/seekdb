@@ -398,6 +398,8 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         REGISTER_STMT_RESOLVER(SetTransaction);
         break;
       }
+      case T_SHOW_TABLE_FUNCTIONS:
+      case T_DESCRIBE_TABLE_FUNCTION:
       case T_SHOW_TABLES:
       case T_SHOW_DATABASES:
       case T_SHOW_VARIABLES:

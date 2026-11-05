@@ -5497,36 +5497,66 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
     const bool in_root_job)
 {
   UNUSED(in_root_job);
-  ObIAllocator &alloc = phy_plan_->get_allocator();
-  ObRawExpr *value_raw_expr = nullptr;
-  ObExpr *value_expr = nullptr;
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(op.get_stmt())) {
+  const TableItem *table = nullptr;
+  ObRawExpr *arguments = op.get_value_expr();
+  if (OB_ISNULL(op.get_stmt()) || OB_ISNULL(arguments) ||
+      OB_ISNULL(table = op.get_stmt()->get_table_item_by_id(op.get_table_id()))) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(spec.column_exprs_.init(op.get_stmt()->get_column_size()))) {
-  } else if (OB_UNLIKELY(op.get_num_of_child() > 1)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_ISNULL(value_raw_expr = op.get_value_expr())) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(generate_rt_expr(*value_raw_expr, value_expr))) {
   } else {
-    spec.has_correlated_expr_ = value_raw_expr->has_flag(CNT_DYNAMIC_PARAM);
-    spec.value_expr_ = value_expr;
-    for (int64_t i = 0; OB_SUCC(ret) && i < op.get_output_exprs().count(); ++i) {
-      if (OB_FAIL(mark_expr_self_produced(op.get_output_exprs().at(i)))) {
+    spec.function_id_ = table->table_function_id_;
+    spec.has_correlated_expr_ = arguments->has_flag(CNT_DYNAMIC_PARAM);
+    OZ (spec.argument_column_counts_.assign(table->function_argument_column_counts_));
+    OZ (spec.argument_exprs_.init(arguments->get_param_count()));
+    OZ (spec.lookup_exprs_.init(op.get_filter_exprs().count()));
+    OZ (spec.lookup_column_ids_.init(op.get_filter_exprs().count()));
+    const TableFunctionDescriptor *definition = TableFunctionRegistry::find(spec.function_id_);
+    CK (definition != nullptr);
+    if (OB_SUCC(ret) && definition->compile_options_ != nullptr) {
+      OZ (definition->compile_options_(*table, phy_plan_->get_allocator(), spec.options_));
+    }
+    // Only filters already assigned to this scan can constrain its input. Keep
+    // every predicate in the normal SQL filter list for semantic rechecking.
+    for (int64_t i = 0; OB_SUCC(ret) && i < op.get_filter_exprs().count(); ++i) {
+      const ObRawExpr *filter = op.get_filter_exprs().at(i);
+      if (filter->get_expr_type() != T_OP_EQ || filter->get_param_count() != 2) { continue; }
+      for (int side = 0; OB_SUCC(ret) && side < 2; ++side) {
+        const ObRawExpr *column = filter->get_param_expr(side);
+        const ObRawExpr *value = filter->get_param_expr(1 - side);
+        if (!column->is_column_ref_expr() || (!value->is_const_raw_expr() && !value->is_exec_param_expr())) { continue; }
+        const ObColumnRefRawExpr *reference = static_cast<const ObColumnRefRawExpr *>(column);
+        if (reference->get_table_id() != table->table_id_ ||
+            column->get_data_type() != value->get_data_type() ||
+            (ob_is_string_type(column->get_data_type()) && column->get_collation_type() != value->get_collation_type())) { continue; }
+        bool supported = false;
+        for (int64_t j = 0; j < definition->lookup_column_count_; ++j) {
+          supported |= definition->lookup_column_ids_[j] == reference->get_column_id();
+        }
+        if (supported) {
+          ObExpr *expression = nullptr;
+          OZ (generate_rt_expr(*value, expression));
+          OZ (spec.lookup_exprs_.push_back(expression));
+          OZ (spec.lookup_column_ids_.push_back(reference->get_column_id()));
+          break;
+        }
       }
     }
+    OZ (spec.column_exprs_.init(op.get_stmt()->get_column_size()));
+    OZ (spec.column_ids_.init(op.get_stmt()->get_column_size()));
+    for (int64_t i = 0; OB_SUCC(ret) && i < arguments->get_param_count(); ++i) {
+      ObExpr *expr = nullptr;
+      OZ (generate_rt_expr(*arguments->get_param_expr(i), expr));
+      OZ (spec.argument_exprs_.push_back(expr));
+    }
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_stmt()->get_column_size(); ++i) {
-      ObExpr *rt_expr = nullptr;
-      const ColumnItem *col_item = op.get_stmt()->get_column_item(i);
-      CK (OB_NOT_NULL(col_item));
-      CK (OB_NOT_NULL(col_item->expr_));
-      if (OB_SUCC(ret)
-          && col_item->table_id_ == op.get_table_id()
-          && col_item->expr_->is_explicited_reference()) {
-        OZ (mark_expr_self_produced(col_item->expr_));
-        OZ (generate_rt_expr(*col_item->expr_, rt_expr));
-        OZ (spec.column_exprs_.push_back(rt_expr));
+      const ColumnItem *column = op.get_stmt()->get_column_item(i);
+      if (column->table_id_ == table->table_id_ && column->expr_->is_explicited_reference()) {
+        ObExpr *expr = nullptr;
+        OZ (mark_expr_self_produced(column->expr_));
+        OZ (generate_rt_expr(*column->expr_, expr));
+        if (OB_SUCC(ret) && is_lob_storage(expr->obj_meta_.get_type())) { expr->obj_meta_.set_has_lob_header(); }
+        OZ (spec.column_exprs_.push_back(expr));
+        OZ (spec.column_ids_.push_back(column->column_id_));
       }
     }
   }

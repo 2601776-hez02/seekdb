@@ -30,6 +30,7 @@ public:
   explicit ObShowResolver(ObResolverParams &params);
   virtual ~ObShowResolver();
   virtual int resolve(const ParseNode &parse_tree);
+  int resolve_table_function_description(const ParseNode &parse_tree);
 protected:
 private:
   class ObSqlStrGenerator;

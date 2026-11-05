@@ -540,13 +540,13 @@ int ObInfoSchemaColumnsTable::fill_row_cells(const ObString &database_name,
             const ObObj *res_cell = NULL;
             ObObj def_obj = column_schema->get_cur_default_value();
             ObObjType column_type = ObMaxType;
-            const ObColumnSchemaV2 *tmp_column_schema = NULL;
-            if (OB_ISNULL(table_schema_) ||
-                OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema(col_id)) ||
+            const sql::TableFunctionColumn *tmp_column_schema = NULL;
+            if (OB_ISNULL(definition_) ||
+                OB_ISNULL(tmp_column_schema = get_output_column(col_id)) ||
                 OB_ISNULL(allocator_)) {
               ret = OB_ERR_UNEXPECTED;
-              SERVER_LOG(WARN, "table or column schema or or allocator is null", KR(ret), KP(table_schema_), KP(tmp_column_schema), KP(allocator_));
-            } else if (FALSE_IT(column_type = tmp_column_schema->get_meta_type().get_type())) {
+              SERVER_LOG(WARN, "table or column schema or or allocator is null", KR(ret), KP(definition_), KP(tmp_column_schema), KP(allocator_));
+            } else if (FALSE_IT(column_type = tmp_column_schema->type_.get_meta_type().get_type())) {
             } else if (IS_DEFAULT_NOW_OBJ(def_obj)) {
               ObObj def_now_obj;
               def_now_obj.set_string(column_type, ObString::make_string(N_UPPERCASE_CUR_TIMESTAMP));
@@ -603,13 +603,13 @@ int ObInfoSchemaColumnsTable::fill_row_cells(const ObString &database_name,
           }
         case DATA_TYPE: {
             ObObjType column_type = ObMaxType;
-            const ObColumnSchemaV2 *tmp_column_schema = NULL;
+            const sql::TableFunctionColumn *tmp_column_schema = NULL;
             cells[cell_idx].reset();
-            if (OB_ISNULL(table_schema_) ||
-                OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema(col_id))) {
+            if (OB_ISNULL(definition_) ||
+                OB_ISNULL(tmp_column_schema = get_output_column(col_id))) {
               ret = OB_ERR_UNEXPECTED;
-              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(table_schema_), KP(tmp_column_schema));
-            } else if (FALSE_IT(column_type = tmp_column_schema->get_meta_type().get_type())) {
+              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(definition_), KP(tmp_column_schema));
+            } else if (FALSE_IT(column_type = tmp_column_schema->type_.get_meta_type().get_type())) {
             } else if (OB_FAIL(ob_sql_type_str(data_type_str_,
                                         column_type_str_len_,
                                         column_schema->get_data_type(),
@@ -725,13 +725,13 @@ int ObInfoSchemaColumnsTable::fill_row_cells(const ObString &database_name,
             const uint64_t sub_type = column_schema->is_extend() ?
                                       column_schema->get_sub_data_type() : static_cast<uint64_t>(column_schema->get_geo_type());
             ObObjType column_type = ObMaxType;
-            const ObColumnSchemaV2 *tmp_column_schema = NULL;
+            const sql::TableFunctionColumn *tmp_column_schema = NULL;
             cells[cell_idx].reset();
-            if (OB_ISNULL(table_schema_) ||
-                OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema(col_id))) {
+            if (OB_ISNULL(definition_) ||
+                OB_ISNULL(tmp_column_schema = get_output_column(col_id))) {
               ret = OB_ERR_UNEXPECTED;
-              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(table_schema_), KP(tmp_column_schema));
-            } else if (FALSE_IT(column_type = tmp_column_schema->get_meta_type().get_type())) {
+              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(definition_), KP(tmp_column_schema));
+            } else if (FALSE_IT(column_type = tmp_column_schema->type_.get_meta_type().get_type())) {
             } else if (OB_FAIL(get_type_str(column_schema->get_meta_type(),
                                      column_schema->get_accuracy(),
                                      column_schema->get_extended_type_info(),
@@ -884,12 +884,12 @@ int ObInfoSchemaColumnsTable::fill_row_cells(const ObString &database_name,
         case COLUMN_COMMENT: {
             cells[cell_idx].reset();
             ObObjType column_type = ObMaxType;
-            const ObColumnSchemaV2 *tmp_column_schema = NULL;
-            if (OB_ISNULL(table_schema_) ||
-                OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema(col_id))) {
+            const sql::TableFunctionColumn *tmp_column_schema = NULL;
+            if (OB_ISNULL(definition_) ||
+                OB_ISNULL(tmp_column_schema = get_output_column(col_id))) {
               ret = OB_ERR_UNEXPECTED;
-              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(table_schema_), KP(tmp_column_schema));
-            } else if (FALSE_IT(column_type = tmp_column_schema->get_meta_type().get_type())) {
+              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(definition_), KP(tmp_column_schema));
+            } else if (FALSE_IT(column_type = tmp_column_schema->type_.get_meta_type().get_type())) {
             } else {
               cells[cell_idx].set_string(column_type, column_schema->get_comment_str());
               cells[cell_idx].set_collation_type(ObCharset::get_default_collation(
@@ -901,13 +901,13 @@ int ObInfoSchemaColumnsTable::fill_row_cells(const ObString &database_name,
           }
         case GENERATION_EXPRESSION: {
             ObObjType column_type = ObMaxType;
-            const ObColumnSchemaV2 *tmp_column_schema = NULL;
+            const sql::TableFunctionColumn *tmp_column_schema = NULL;
             cells[cell_idx].reset();
-            if (OB_ISNULL(table_schema_) ||
-                OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema(col_id))) {
+            if (OB_ISNULL(definition_) ||
+                OB_ISNULL(tmp_column_schema = get_output_column(col_id))) {
               ret = OB_ERR_UNEXPECTED;
-              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(table_schema_), KP(tmp_column_schema));
-            } else if (FALSE_IT(column_type = tmp_column_schema->get_meta_type().get_type())) {
+              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(definition_), KP(tmp_column_schema));
+            } else if (FALSE_IT(column_type = tmp_column_schema->type_.get_meta_type().get_type())) {
             } else if (column_schema->is_generated_column()) {
               cells[cell_idx].set_string(column_type, column_schema->get_orig_default_value().get_string());
             } else {
@@ -1046,13 +1046,13 @@ int ObInfoSchemaColumnsTable::fill_row_cells(const common::ObString &database_na
             const ObObj *res_cell = NULL;
             ColumnItem column_item;
             ObObjType column_type = ObMaxType;
-            const ObColumnSchemaV2 *tmp_column_schema = NULL;
-            if (OB_ISNULL(table_schema_) ||
-                OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema(col_id)) ||
+            const sql::TableFunctionColumn *tmp_column_schema = NULL;
+            if (OB_ISNULL(definition_) ||
+                OB_ISNULL(tmp_column_schema = get_output_column(col_id)) ||
                 OB_ISNULL(allocator_)) {
               ret = OB_ERR_UNEXPECTED;
-              SERVER_LOG(WARN, "table or column schema or allocator is null", KR(ret), KP(table_schema_), KP(tmp_column_schema), KP(allocator_));
-            } else if (FALSE_IT(column_type = tmp_column_schema->get_meta_type().get_type())) {
+              SERVER_LOG(WARN, "table or column schema or allocator is null", KR(ret), KP(definition_), KP(tmp_column_schema), KP(allocator_));
+            } else if (FALSE_IT(column_type = tmp_column_schema->type_.get_meta_type().get_type())) {
             } else if (OB_FAIL(ObResolverUtils::resolve_default_value_and_expr_from_select_item(select_item, column_item, select_stmt))) {
             } else if (IS_DEFAULT_NOW_OBJ(column_item.default_value_)) {
               ObObj def_now_obj;
@@ -1124,14 +1124,14 @@ int ObInfoSchemaColumnsTable::fill_row_cells(const common::ObString &database_na
               }
             }
             ObObjType column_type = ObMaxType;
-            const ObColumnSchemaV2 *tmp_column_schema = NULL;
+            const sql::TableFunctionColumn *tmp_column_schema = NULL;
             cells[cell_idx].reset();
             if (OB_FAIL(ret)) {
-            } else if (OB_ISNULL(table_schema_) ||
-                       OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema(col_id))) {
+            } else if (OB_ISNULL(definition_) ||
+                       OB_ISNULL(tmp_column_schema = get_output_column(col_id))) {
               ret = OB_ERR_UNEXPECTED;
-              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(table_schema_), KP(tmp_column_schema));
-            } else if (FALSE_IT(column_type = tmp_column_schema->get_meta_type().get_type())) {
+              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(definition_), KP(tmp_column_schema));
+            } else if (FALSE_IT(column_type = tmp_column_schema->type_.get_meta_type().get_type())) {
             } else if (OB_FAIL(ob_sql_type_str(data_type_str_,
                                         column_type_str_len_,
                                         column_attributes.result_type_.get_type(),
@@ -1229,13 +1229,13 @@ int ObInfoSchemaColumnsTable::fill_row_cells(const common::ObString &database_na
           }
         case COLUMN_TYPE: {
             ObObjType column_type = ObMaxType;
-            const ObColumnSchemaV2 *tmp_column_schema = NULL;
+            const sql::TableFunctionColumn *tmp_column_schema = NULL;
             cells[cell_idx].reset();
-            if (OB_ISNULL(table_schema_) ||
-                OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema(col_id))) {
+            if (OB_ISNULL(definition_) ||
+                OB_ISNULL(tmp_column_schema = get_output_column(col_id))) {
               ret = OB_ERR_UNEXPECTED;
-              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(table_schema_), KP(tmp_column_schema));
-            } else if (FALSE_IT(column_type = tmp_column_schema->get_meta_type().get_type())) {
+              SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(definition_), KP(tmp_column_schema));
+            } else if (FALSE_IT(column_type = tmp_column_schema->type_.get_meta_type().get_type())) {
             } else {
               ObString type_val(column_type_str_len_, static_cast<int32_t>(strlen(column_type_str_)),column_type_str_);
               cells[cell_idx].set_string(column_type, type_val);

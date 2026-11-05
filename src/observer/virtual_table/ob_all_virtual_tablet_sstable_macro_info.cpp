@@ -344,39 +344,36 @@ int ObAllVirtualTabletSSTableMacroInfo::get_macro_info(
 int ObAllVirtualTabletSSTableMacroInfo::set_key_ranges(const ObIArray<ObNewRange> &key_ranges)
 {
   int ret = OB_SUCCESS;
-  if (key_ranges.empty()) {
-    ret = OB_INVALID_ARGUMENT;
-    SERVER_LOG(WARN, "invalid key_ranges", K(ret), K(key_ranges));
-  } else {
-    for (int64_t i = 0; OB_SUCC(ret) && i < key_ranges.count(); ++i) {
-      const ObNewRange &key_range = key_ranges.at(i);
-      ObNewRange range = key_range;
-      range.border_flag_.set_inclusive_start();
-      range.border_flag_.set_inclusive_end();
-      // Some scan params append a tail MIN/MAX obj to represent open interval.
-      // Make it robust: only trim when the tail is MIN/MAX.
-      const int64_t sk_len = key_range.start_key_.length();
-      if (sk_len > 0) {
-        const ObObj &sk_tail = key_range.start_key_.ptr()[sk_len - 1];
-        if (sk_tail.is_max_value() || sk_tail.is_min_value()) {
-          range.start_key_.set_length(sk_len - 1);
-        }
-        if (sk_tail.is_max_value()) {
-          range.border_flag_.unset_inclusive_start();
-        }
+  // Empty ranges represent a full scan for an unparameterized function call.
+  key_ranges_.reuse();
+  for (int64_t i = 0; OB_SUCC(ret) && i < key_ranges.count(); ++i) {
+    const ObNewRange &key_range = key_ranges.at(i);
+    ObNewRange range = key_range;
+    range.border_flag_.set_inclusive_start();
+    range.border_flag_.set_inclusive_end();
+    // Some scan params append a tail MIN/MAX obj to represent open interval.
+    // Make it robust: only trim when the tail is MIN/MAX.
+    const int64_t sk_len = key_range.start_key_.length();
+    if (sk_len > 0) {
+      const ObObj &sk_tail = key_range.start_key_.ptr()[sk_len - 1];
+      if (sk_tail.is_max_value() || sk_tail.is_min_value()) {
+        range.start_key_.set_length(sk_len - 1);
       }
-      const int64_t ek_len = key_range.end_key_.length();
-      if (ek_len > 0) {
-        const ObObj &ek_tail = key_range.end_key_.ptr()[ek_len - 1];
-        if (ek_tail.is_max_value() || ek_tail.is_min_value()) {
-          range.end_key_.set_length(ek_len - 1);
-        }
-        if (ek_tail.is_min_value()) {
-          range.border_flag_.unset_inclusive_end();
-        }
+      if (sk_tail.is_max_value()) {
+        range.border_flag_.unset_inclusive_start();
       }
-      if (OB_FAIL(key_ranges_.push_back(range))) {
+    }
+    const int64_t ek_len = key_range.end_key_.length();
+    if (ek_len > 0) {
+      const ObObj &ek_tail = key_range.end_key_.ptr()[ek_len - 1];
+      if (ek_tail.is_max_value() || ek_tail.is_min_value()) {
+        range.end_key_.set_length(ek_len - 1);
       }
+      if (ek_tail.is_min_value()) {
+        range.border_flag_.unset_inclusive_end();
+      }
+    }
+    if (OB_FAIL(key_ranges_.push_back(range))) {
     }
   }
   return ret;

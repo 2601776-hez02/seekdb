@@ -25,6 +25,7 @@
 #include "observer/mysql/obmp_utils.h"
 #include "observer/mysql/ob_query_driver.h"
 #include "sql/engine/expr/ob_expr_xml_func_helper.h"
+#include "sql/engine/expr/pl_composite_client_output.h"
 void request_finish_callback();
 namespace oceanbase
 {
@@ -426,8 +427,16 @@ int ObMPBase::response_row(ObSQLSessionInfo &session,
     for (int64_t i = 0; OB_SUCC(ret) && i < tmp_row.get_count(); ++i) {
       ObObj &value = tmp_row.get_cell(i); 
       ObCharsetType charset_type = CHARSET_INVALID;
+      const bool composite_text = PlCompositeClientOutput::needs_conversion(value.get_meta());
+      if (!is_packed && composite_text) {
+        if (OB_ISNULL(exec_ctx)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(PlCompositeClientOutput::convert(value, allocator, *exec_ctx))) {
+        }
+      }
       // need at ps mode
-      if (!is_packed && value.get_type() != fields->at(i).type_.get_type()) {
+      if (OB_SUCC(ret) && !is_packed && !composite_text
+          && value.get_type() != fields->at(i).type_.get_type()) {
         ObCastCtx cast_ctx(&allocator, NULL, CM_WARN_ON_FAIL, fields->at(i).type_.get_collation_type());
         if (ObDecimalIntType == fields->at(i).type_.get_type()) {
           cast_ctx.res_accuracy_ = const_cast<ObAccuracy*>(&fields->at(i).accuracy_);

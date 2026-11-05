@@ -497,7 +497,7 @@ int ObLocalManagementService::check_config_result(const char *name, const char* 
     common::sqlclient::ObMySQLResult *result = NULL;
     if (OB_FAIL(sql.assign_fmt("SELECT count(*) as count FROM %s "
                                "WHERE name = '%s' and value != '%s'",
-                               "__all_virtual_parameter_stat", name, value))) {
+                               "parameter_stat()", name, value))) {
     }
     while(OB_SUCC(ret) || OB_ERR_WAIT_REMOTE_SCHEMA_REFRESH == ret /* remote schema not ready, return -4029 on remote */) {
       if (ObTimeUtility::current_time() - start > timeout) {

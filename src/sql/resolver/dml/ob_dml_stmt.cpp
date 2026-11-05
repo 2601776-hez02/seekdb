@@ -185,8 +185,17 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
   ddl_schema_version_ = other.ddl_schema_version_;
   ddl_table_id_ = other.ddl_table_id_;
   ref_query_ = other.ref_query_;
+  table_function_id_ = other.table_function_id_;
+  table_function_requires_all_columns_ = other.table_function_requires_all_columns_;
+  OZ (function_argument_column_counts_.assign(other.function_argument_column_counts_));
+  OZ (function_column_names_.assign(other.function_column_names_));
+  // The bind-time file snapshot must survive statement copies: plan generation
+  // hands the copied item to compile_file_table_options(), which reports an
+  // internal error when the snapshot is empty.  Like function_column_names_
+  // above this is a shallow copy of strings owned by the source statement.
+  file_sql_options_ = other.file_sql_options_;
   SampleInfo *buf = NULL;
-  if (is_json_table() 
+  if (other.json_table_def_ != nullptr
       && OB_FAIL(deep_copy_json_table_def(*other.json_table_def_, expr_copier, allocator))) {
   } else if (OB_FAIL(expr_copier.copy(other.snapshot_query_expr_, snapshot_query_expr_))) {
   } else if (OB_FAIL(expr_copier.copy(other.function_table_expr_, function_table_expr_))) {
@@ -1555,7 +1564,7 @@ int ObDMLStmt::formalize_stmt_expr_reference(ObRawExprFactory *expr_factory,
       if (OB_ISNULL(column_item.expr_) ||
           OB_ISNULL(table_item = get_table_item_by_id(column_item.table_id_))) {
         ret = OB_ERR_UNEXPECTED;
-      } else if (table_item->is_function_table() ||
+      } else if ((table_item->is_function_table() && table_item->table_function_requires_all_columns_) ||
                  table_item->is_json_table() ||
                  table_item->for_update_ ||
                  table_item->is_values_table()) {

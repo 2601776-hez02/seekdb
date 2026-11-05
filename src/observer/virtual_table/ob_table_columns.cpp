@@ -18,6 +18,7 @@
 #include "observer/virtual_table/ob_table_columns.h"
 #include "observer/ob_server_runtime_access.h"
 #include "sql/resolver/ddl/ob_create_view_resolver.h"
+#include "sql/ob_sql.h"
 using namespace oceanbase::common;
 using namespace oceanbase::share;
 using namespace oceanbase::share::schema;
@@ -1036,6 +1037,11 @@ int ObTableColumns::set_col_attrs_according_binary_expr(const ObSelectStmt *sele
     // first_id in ObBinaryRefRawExpr is not the real table_id, TableItem::ref_id is the correct one
     if (OB_UNLIKELY(NULL == (tbl_item = select_stmt->get_table_item_by_id(bexpr->get_table_id())))) {
       ret = OB_ERR_UNEXPECTED;
+    } else if (tbl_item->is_function_table()) {
+      // Function output columns have binding metadata, but no stored column schema
+      // or insert default.  In particular, an invalid ref_id must not imply NOT NULL.
+      nullable |= 0 == (bexpr->get_result_flag() & NOT_NULL_FLAG);
+      has_default = false;
     } else if (OB_INVALID_ID == tbl_item->ref_id_) {
       // do nothing
     } else if (OB_FAIL(schema_guard->get_table_schema( tbl_item->ref_id_, table_schema))

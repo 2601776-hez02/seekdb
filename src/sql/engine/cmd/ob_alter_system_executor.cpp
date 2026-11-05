@@ -381,7 +381,7 @@ int ObCancelTaskExecutor::fetch_sys_task_info(
 	  ObSqlString read_sql;
 	  int64_t tmp_real_str_len = 0;
 	  const char *sql_str = "select task_type "
-	  							" from oceanbase.__all_virtual_sys_task_status "
+                          " from sys_task_status() "
 	  							" where task_id = '%.*s'";
 	  char task_type_str[common::OB_SYS_TASK_TYPE_LENGTH] = "";
 

@@ -76,52 +76,5 @@ int ObVirtualTableProjector::check_column_exist(const share::schema::ObTableSche
   }
   return ret;
 }
-////////////////////////////////////////////////////////////////
-ObSimpleVirtualTableIterator::ObSimpleVirtualTableIterator(uint64_t table_id)
-    :table_id_(table_id),
-     schema_guard_(share::schema::ObSchemaMgrItem::MOD_VIRTUAL_TABLE),
-     schema_service_(NULL),
-     table_schema_(NULL)
-{}
-
-
-int ObSimpleVirtualTableIterator::inner_open()
-{
-  int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(NULL == schema_service_)) {
-    ret = OB_NOT_INIT;
-  } else if (OB_FAIL(schema_service_->get_runtime_schema_guard(schema_guard_))) {
-  } else if (OB_FAIL(get_table_schema( table_id_))) {
-  } else if (OB_FAIL(init_all_data())) {
-  }
-  return ret;
-}
-
-int ObSimpleVirtualTableIterator::get_table_schema( uint64_t table_id)
-{
-  int ret = OB_SUCCESS;
-  if (OB_FAIL(schema_guard_.get_table_schema( table_id, table_schema_))) {
-  } else if (NULL == table_schema_) {
-    ret = OB_ERR_UNEXPECTED;
-  } else {} // no more to do
-  return ret;
-}
-
-int ObSimpleVirtualTableIterator::inner_get_next_row(
-    common::ObNewRow *&row)
-{
-  int ret = OB_SUCCESS;
-  columns_.reuse();
-  if (OB_FAIL(get_next_full_row(table_schema_, columns_))) {
-    if (OB_ITER_END != ret) {
-    }
-  } else if (OB_FAIL(project_row(columns_, cur_row_))) {
-  } else {
-    row = &cur_row_;
-  }
-  return ret;
-}
-
-
 }//end namespace common
 }//end namespace oceanbase

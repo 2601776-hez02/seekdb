@@ -20,6 +20,7 @@
 #include "sql/engine/ob_operator.h"
 #include "sql/engine/basic/ob_chunk_datum_store.h"
 #include "lib/charset/ob_charset.h"
+#include "sql/table_function/table_function.h"
 
 namespace oceanbase
 {
@@ -32,11 +33,19 @@ class ObFunctionTableSpec : public ObOpSpec
 OB_UNIS_VERSION_V(1);
 public:
   ObFunctionTableSpec(common::ObIAllocator &alloc, const ObPhyOperatorType type)
-    : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc), has_correlated_expr_(false)
+    : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc), has_correlated_expr_(false),
+      function_id_(0), argument_exprs_(alloc), column_ids_(alloc), argument_column_counts_(alloc), lookup_exprs_(alloc), lookup_column_ids_(alloc)
   {}
   ObExpr *value_expr_;
   common::ObFixedArray<ObExpr*, common::ObIAllocator> column_exprs_;
   bool has_correlated_expr_;
+  uint64_t function_id_;
+  common::ObString options_;
+  common::ObFixedArray<ObExpr*, common::ObIAllocator> argument_exprs_;
+  common::ObFixedArray<uint64_t, common::ObIAllocator> column_ids_;
+  common::ObFixedArray<int64_t, common::ObIAllocator> argument_column_counts_;
+  common::ObFixedArray<ObExpr*, common::ObIAllocator> lookup_exprs_;
+  common::ObFixedArray<uint64_t, common::ObIAllocator> lookup_column_ids_;
 };
 
 class ObFunctionTableOp : public ObOperator
@@ -44,11 +53,7 @@ class ObFunctionTableOp : public ObOperator
 public:
   ObFunctionTableOp(ObExecContext &exec_ctx, const ObOpSpec &spec, ObOpInput *input)
     : ObOperator(exec_ctx, spec, input),
-    node_idx_(0),
-    already_calc_(false),
-    row_count_(0),
-    col_count_(0),
-    value_table_(NULL) 
+    scan_(nullptr), opened_(false), arguments_()
   {}
 
   virtual int inner_open() override;
@@ -58,16 +63,13 @@ public:
   virtual int inner_close() override;
   virtual void destroy() override;
 private:
-  int inner_get_next_row_udf();
-  int inner_get_next_row_sys_func();
-  int get_current_result(common::ObObj &result);
-  int64_t node_idx_;
-  bool already_calc_;
-  int64_t row_count_;
-  int64_t col_count_;
-  common::ObObj value_;
-  pl::ObPLCollection *value_table_;
-  int (ObFunctionTableOp::*next_row_func_)();
+  int open_scan();
+  int evaluate_arguments();
+  ITableFunctionScan *scan_;
+  bool opened_;
+  common::ObSEArray<common::ObObj, 4> arguments_;
+  common::ObSEArray<TableFunctionLookup, 4> lookups_;
+
 };
 
 } // end namespace sql

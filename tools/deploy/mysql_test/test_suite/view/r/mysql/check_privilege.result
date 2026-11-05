@@ -3,7 +3,7 @@ drop database if exists check_privilege_db;
 create database check_privilege_db;
 use check_privilege_db;
 create table t1(id int, name char(20));
-select count(privileges)>10000 from oceanbase.__all_virtual_information_columns;
+select count(privileges)>10000 from information_columns();
 count(privileges)>10000
 0
 create user if not exists 'check_privilege_user';
@@ -19,5 +19,94 @@ name	char(20)	YES		NULL
 show tables;
 Tables_in_check_privilege_db
 t1
+create table hidden(id int, secret varchar(32));
+revoke select on check_privilege_db.* from check_privilege_user;
+grant select on check_privilege_db.t1 to check_privilege_user;
+show tables;
+Tables_in_check_privilege_db
+t1
+show columns from t1;
+Field	Type	Null	Key	Default	Extra
+id	int(11)	YES		NULL	EXTRA
+name	char(20)	YES		NULL	EXTRA
+select distinct table_name from information_schema.columns
+where table_schema='check_privilege_db' order by table_name;
+table_name
+t1
+select table_name from information_schema.tables
+where table_schema='check_privilege_db' order by table_name;
+table_name
+t1
+show columns from hidden;
+ERROR 42000: SELECT command denied to user 'check_privilege_user'@'%' for table 'hidden'
+select * from mysql_users() limit 1;
+ERROR 42000: Access denied for user 'check_privilege_user'@'%' to database 'mysql'
+select * from memory_info() limit 1;
+ERROR 42000: Access denied for user 'check_privilege_user'@'%' to database 'oceanbase'
+select * from information_columns() limit 1;
+ERROR 42000: Access denied for user 'check_privilege_user'@'%' to database 'oceanbase'
+select count(*) > 0 from session_variables();
+count(*) > 0
+1
+select column_name from information_columns()
+where table_schema='CHECK_PRIVILEGE_DB' and table_name='T1'
+  order by ordinal_position;
+column_name
+id
+name
+select column_name from information_columns()
+where table_schema='check_privilege_db' and table_name=null;
+column_name
+select column_name from information_columns()
+where table_schema='check_privilege_db' and table_name collate utf8mb4_bin='T1';
+column_name
+create table `123`(id int);
+select column_name from information_columns()
+where table_schema='check_privilege_db' and table_name=123;
+column_name
+id
+Warnings:
+Warning	1292	Truncated incorrect DECIMAL value: 't1'
+Warning	1292	Truncated incorrect DECIMAL value: 't1'
+Warning	1292	Truncated incorrect DECIMAL value: 'hidden'
+Warning	1292	Truncated incorrect DECIMAL value: 'hidden'
+select s.name,c.column_name
+from (select 't1' name union all select 'absent' union all select null) s
+left join information_columns() c
+on c.table_schema='check_privilege_db' and c.table_name=s.name
+order by s.name,c.ordinal_position;
+name	column_name
+NULL	NULL
+absent	NULL
+t1	id
+t1	name
+select * from information_columns('check_privilege_db',null);
+ERROR HY000: Invalid argument
+prepare tf_locator from 'select column_name from information_columns() where table_schema=? and table_name=? order by ordinal_position';
+set @tf_db='check_privilege_db', @tf_table='t1';
+execute tf_locator using @tf_db,@tf_table;
+column_name
+id
+name
+set @tf_table='123';
+execute tf_locator using @tf_db,@tf_table;
+column_name
+id
+set @tf_table=null;
+execute tf_locator using @tf_db,@tf_table;
+column_name
+deallocate prepare tf_locator;
+set @tf_old_sql_mode=@@sql_mode;
+set sql_mode='';
+create procedure locator_proc() select 1;
+create trigger locator_trigger before insert on t1 for each row set new.id=coalesce(new.id,0);
+show create procedure locator_proc;
+Procedure	sql_mode	Create Procedure	character_set_client	collation_connection	Database Collation
+locator_proc		CREATE DEFINER = `root`@`%` PROCEDURE `locator_proc`()
+select 1	utf8mb4	utf8mb4_general_ci	utf8mb4_general_ci
+show create trigger locator_trigger;
+Trigger	sql_mode	SQL Original Statement	character_set_client	collation_connection	Database Collation
+locator_trigger		CREATE DEFINER = root@% trigger locator_trigger before insert on t1 for each row set new.id=coalesce(new.id,0)	utf8mb4	utf8mb4	utf8mb4
+set sql_mode=@tf_old_sql_mode;
 drop user if exists check_privilege_user;
 drop database if exists check_privilege_db;

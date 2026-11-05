@@ -1342,7 +1342,7 @@ int ObDbmsStatsUtils::check_can_async_gather_stats(sql::ObExecContext &ctx)
   if (OB_ISNULL(ctx.get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(raw_sql.append_fmt("SELECT 1 FROM dual WHERE EXISTS(SELECT 1 FROM %s);",
-                                        share::OB_ALL_VIRTUAL_OPT_STAT_GATHER_MONITOR_TNAME))) {
+                                        "opt_stat_gather_monitor()"))) {
   } else {
     
     SMART_VAR(ObMySQLProxy::MySQLResult, proxy_result) {
@@ -1576,7 +1576,7 @@ int ObDbmsStatsUtils::fetch_need_cancel_async_gather_stats_task(ObIAllocator &al
   if (OB_ISNULL(ctx.get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(raw_sql.append_fmt("SELECT task_id FROM %s WHERE type = %d;",
-                                        share::OB_ALL_VIRTUAL_OPT_STAT_GATHER_MONITOR_TNAME,
+                                        "opt_stat_gather_monitor()",
                                         ObOptStatGatherType::AYSNC_GATHER))) {
   } else {
     

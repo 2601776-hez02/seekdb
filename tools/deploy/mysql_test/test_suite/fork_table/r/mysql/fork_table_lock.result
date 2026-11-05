@@ -54,7 +54,7 @@ set ob_global_debug_sync = 'now signal signal_base';
 pending_fork_tasks
 0
 # 确认Fork完成后锁已释放
-select count(*) as fork_locks from oceanbase.__all_virtual_obj_lock;
+select count(*) as fork_locks from obj_lock();
 fork_locks
 0
 # 验证数据完整性
@@ -143,7 +143,7 @@ set ob_global_debug_sync = 'now signal signal_ab1';
 pending_fork_tasks
 0
 # 确认Fork完成后锁已释放
-select count(*) as fork_locks from oceanbase.__all_virtual_obj_lock;
+select count(*) as fork_locks from obj_lock();
 fork_locks
 0
 # 验证数据完整性
@@ -229,7 +229,7 @@ set ob_global_debug_sync = 'now signal signal_ab2';
 pending_fork_tasks
 0
 # 确认Fork完成后锁已释放
-select count(*) as fork_locks from oceanbase.__all_virtual_obj_lock;
+select count(*) as fork_locks from obj_lock();
 fork_locks
 0
 # 验证数据完整性

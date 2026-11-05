@@ -14,15 +14,17 @@ desc character_sets;
 desc collation_character_set_applicability;
 desc collations;
 desc columns;
-desc global_status;
 desc global_variables;
 desc key_column_usage;
 desc partitions;
 desc processlist;
+# Function output types retain the same string/numeric coercibility as table columns.
+select coercibility(user_client_ip) as ip_coercibility,
+       coercibility(user_client_port) as port_coercibility,
+       charset(concat(user_client_ip, ':', user_client_port)) as host_charset
+from processlist() where id = connection_id();
 desc schema_privileges;
 desc schemata;
-desc session_status;
-desc session_variables;
 desc statistics;
 desc table_constraints;
 desc table_privileges;
@@ -38,8 +40,6 @@ desc views;
 --source mysql_test/include/show_create_table_old_version.inc
  show create table  columns;
 --source mysql_test/include/show_create_table_old_version.inc
- show create table  global_status;
---source mysql_test/include/show_create_table_old_version.inc
  show create table  global_variables;
 --source mysql_test/include/show_create_table_old_version.inc
  show create table  key_column_usage;
@@ -51,10 +51,6 @@ desc views;
  show create table  schema_privileges;
 --source mysql_test/include/show_create_table_old_version.inc
  show create table  schemata;
---source mysql_test/include/show_create_table_old_version.inc
- show create table  session_status;
---source mysql_test/include/show_create_table_old_version.inc
- show create table  session_variables;
 --source mysql_test/include/show_create_table_old_version.inc
  show create table  statistics;
 --source mysql_test/include/show_create_table_old_version.inc

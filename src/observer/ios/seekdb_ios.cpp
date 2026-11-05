@@ -145,10 +145,9 @@ int run_runtime(ObServerOptions &options)
   lib::Worker::set_worker_to_thread_local(&worker);
   OB_LOGGER.set_log_level(DEFAULT_LOG_LEVEL);
   OB_LOGGER.set_file_name("log/seekdb.log", true, false);
-  ObPLogWriterCfg log_config;
   ObServer &server = ObServer::get_instance();
   bool server_initialized = false;
-  if (OB_FAIL(server.init(options, log_config))) {
+  if (OB_FAIL(server.init(options))) {
   } else {
     server_initialized = true;
     if (OB_FAIL(server.start())) {

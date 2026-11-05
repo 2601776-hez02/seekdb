@@ -252,9 +252,9 @@ int ObDBMSSchedJobUtils::stop_dbms_sched_job(
       }
     }
     if (OB_SUCC(ret)) {
-      // The virtual table reports jobs running in this process.
+      // The function reports jobs running in this process.
       if (OB_FAIL(sql.append_fmt("select session_id from %s where job_name = \'%.*s\'",
-        OB_ALL_VIRTUAL_SCHEDULER_RUNNING_JOB_TNAME, job_info.job_name_.length(),job_info.job_name_.ptr()))) {
+        "scheduler_running_job()", job_info.job_name_.length(),job_info.job_name_.ptr()))) {
       } else {
         SMART_VAR(ObMySQLProxy::MySQLResult, result) {
           if (OB_FAIL(sql_client.read(result, sql.ptr()))) {

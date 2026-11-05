@@ -22,22 +22,22 @@
 #include "sql/optimizer/stat/ob_dbms_stats_utils.h"
 #include "query/optimizer/stat/ob_optimizer_stat_service.h"
 
-#define GET_COMPRESSED_INFO_SQL "select sum(occupy_size)/sum(original_size) as compression_ratio from oceanbase.__all_virtual_tablet_sstable_macro_info "\
+#define GET_COMPRESSED_INFO_SQL "select sum(occupy_size)/sum(original_size) as compression_ratio from tablet_sstable_macro_info() "\
                                 "where tablet_id in (%.*s);"\
 
 #define GET_TABLET_INFO_SQL "select case when tablet_id is null then 0 else tablet_id end as tablet_id,"\
                                   " sum(original_size)/sum(row_count) as row_len,"\
                                   " sum(row_count) as row_count, "\
                                   " sum(occupy_size)/sum(original_size) as compression_ratio "\
-                            "from __all_virtual_tablet_sstable_macro_info "\
+                            "from tablet_sstable_macro_info() "\
                             "where tablet_id in (%.*s) "\
-                            "group by __all_virtual_tablet_sstable_macro_info.tablet_id with rollup;"
+                            "group by tablet_sstable_macro_info.tablet_id with rollup;"
 
 
 #define GET_TABLET_SIZE_SQL "select case when tablet_id is null then 0 else tablet_id end as tablet_id, sum(occupy_size) as tablet_size "\
-                            "from __all_virtual_tablet_pointer_status "\
+                            "from tablet_pointer_status() "\
                             "where tablet_id in (%.*s) "\
-                            "group by __all_virtual_tablet_pointer_status.tablet_id;"
+                            "group by tablet_pointer_status.tablet_id;"
 
 namespace oceanbase
 {

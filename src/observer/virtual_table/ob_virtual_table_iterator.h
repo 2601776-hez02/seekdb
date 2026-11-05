@@ -21,7 +21,7 @@
 #include "common/row/ob_row_iterator.h"
 #include "common/ob_common_types.h"
 #include "share/object/ob_obj_cast.h"
-#include "share/schema/ob_column_schema.h"
+#include "sql/table_function/table_function.h"
 #include "sql/ob_sql_context.h"
 
 namespace oceanbase
@@ -51,15 +51,12 @@ public:
       output_column_ids_(),
       reserved_column_cnt_(0),
       schema_guard_(NULL),
-      table_schema_(NULL),
-      index_schema_(NULL),
+      definition_(NULL),
+      timeout_(INT64_MAX),
       cur_row_(),
       session_(NULL),
       row_calc_buf_("VTITER_CALC_BUF"),
-      convert_alloc_(),
       cast_ctx_(),
-      convert_row_(),
-      need_convert_(false),
       scan_param_(NULL)
     {}
   virtual ~ObVirtualTableIterator() {}
@@ -69,8 +66,10 @@ public:
   inline int set_output_column_ids(const common::ObIArray<uint64_t> &column_ids);
   inline void set_schema_guard(share::schema::ObSchemaGetterGuard *schema_guard);
   inline share::schema::ObSchemaGetterGuard *get_schema_guard() const;
-  inline void set_table_schema(const share::schema::ObTableSchema *table_schema);
-  inline void set_index_schema(const share::schema::ObTableSchema *index_schema);
+  void set_function_definition(const sql::TableFunctionDescriptor *definition) { definition_ = definition; }
+  void set_timeout(int64_t timeout) { timeout_ = timeout; }
+  const sql::TableFunctionColumn *get_output_column(uint64_t column_id) const;
+  const sql::TableFunctionColumn *get_output_column(const char *name) const;
   inline void set_scan_param(const ObVTableScanParam *scan_param) { scan_param_ = scan_param; }
   inline const ObVTableScanParam *get_scan_param() { return scan_param_; }
   virtual int open();
@@ -82,7 +81,6 @@ public:
   virtual int close();
   virtual int inner_close() { return common::OB_SUCCESS; }
   virtual inline void set_session(sql::ObSQLSessionInfo *session) { session_ = session; }
-  virtual inline void set_convert_flag() { need_convert_ = true; }
   virtual inline int set_key_ranges(const common::ObIArray<common::ObNewRange> &key_ranges)
   {
     return key_ranges_.assign(key_ranges);
@@ -94,14 +92,6 @@ public:
   bool is_reverse_scan() const { return common::ObQueryFlag::Reverse == scan_flag_.scan_order_; }
   VIRTUAL_TO_STRING_KV(K_(output_column_ids));
 private:
-  int init_convert_ctx();
-  int convert_key_ranges();
-  int get_key_cols(common::ObIArray<const share::schema::ObColumnSchemaV2*> &key_cols);
-  int convert_key(const common::ObRowkey &src, common::ObRowkey &dst, common::ObIArray<const share::schema::ObColumnSchemaV2*> &key_cols);
-  int free_convert_ctx();
-  void reset_convert_ctx();
-  int convert_output_row(ObNewRow *&cur_row);
-  int get_all_columns_schema();
   int init_sql_schema_guard_();
 protected:
   common::ObIAllocator *allocator_;
@@ -109,21 +99,16 @@ protected:
   int64_t reserved_column_cnt_;
   share::schema::ObSchemaGetterGuard *schema_guard_;
   sql::ObSqlSchemaGuard sql_schema_guard_;
-  const share::schema::ObTableSchema *table_schema_;
-  const share::schema::ObTableSchema *index_schema_;
+  const sql::TableFunctionDescriptor *definition_;
+  int64_t timeout_;
   common::ObNewRow cur_row_;
   common::ObQueryFlag scan_flag_;
   sql::ObSQLSessionInfo *session_;
   common::ObSEArray<common::ObNewRange, 16> key_ranges_;
-  common::ObSEArray<common::ObNewRange, 16> saved_key_ranges_;
   common::ObArenaAllocator row_calc_buf_;
-  
+
 private:
-  common::ObArenaAllocator convert_alloc_;
   common::ObCastCtx cast_ctx_;
-  common::ObNewRow convert_row_;
-  bool need_convert_;
-  common::ObSEArray<const share::schema::ObColumnSchemaV2 *, 16> cols_schema_;
   const ObVTableScanParam *scan_param_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObVirtualTableIterator);
@@ -155,16 +140,6 @@ void ObVirtualTableIterator::set_schema_guard(share::schema::ObSchemaGetterGuard
 share::schema::ObSchemaGetterGuard * ObVirtualTableIterator::get_schema_guard() const
 {
   return schema_guard_;
-}
-
-void ObVirtualTableIterator::set_table_schema(const share::schema::ObTableSchema *table_schema)
-{
-  table_schema_ = table_schema;
-}
-
-void ObVirtualTableIterator::set_index_schema(const share::schema::ObTableSchema *index_schema)
-{
-  index_schema_ = index_schema;
 }
 
 }//common

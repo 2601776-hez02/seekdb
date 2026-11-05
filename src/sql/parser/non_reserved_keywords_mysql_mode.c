@@ -310,6 +310,7 @@ static const NonReservedKeyword Mysql_none_reserved_keywords[] =
   {"full", FULL},
   {"fulltext", FULLTEXT},
   {"function", FUNCTION},
+  {"functions", FUNCTIONS},
   {"following", FOLLOWING},
   {"general", GENERAL},
   {"generated", GENERATED},

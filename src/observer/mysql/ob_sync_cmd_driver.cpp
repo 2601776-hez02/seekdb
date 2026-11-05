@@ -23,6 +23,7 @@
 #include "observer/mysql/obmp_query.h"
 #include "rpc/obmysql/packet/ompk_row.h"
 #include "sql/engine/expr/ob_expr_sql_udt_utils.h"
+#include "sql/engine/expr/pl_composite_client_output.h"
 
 namespace oceanbase
 {
@@ -232,7 +233,8 @@ int ObSyncCmdDriver::response_query_result(ObMySQLResultSet &result)
     ObNewRow *tmp_row = const_cast<ObNewRow*>(row);
     for (int64_t i = 0; OB_SUCC(ret) && i < tmp_row->get_count(); i++) {
       ObObj& value = tmp_row->get_cell(i);
-      if (ob_is_string_tc(value.get_type()) && CS_TYPE_INVALID != value.get_collation_type()) {
+      if (OB_FAIL(PlCompositeClientOutput::convert(value, result))) {
+      } else if (ob_is_string_tc(value.get_type()) && CS_TYPE_INVALID != value.get_collation_type()) {
         OZ(convert_string_value_charset(value, result, charset_type));
       } else if (ob_is_text_tc(value.get_type())
                 && OB_FAIL(convert_text_value_charset(value, result, charset_type))) {

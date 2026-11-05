@@ -1,0 +1,12 @@
+--disable_warnings
+--exec rm -rf /tmp/seekdb_file_sql
+--exec mkdir -p /tmp/seekdb_file_sql
+--exec cp -f mysql_test/test_suite/file_sql/data/basic.csv /tmp/seekdb_file_sql/basic.csv
+--exec cp -f mysql_test/test_suite/file_sql/data/quoted.csv /tmp/seekdb_file_sql/quoted.csv
+--exec cp -f mysql_test/test_suite/file_sql/data/sales.csv /tmp/seekdb_file_sql/sales.csv
+--exec cp -f mysql_test/test_suite/file_sql/data/people.jsonl /tmp/seekdb_file_sql/people.jsonl
+--exec cp -f mysql_test/test_suite/file_sql/data/orders.jsonl /tmp/seekdb_file_sql/orders.jsonl
+--exec cp -f mysql_test/test_suite/file_sql/data/basic.parquet /tmp/seekdb_file_sql/basic.parquet
+--exec cp -f mysql_test/test_suite/file_sql/data/types.csv /tmp/seekdb_file_sql/types.csv
+--exec cp -f mysql_test/test_suite/file_sql/data/cities.csv /tmp/seekdb_file_sql/cities.csv
+--enable_warnings

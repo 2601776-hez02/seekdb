@@ -79,7 +79,7 @@ let $tablet_cnt = `select count(*) as c from oceanbase.__all_tablet_to_table whe
 let $wait_timeout= 30;
 let $wait_condition=
   select /*+query_timeout(100000000)*/ count(distinct tablet_id) = $tablet_cnt
-  from oceanbase.__all_virtual_tablet_compaction_history
+  from tablet_compaction_history()
   where tablet_id in (
     select tablet_id from oceanbase.__all_tablet_to_table where table_id = $table_id
   )

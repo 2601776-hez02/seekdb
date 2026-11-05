@@ -1,0 +1,183 @@
+# Table function contracts: binding defines columns before any scan runs.
+--disable_warnings
+DROP TABLE IF EXISTS tf_inputs, tf_hybrid;
+DROP FUNCTION IF EXISTS memory_info;
+DROP FUNCTION IF EXISTS tf_binding_probe;
+--enable_warnings
+
+--echo # Declared names, positional aliases and SELECT labels
+SELECT * FROM generator(3);
+SELECT * FROM UNNEST([1, 2]);
+SELECT * FROM UNNEST([1, 2], ['a']);
+SELECT * FROM UNNEST([1, 2], ['a']) AS t(n);
+--enable_metadata
+SELECT t.n AS value FROM UNNEST([1, 2]) AS t(n);
+SELECT * FROM generator(0);
+--disable_metadata
+SELECT t.n AS value, t.n AS value FROM UNNEST([1]) AS t(n);
+--enable_ps_protocol
+SELECT * FROM generator(2);
+SELECT * FROM UNNEST([1, 2], ['a']) AS t(n);
+--disable_ps_protocol
+--error 1582
+SELECT * FROM UNNEST([1]) AS t(a, b);
+--error 1060
+SELECT * FROM UNNEST([1], [2]) AS t(a, A);
+--error 1060
+SELECT * FROM UNNEST([1], [2]) AS t(unnest_2);
+--error 1582
+SELECT * FROM generator();
+--error 1582
+SELECT * FROM generator(1, 2);
+--error 1305
+SELECT * FROM no_such_table_function();
+--error 1305
+SELECT * FROM ABS(1);
+--error 3064
+SELECT * FROM UNNEST(NULL);
+--error 3064
+SELECT * FROM UNNEST(1);
+--error 1064
+SELECT * FROM TABLE(generator(2));
+
+--echo # Typed NULL, empty, NULL elements and nested values
+CREATE TABLE tf_inputs(id INT PRIMARY KEY, n INT, tags ARRAY(INT));
+INSERT INTO tf_inputs VALUES (1, 2, [10, 20]), (2, 0, '[]'), (3, 1, NULL),
+                            (4, 3, [NULL, 40]);
+SELECT COUNT(*) AS rows_seen FROM tf_inputs AS u, UNNEST(u.tags) AS t(tag) WHERE u.id = 2;
+SELECT COUNT(*) AS rows_seen FROM tf_inputs AS u, UNNEST(u.tags) AS t(tag) WHERE u.id = 3;
+SELECT u.id, t.tag FROM tf_inputs AS u CROSS JOIN UNNEST(u.tags) AS t(tag)
+ORDER BY u.id, t.tag;
+SELECT u.id, t.tag FROM tf_inputs AS u LEFT JOIN UNNEST(u.tags) AS t(tag) ON TRUE
+ORDER BY u.id, t.tag;
+--error 1109
+SELECT * FROM UNNEST(u.tags) AS t(tag), tf_inputs AS u;
+SELECT * FROM UNNEST([1, NULL, 3], ['a', 'b']);
+SELECT * FROM UNNEST([[1, 2], [3]]);
+SELECT child.value FROM UNNEST([[1, 2], [3]]) AS parent(items)
+CROSS JOIN UNNEST(parent.items) AS child(value) ORDER BY child.value;
+SELECT COUNT(*) AS rows_seen FROM UNNEST([1, 2], [3]);
+SELECT t.unnest_2 FROM UNNEST([1, 2], [3]) AS t WHERE t.unnest_1 = 2;
+
+--echo # Execution parameters, repeated execution and lateral rescans
+SELECT * FROM generator(1 + 2);
+SET @tf_calls = 0;
+SELECT * FROM generator((@tf_calls := @tf_calls + 3));
+SELECT @tf_calls AS evaluations;
+SELECT COUNT(*) AS rows_seen FROM generator(0);
+SELECT COUNT(*) AS rows_seen FROM generator(-2);
+--error 1210
+SELECT * FROM generator(NULL);
+SET @tf_n = 2;
+SELECT * FROM generator(@tf_n);
+SET @tf_n = 1;
+SELECT * FROM generator(@tf_n);
+PREPARE tf_generator FROM 'SELECT * FROM generator(?)';
+SET @tf_n = 3;
+EXECUTE tf_generator USING @tf_n;
+SET @tf_n = 1;
+EXECUTE tf_generator USING @tf_n;
+SET @tf_n = 0;
+EXECUTE tf_generator USING @tf_n;
+DEALLOCATE PREPARE tf_generator;
+SELECT u.id, g.generator FROM tf_inputs AS u CROSS JOIN generator(u.n) AS g
+ORDER BY u.id, g.generator;
+SELECT u.id, g.generator FROM tf_inputs AS u LEFT JOIN generator(u.n) AS g ON TRUE
+ORDER BY u.id, g.generator;
+SELECT * FROM generator(1000000) LIMIT 1;
+SELECT * FROM generator(2);
+
+--echo # Structured JSON syntax shares aliases, projection and lateral execution
+SELECT * FROM JSON_TABLE('[{"x":1},{},{"x":3}]', '$[*]' COLUMNS (
+  ord FOR ORDINALITY, x INT PATH '$.x' DEFAULT 9 ON EMPTY,
+  present INT EXISTS PATH '$.x')) AS j;
+SELECT * FROM JSON_TABLE('[{"x":1},{"x":2}]', '$[*]' COLUMNS (
+  ord FOR ORDINALITY, x INT PATH '$.x')) AS j(position);
+SELECT * FROM JSON_TABLE('[{"name":"a","items":[2,3]},{"name":"b","items":[]}]',
+  '$[*]' COLUMNS (name VARCHAR(10) PATH '$.name',
+  NESTED PATH '$.items[*]' COLUMNS (item INT PATH '$'))) AS j;
+SELECT * FROM JSON_TABLE('[{}, {"x": {}}, {"x": 7}]', '$[*]' COLUMNS (
+  x INT PATH '$.x' DEFAULT 5 ON EMPTY DEFAULT 6 ON ERROR)) AS j;
+SELECT COUNT(*) AS rows_seen FROM JSON_TABLE('[1,2,3]', '$[*]' COLUMNS (x INT PATH '$')) AS j;
+SELECT j.x FROM JSON_TABLE('[{"x":1,"y":2}]', '$[*]' COLUMNS (
+  x INT PATH '$.x', y INT PATH '$.y')) AS j;
+--error 3966
+SELECT * FROM JSON_TABLE('[{}]', '$[*]' COLUMNS (x INT PATH '$.x' ERROR ON EMPTY)) AS j;
+--error 3966
+SELECT COUNT(*) FROM JSON_TABLE('[{}]', '$[*]' COLUMNS (x INT PATH '$.x' ERROR ON EMPTY)) AS j;
+--error 3166
+SELECT * FROM JSON_TABLE('[{"x":{}}]', '$[*]' COLUMNS (x INT PATH '$.x' ERROR ON ERROR)) AS j;
+--error 5447
+SELECT * FROM JSON_TABLE('not json', '$[*]' COLUMNS (x INT PATH '$')) AS j;
+SELECT u.id, j.x FROM tf_inputs AS u CROSS JOIN JSON_TABLE(
+  CONCAT('[', u.id, ',', u.n, ']'), '$[*]' COLUMNS (x INT PATH '$')) AS j ORDER BY u.id, j.x;
+SET @tf_json_calls = 0;
+SELECT u.id, j.x FROM (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3) AS u
+CROSS JOIN JSON_TABLE(CONCAT('[', (@tf_json_calls := @tf_json_calls + 1 + u.id * 0), ']'),
+  '$[*]' COLUMNS (x INT PATH '$')) AS j ORDER BY u.id;
+SELECT @tf_json_calls AS document_evaluations;
+SET @tf_json_calls = 0;
+SELECT u.id, j.x FROM (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3) AS u
+CROSS JOIN JSON_TABLE(JSON_ARRAY((@tf_json_calls := @tf_json_calls + 1) + u.id * 0, 99),
+  '$[*]' COLUMNS (x INT PATH '$')) AS j ORDER BY u.id, j.x;
+SELECT @tf_json_calls AS document_evaluations;
+SET @tf_json_calls = 0;
+SELECT u.id, j.x FROM (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3) AS u
+LEFT JOIN JSON_TABLE(JSON_REMOVE(JSON_ARRAY((@tf_json_calls := @tf_json_calls + 1) + u.id * 0),
+  IF(u.id = 2, '$[0]', '$[99]')), '$[*]' COLUMNS (x INT PATH '$')) AS j ON TRUE ORDER BY u.id, j.x;
+SELECT @tf_json_calls AS document_evaluations;
+--error 1060
+SELECT * FROM JSON_TABLE('[1]', '$[*]' COLUMNS (a INT PATH '$', b INT PATH '$')) AS j(x, X);
+--error 1582
+SELECT * FROM JSON_TABLE('[1]', '$[*]' COLUMNS (a INT PATH '$')) AS j(x, y);
+
+--echo # DESCRIBE binds columns and never starts a scan
+DESCRIBE TABLE FUNCTION generator;
+DESCRIBE TABLE FUNCTION unnest;
+DESCRIBE TABLE FUNCTION unnest([1, 2], ['a']) AS t(n);
+DESCRIBE TABLE FUNCTION generator(NULL);
+DESCRIBE TABLE FUNCTION JSON_TABLE('[1]', '$[*]' COLUMNS (a INT PATH '$')) AS j(x);
+--error 1060
+DESCRIBE TABLE FUNCTION unnest([1], [2]) AS t(x, X);
+--error 1582
+DESCRIBE TABLE FUNCTION generator();
+--error 1305
+DESCRIBE TABLE FUNCTION no_such_table_function;
+--error 1109
+DESCRIBE TABLE FUNCTION unnest(tf_missing.tags);
+
+--echo # Ordinary functions and table functions use independent namespaces
+CREATE FUNCTION memory_info() RETURNS INT RETURN 77;
+SELECT memory_info() AS scalar_value;
+SELECT COUNT(*) >= 0 AS table_function_ran FROM memory_info();
+DROP FUNCTION memory_info;
+
+--echo # Query expansion binds structure without evaluating user functions
+CREATE TABLE tf_hybrid(id INT, n INT);
+INSERT INTO tf_hybrid SELECT id, n FROM tf_inputs;
+SELECT * FROM hybrid_search('tf_hybrid', '{"_source":["id","n"],"size":10}') AS h
+ORDER BY h.id;
+SELECT * FROM hybrid_search(CONCAT('tf_', 'hybrid'),
+  CONCAT('{"_source":["id",', '"n"],"size":10}')) AS h(first) ORDER BY h.first;
+PREPARE tf_hybrid_fixed FROM 'SELECT * FROM hybrid_search(CONCAT(''tf_'', ''hybrid''), ''{"_source":["id"],"size":10}'') AS h ORDER BY h.id';
+EXECUTE tf_hybrid_fixed;
+INSERT INTO tf_hybrid VALUES (5, 9);
+EXECUTE tf_hybrid_fixed;
+DELETE FROM tf_hybrid WHERE id = 5;
+DEALLOCATE PREPARE tf_hybrid_fixed;
+SET @tf_config = '{"_source":["id"],"size":10}';
+SELECT * FROM hybrid_search('tf_hybrid', @tf_config) AS h ORDER BY 1;
+SET @tf_config = '{"_source":["n"],"size":10}';
+SELECT * FROM hybrid_search('tf_hybrid', @tf_config) AS h ORDER BY 1;
+--error 1235
+PREPARE tf_hybrid FROM 'SELECT * FROM hybrid_search(?, ''{}'') AS h';
+--error 1235
+PREPARE tf_hybrid FROM 'SELECT * FROM hybrid_search(''tf_hybrid'', @tf_config) AS h';
+CREATE FUNCTION tf_binding_probe() RETURNS VARCHAR(20) DETERMINISTIC
+RETURN (@tf_side_effect := @tf_side_effect + 1);
+SET @tf_side_effect = 0;
+--error 1235
+DESCRIBE TABLE FUNCTION hybrid_search('tf_hybrid', tf_binding_probe());
+SELECT @tf_side_effect AS calls_during_binding;
+DROP FUNCTION tf_binding_probe;
+DROP TABLE tf_inputs, tf_hybrid;

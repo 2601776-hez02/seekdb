@@ -1,0 +1,372 @@
+DROP TABLE IF EXISTS tf_inputs, tf_hybrid;
+DROP FUNCTION IF EXISTS memory_info;
+DROP FUNCTION IF EXISTS tf_binding_probe;
+# Declared names, positional aliases and SELECT labels
+SELECT * FROM generator(3);
+generator
+1
+2
+3
+SELECT * FROM UNNEST([1, 2]);
+unnest
+1
+2
+SELECT * FROM UNNEST([1, 2], ['a']);
+unnest_1	unnest_2
+1	a
+2	NULL
+SELECT * FROM UNNEST([1, 2], ['a']) AS t(n);
+n	unnest_2
+1	a
+2	NULL
+SELECT t.n AS value FROM UNNEST([1, 2]) AS t(n);
+Catalog	Database	Table	Table_alias	Column	Column_alias	Type	Length	Max length	Is_null	Flags	Decimals	Charsetnr
+def		unnest	t	n	value	8	20	1	Y	32768	0	63
+value
+1
+2
+SELECT * FROM generator(0);
+Catalog	Database	Table	Table_alias	Column	Column_alias	Type	Length	Max length	Is_null	Flags	Decimals	Charsetnr
+def		generator	generator	generator	generator	8	20	0	N	32769	0	63
+generator
+SELECT t.n AS value, t.n AS value FROM UNNEST([1]) AS t(n);
+value	value
+1	1
+SELECT * FROM generator(2);
+generator
+1
+2
+SELECT * FROM UNNEST([1, 2], ['a']) AS t(n);
+n	unnest_2
+1	a
+2	NULL
+SELECT * FROM UNNEST([1]) AS t(a, b);
+ERROR 42000: Incorrect parameter count in the call to native function 'UNNEST'
+SELECT * FROM UNNEST([1], [2]) AS t(a, A);
+ERROR 42S21: Duplicate column name 'A'
+SELECT * FROM UNNEST([1], [2]) AS t(unnest_2);
+ERROR 42S21: Duplicate column name 'unnest_2'
+SELECT * FROM generator();
+ERROR 42000: Incorrect parameter count in the call to native function 'generator'
+SELECT * FROM generator(1, 2);
+ERROR 42000: Incorrect parameter count in the call to native function 'generator'
+SELECT * FROM no_such_table_function();
+ERROR 42000: TABLE FUNCTION no_such_table_function does not exist
+SELECT * FROM ABS(1);
+ERROR 42000: TABLE FUNCTION ABS does not exist
+SELECT * FROM UNNEST(NULL);
+ERROR HY000: invalid type given for an argument
+SELECT * FROM UNNEST(1);
+ERROR HY000: invalid type given for an argument
+SELECT * FROM TABLE(generator(2));
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your OceanBase version for the right syntax to use near 'TABLE(generator(2))' at line 1
+# Typed NULL, empty, NULL elements and nested values
+CREATE TABLE tf_inputs(id INT PRIMARY KEY, n INT, tags ARRAY(INT));
+INSERT INTO tf_inputs VALUES (1, 2, [10, 20]), (2, 0, '[]'), (3, 1, NULL),
+(4, 3, [NULL, 40]);
+SELECT COUNT(*) AS rows_seen FROM tf_inputs AS u, UNNEST(u.tags) AS t(tag) WHERE u.id = 2;
+rows_seen
+0
+SELECT COUNT(*) AS rows_seen FROM tf_inputs AS u, UNNEST(u.tags) AS t(tag) WHERE u.id = 3;
+rows_seen
+0
+SELECT u.id, t.tag FROM tf_inputs AS u CROSS JOIN UNNEST(u.tags) AS t(tag)
+ORDER BY u.id, t.tag;
+id	tag
+1	10
+1	20
+4	NULL
+4	40
+SELECT u.id, t.tag FROM tf_inputs AS u LEFT JOIN UNNEST(u.tags) AS t(tag) ON TRUE
+ORDER BY u.id, t.tag;
+id	tag
+1	10
+1	20
+2	NULL
+3	NULL
+4	NULL
+4	40
+SELECT * FROM UNNEST(u.tags) AS t(tag), tf_inputs AS u;
+ERROR 42S02: Unknown table 'u' in from clause
+SELECT * FROM UNNEST([1, NULL, 3], ['a', 'b']);
+unnest_1	unnest_2
+1	a
+NULL	b
+3	NULL
+SELECT * FROM UNNEST([[1, 2], [3]]);
+unnest
+[1,2]
+[3]
+SELECT child.value FROM UNNEST([[1, 2], [3]]) AS parent(items)
+CROSS JOIN UNNEST(parent.items) AS child(value) ORDER BY child.value;
+value
+1
+2
+3
+SELECT COUNT(*) AS rows_seen FROM UNNEST([1, 2], [3]);
+rows_seen
+2
+SELECT t.unnest_2 FROM UNNEST([1, 2], [3]) AS t WHERE t.unnest_1 = 2;
+unnest_2
+NULL
+# Execution parameters, repeated execution and lateral rescans
+SELECT * FROM generator(1 + 2);
+generator
+1
+2
+3
+SET @tf_calls = 0;
+SELECT * FROM generator((@tf_calls := @tf_calls + 3));
+generator
+1
+2
+3
+SELECT @tf_calls AS evaluations;
+evaluations
+3
+SELECT COUNT(*) AS rows_seen FROM generator(0);
+rows_seen
+0
+SELECT COUNT(*) AS rows_seen FROM generator(-2);
+rows_seen
+0
+SELECT * FROM generator(NULL);
+ERROR HY000: Incorrect arguments to generator requires a non-NULL integer
+SET @tf_n = 2;
+SELECT * FROM generator(@tf_n);
+generator
+1
+2
+SET @tf_n = 1;
+SELECT * FROM generator(@tf_n);
+generator
+1
+PREPARE tf_generator FROM 'SELECT * FROM generator(?)';
+SET @tf_n = 3;
+EXECUTE tf_generator USING @tf_n;
+generator
+1
+2
+3
+SET @tf_n = 1;
+EXECUTE tf_generator USING @tf_n;
+generator
+1
+SET @tf_n = 0;
+EXECUTE tf_generator USING @tf_n;
+generator
+DEALLOCATE PREPARE tf_generator;
+SELECT u.id, g.generator FROM tf_inputs AS u CROSS JOIN generator(u.n) AS g
+ORDER BY u.id, g.generator;
+id	generator
+1	1
+1	2
+3	1
+4	1
+4	2
+4	3
+SELECT u.id, g.generator FROM tf_inputs AS u LEFT JOIN generator(u.n) AS g ON TRUE
+ORDER BY u.id, g.generator;
+id	generator
+1	1
+1	2
+2	NULL
+3	1
+4	1
+4	2
+4	3
+SELECT * FROM generator(1000000) LIMIT 1;
+generator
+1
+SELECT * FROM generator(2);
+generator
+1
+2
+# Structured JSON syntax shares aliases, projection and lateral execution
+SELECT * FROM JSON_TABLE('[{"x":1},{},{"x":3}]', '$[*]' COLUMNS (
+ord FOR ORDINALITY, x INT PATH '$.x' DEFAULT 9 ON EMPTY,
+present INT EXISTS PATH '$.x')) AS j;
+ord	x	present
+1	1	1
+2	9	0
+3	3	1
+SELECT * FROM JSON_TABLE('[{"x":1},{"x":2}]', '$[*]' COLUMNS (
+ord FOR ORDINALITY, x INT PATH '$.x')) AS j(position);
+position	x
+1	1
+2	2
+SELECT * FROM JSON_TABLE('[{"name":"a","items":[2,3]},{"name":"b","items":[]}]',
+'$[*]' COLUMNS (name VARCHAR(10) PATH '$.name',
+NESTED PATH '$.items[*]' COLUMNS (item INT PATH '$'))) AS j;
+name	item
+a	2
+a	3
+b	NULL
+SELECT * FROM JSON_TABLE('[{}, {"x": {}}, {"x": 7}]', '$[*]' COLUMNS (
+x INT PATH '$.x' DEFAULT 5 ON EMPTY DEFAULT 6 ON ERROR)) AS j;
+x
+5
+6
+7
+SELECT COUNT(*) AS rows_seen FROM JSON_TABLE('[1,2,3]', '$[*]' COLUMNS (x INT PATH '$')) AS j;
+rows_seen
+3
+SELECT j.x FROM JSON_TABLE('[{"x":1,"y":2}]', '$[*]' COLUMNS (
+x INT PATH '$.x', y INT PATH '$.y')) AS j;
+x
+1
+SELECT * FROM JSON_TABLE('[{}]', '$[*]' COLUMNS (x INT PATH '$.x' ERROR ON EMPTY)) AS j;
+ERROR 22035: No value was found by 'json_value' on the specified path.
+SELECT COUNT(*) FROM JSON_TABLE('[{}]', '$[*]' COLUMNS (x INT PATH '$.x' ERROR ON EMPTY)) AS j;
+ERROR 22035: No value was found by 'json_value' on the specified path.
+SELECT * FROM JSON_TABLE('[{"x":{}}]', '$[*]' COLUMNS (x INT PATH '$.x' ERROR ON ERROR)) AS j;
+ERROR 42000: Can't store an array or an object in the scalar %s column 'jpath'
+SELECT * FROM JSON_TABLE('not json', '$[*]' COLUMNS (x INT PATH '$')) AS j;
+ERROR 42000: JSON syntax error
+SELECT u.id, j.x FROM tf_inputs AS u CROSS JOIN JSON_TABLE(
+CONCAT('[', u.id, ',', u.n, ']'), '$[*]' COLUMNS (x INT PATH '$')) AS j ORDER BY u.id, j.x;
+id	x
+1	1
+1	2
+2	0
+2	2
+3	1
+3	3
+4	3
+4	4
+SET @tf_json_calls = 0;
+SELECT u.id, j.x FROM (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3) AS u
+CROSS JOIN JSON_TABLE(CONCAT('[', (@tf_json_calls := @tf_json_calls + 1 + u.id * 0), ']'),
+'$[*]' COLUMNS (x INT PATH '$')) AS j ORDER BY u.id;
+id	x
+1	1
+2	2
+3	3
+SELECT @tf_json_calls AS document_evaluations;
+document_evaluations
+3
+SET @tf_json_calls = 0;
+SELECT u.id, j.x FROM (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3) AS u
+CROSS JOIN JSON_TABLE(JSON_ARRAY((@tf_json_calls := @tf_json_calls + 1) + u.id * 0, 99),
+'$[*]' COLUMNS (x INT PATH '$')) AS j ORDER BY u.id, j.x;
+id	x
+1	1
+1	99
+2	2
+2	99
+3	3
+3	99
+SELECT @tf_json_calls AS document_evaluations;
+document_evaluations
+3
+SET @tf_json_calls = 0;
+SELECT u.id, j.x FROM (SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3) AS u
+LEFT JOIN JSON_TABLE(JSON_REMOVE(JSON_ARRAY((@tf_json_calls := @tf_json_calls + 1) + u.id * 0),
+IF(u.id = 2, '$[0]', '$[99]')), '$[*]' COLUMNS (x INT PATH '$')) AS j ON TRUE ORDER BY u.id, j.x;
+id	x
+1	1
+2	NULL
+3	3
+SELECT @tf_json_calls AS document_evaluations;
+document_evaluations
+3
+SELECT * FROM JSON_TABLE('[1]', '$[*]' COLUMNS (a INT PATH '$', b INT PATH '$')) AS j(x, X);
+ERROR 42S21: Duplicate column name 'X'
+SELECT * FROM JSON_TABLE('[1]', '$[*]' COLUMNS (a INT PATH '$')) AS j(x, y);
+ERROR 42000: Incorrect parameter count in the call to native function 'json_table'
+# DESCRIBE binds columns and never starts a scan
+DESCRIBE TABLE FUNCTION generator;
+signature	column_position	column_name	column_type	description
+generator(n)	1	generator	bigint	Integers from 1 to n.
+DESCRIBE TABLE FUNCTION unnest;
+signature	column_position	column_name	column_type	description
+unnest(collection, ...)	NULL	NULL	NULL	Each collection element becomes a row; records supply top-level fields; inputs zip with NULL padding.
+DESCRIBE TABLE FUNCTION unnest([1, 2], ['a']) AS t(n);
+signature	column_position	column_name	column_type	description
+unnest(collection, ...)	1	n	bigint(20)	Each collection element becomes a row; records supply top-level fields; inputs zip with NULL padding.
+unnest(collection, ...)	2	unnest_2	varchar(262144)	Each collection element becomes a row; records supply top-level fields; inputs zip with NULL padding.
+DESCRIBE TABLE FUNCTION generator(NULL);
+signature	column_position	column_name	column_type	description
+generator(n)	1	generator	bigint	Integers from 1 to n.
+DESCRIBE TABLE FUNCTION JSON_TABLE('[1]', '$[*]' COLUMNS (a INT PATH '$')) AS j(x);
+signature	column_position	column_name	column_type	description
+json_table(document, path COLUMNS (...))	1	x	int(11)	Columns are declared by COLUMNS.
+DESCRIBE TABLE FUNCTION unnest([1], [2]) AS t(x, X);
+ERROR 42S21: Duplicate column name 'X'
+DESCRIBE TABLE FUNCTION generator();
+ERROR 42000: Incorrect parameter count in the call to native function 'generator'
+DESCRIBE TABLE FUNCTION no_such_table_function;
+ERROR 42000: TABLE FUNCTION no_such_table_function does not exist
+DESCRIBE TABLE FUNCTION unnest(tf_missing.tags);
+ERROR 42S02: Unknown table 'tf_missing' in from clause
+# Ordinary functions and table functions use independent namespaces
+CREATE FUNCTION memory_info() RETURNS INT RETURN 77;
+SELECT memory_info() AS scalar_value;
+scalar_value
+77
+SELECT COUNT(*) >= 0 AS table_function_ran FROM memory_info();
+table_function_ran
+1
+DROP FUNCTION memory_info;
+# Query expansion binds structure without evaluating user functions
+CREATE TABLE tf_hybrid(id INT, n INT);
+INSERT INTO tf_hybrid SELECT id, n FROM tf_inputs;
+SELECT * FROM hybrid_search('tf_hybrid', '{"_source":["id","n"],"size":10}') AS h
+ORDER BY h.id;
+id	n	_score
+1	2	1
+2	0	1
+3	1	1
+4	3	1
+SELECT * FROM hybrid_search(CONCAT('tf_', 'hybrid'),
+CONCAT('{"_source":["id",', '"n"],"size":10}')) AS h(first) ORDER BY h.first;
+first	n	_score
+1	2	1
+2	0	1
+3	1	1
+4	3	1
+PREPARE tf_hybrid_fixed FROM 'SELECT * FROM hybrid_search(CONCAT(''tf_'', ''hybrid''), ''{"_source":["id"],"size":10}'') AS h ORDER BY h.id';
+EXECUTE tf_hybrid_fixed;
+id	_score
+1	1
+2	1
+3	1
+4	1
+INSERT INTO tf_hybrid VALUES (5, 9);
+EXECUTE tf_hybrid_fixed;
+id	_score
+1	1
+2	1
+3	1
+4	1
+5	1
+DELETE FROM tf_hybrid WHERE id = 5;
+DEALLOCATE PREPARE tf_hybrid_fixed;
+SET @tf_config = '{"_source":["id"],"size":10}';
+SELECT * FROM hybrid_search('tf_hybrid', @tf_config) AS h ORDER BY 1;
+id	_score
+1	1
+2	1
+3	1
+4	1
+SET @tf_config = '{"_source":["n"],"size":10}';
+SELECT * FROM hybrid_search('tf_hybrid', @tf_config) AS h ORDER BY 1;
+n	_score
+0	1
+1	1
+2	1
+3	1
+PREPARE tf_hybrid FROM 'SELECT * FROM hybrid_search(?, ''{}'') AS h';
+ERROR 0A000: nonconstant binding parameters in table functions not supported
+PREPARE tf_hybrid FROM 'SELECT * FROM hybrid_search(''tf_hybrid'', @tf_config) AS h';
+ERROR 0A000: mutable binding parameters in prepared table functions not supported
+CREATE FUNCTION tf_binding_probe() RETURNS VARCHAR(20) DETERMINISTIC
+RETURN (@tf_side_effect := @tf_side_effect + 1);
+SET @tf_side_effect = 0;
+DESCRIBE TABLE FUNCTION hybrid_search('tf_hybrid', tf_binding_probe());
+ERROR 0A000: nonconstant binding parameters in table functions not supported
+SELECT @tf_side_effect AS calls_during_binding;
+calls_during_binding
+0
+DROP FUNCTION tf_binding_probe;
+DROP TABLE tf_inputs, tf_hybrid;

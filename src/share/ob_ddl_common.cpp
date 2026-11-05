@@ -19,6 +19,7 @@
 #include "config_bridge.h"
 #include "lib/compress/ob_compress_util.h"
 #include "ob_ddl_common.h"
+#include <inttypes.h>
 #include "common/datum/ob_datum.h"  // ObDatum complete type(previously hidden behind the block_sstable_struct include chain)
 #include "share/ob_rpc_struct.h"
 #include "share/system_variable/ob_system_variable_alias.h"
@@ -583,7 +584,7 @@ int ObDDLUtil::generate_ddl_schema_hint_str(
     ObSqlString &sql_string)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(sql_string.append_fmt("ob_ddl_schema_version(`%.*s`, %ld)",
+  if (OB_FAIL(sql_string.append_fmt("ob_ddl_schema_version(`%.*s`, %" PRId64 ")",
       static_cast<int>(table_name.length()), table_name.ptr(), schema_version))) {
   }
   return ret;
@@ -901,7 +902,7 @@ int ObDDLUtil::get_ls_host_left_disk_space(common::ObISQLClient &sql_client,
     ObSqlString query_string;
     sqlclient::ObMySQLResult *result = NULL;
     if (OB_FAIL(query_string.assign_fmt("SELECT free_size FROM %s LIMIT 1",
-        OB_ALL_VIRTUAL_DISK_STAT_TNAME))) {
+        "disk_stat()"))) {
     } else if (OB_FAIL(sql_client.read(res, query_string.ptr()))) {
     } else if (OB_ISNULL(result = res.get_result())) {
       ret = OB_ERR_UNEXPECTED;
@@ -1047,7 +1048,7 @@ int ObDDLUtil::get_data_information(
       if (OB_FAIL(query_string.assign_fmt(
           "SELECT snapshot_version, ddl_type, UNHEX(message) AS message_unhex, "
           "status, schema_version, target_object_id "
-          "FROM %s WHERE task_id = %lu",
+          "FROM %s WHERE task_id = %" PRIu64,
           OB_ALL_DDL_TASK_STATUS_TNAME,
           task_id))) {
       } else if (OB_FAIL(sql_client.read(res, query_string.ptr()))) {
@@ -1230,8 +1231,8 @@ int ObDDLUtil::check_table_column_checksum_error(common::ObISQLClient &sql_clien
     ObTimeoutCtx timeout_ctx;
     SMART_VAR(ObMySQLProxy::MySQLResult, res) {
       if OB_FAIL(ret) {
-      } else if (OB_FAIL(query_string.append_fmt("SELECT data_table_id FROM %s WHERE data_table_id = %lu LIMIT 1",
-          OB_ALL_VIRTUAL_COLUMN_CHECKSUM_ERROR_INFO_TNAME, table_id))) {
+      } else if (OB_FAIL(query_string.append_fmt("SELECT data_table_id FROM %s WHERE data_table_id = %" PRId64 " LIMIT 1",
+          "column_checksum_error_info()", table_id))) {
       } else if (OB_FAIL(ObShareUtil::set_default_timeout_ctx(timeout_ctx, config::internal_sql_execute_timeout()))) {
       } else if (OB_FAIL(sql_client.read(res, query_string.ptr()))) {
       } else if (OB_ISNULL(result = res.get_result())) {
@@ -1342,8 +1343,8 @@ int ObCheckTabletDataComplementOp::check_task_inner_sql_session_status(
       } else if (OB_ISNULL(trace_id_like = ObString(trace_id_str).find('-'))) {
         ret = OB_ERR_UNEXPECTED;
       } else if (OB_FAIL(sql_string.assign_fmt(" SELECT id as session_id FROM %s WHERE trace_id like \"%c%s\" "
-            " and info like \"%cINSERT%c('ddl_task_id', %ld)%cINTO%cSELECT%c%ld%c\" ",
-          OB_ALL_VIRTUAL_SESSION_INFO_TNAME,
+            " and info like \"%cINSERT%c('ddl_task_id', %" PRId64 ")%cINTO%cSELECT%c%" PRId64 "%c\" ",
+          "session_info()",
           charater,
           trace_id_like,
           charater,

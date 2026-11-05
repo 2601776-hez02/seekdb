@@ -393,7 +393,7 @@ insert into t1 values(3,'[-1,2,2]','[-3,2,3]','[4,3,3]');
 insert into t1 values(4,'[-1,-2,-2]','[-4,2,3]',null);
 insert into t1 values(5,'[-1,-3,-2]',null,'[2,3,1]');
 update t1 set c1 = 10 where c3 is null;
-select * from oceanbase.__ALL_VIRTUAL_INFORMATION_COLUMNS where table_name="t1" and TABLE_SCHEMA = "test";
+select * from information_columns() where table_name="t1" and TABLE_SCHEMA = "test";
 drop table t1;
 
 --disable_warnings

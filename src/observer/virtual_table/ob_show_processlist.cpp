@@ -56,7 +56,7 @@ int ObShowProcesslist::inner_get_next_row(ObNewRow *&row)
                                      &cur_row_,
                                      output_column_ids_,
                                      schema_guard_,
-                                     table_schema_))) {
+                                     get_output_column("TIME")))) {
       } else if (OB_FAIL(session_mgr_->for_each_session(fill_scanner_))) {
       } else {
         scanner_it_ = scanner_.begin();
@@ -109,13 +109,13 @@ bool ObShowProcesslist::FillScanner::operator()(sql::ObSQLSessionMgr::Key key, O
     char sql_id[common::OB_MAX_SQL_ID_LENGTH + 1];
     // for compatibility，the time type of the new version is converted from int to double
     bool type_is_double = true;
-    const ObColumnSchemaV2 *tmp_column_schema = NULL;
-    if (OB_ISNULL(table_schema_) ||
-        OB_ISNULL(tmp_column_schema = table_schema_->get_column_schema("TIME"))) {
+    const sql::TableFunctionColumn *tmp_column_schema = NULL;
+    if (OB_ISNULL(time_column_) ||
+        OB_ISNULL(tmp_column_schema = time_column_)) {
       ret = OB_ERR_UNEXPECTED;
-      SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(table_schema_), KP(tmp_column_schema));
+      SERVER_LOG(WARN, "table or column schema is null", KR(ret), KP(time_column_), KP(tmp_column_schema));
     } else {
-      type_is_double = tmp_column_schema->get_meta_type().is_double();
+      type_is_double = tmp_column_schema->type_.get_meta_type().is_double();
     }
     if (sess_info->is_shadow()) {
       // do not show shadow session
@@ -420,18 +420,18 @@ int ObShowProcesslist::FillScanner::init(ObIAllocator *allocator,
                                          common::ObNewRow *cur_row,
                                          const ObIArray<uint64_t> &column_ids,
                                          share::schema::ObSchemaGetterGuard* schema_guard,
-                                         const share::schema::ObTableSchema *table_schema)
+                                         const sql::TableFunctionColumn *time_column)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(NULL == allocator
                   || NULL == scanner
                   || NULL == cur_row
                   || NULL == session_info
-                  || NULL == table_schema)) {
+                  || NULL == time_column)) {
     ret = OB_NOT_INIT;
     SERVER_LOG(WARN,
                "some parameter is NULL", K(ret), K(allocator), K(scanner),
-              K(cur_row), K(session_info), K(table_schema));
+              K(cur_row), K(session_info), K(time_column));
   } else if (OB_FAIL(output_column_ids_.assign(column_ids))) {
   } else {
     allocator_ = allocator;
@@ -439,7 +439,7 @@ int ObShowProcesslist::FillScanner::init(ObIAllocator *allocator,
     cur_row_ = cur_row;
     my_session_ = session_info;
     schema_guard_ = schema_guard;
-    table_schema_ = table_schema;
+    time_column_ = time_column;
   }
   return ret;
 }

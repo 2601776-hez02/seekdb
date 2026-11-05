@@ -20,24 +20,24 @@ insert /*+ enable_parallel_dml parallel(4) */ into ddl_t1
                randstr(512, random()) c2, randstr(512, random()) c3,
                randstr(512, random()) c4, randstr(512, random()) c5,
                randstr(512, random()) c6, randstr(512, random()) c7
-        from table(generator(1000));
+        from generator(1000);
 
 alter system minor freeze;
-select count(*) from __all_virtual_table_mgr where tablet_id = (select tablet_id from __all_table where table_name like concat('%', (select table_id from __all_table where table_name like "ddl_t1"), '%'))
+select count(*) from table_mgr() where tablet_id = (select tablet_id from __all_table where table_name like concat('%', (select table_id from __all_table where table_name like "ddl_t1"), '%'))
                                              and table_type = 14;
 +----------+
 | count(*) |
 +----------+
 |        1 |
 +----------+
-select count(*) from __all_virtual_table_mgr where tablet_id = (select tablet_id from __all_table where table_name like concat('%', (select table_id from __all_table where table_name like "ddl_t1"), '%'))
+select count(*) from table_mgr() where tablet_id = (select tablet_id from __all_table where table_name like concat('%', (select table_id from __all_table where table_name like "ddl_t1"), '%'))
                                              and table_type = 21;
 +----------+
 | count(*) |
 +----------+
 |        0 |
 +----------+
-select count(*) from __all_virtual_table_mgr where tablet_id = (select tablet_id from __all_table where table_name like concat('%', (select table_id from __all_table where table_name like "ddl_t1"), '%'))
+select count(*) from table_mgr() where tablet_id = (select tablet_id from __all_table where table_name like concat('%', (select table_id from __all_table where table_name like "ddl_t1"), '%'))
                                              and table_type = 22;
 +----------+
 | count(*) |

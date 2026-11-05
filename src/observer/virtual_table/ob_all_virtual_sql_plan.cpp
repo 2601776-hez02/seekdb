@@ -396,7 +396,10 @@ int ObAllVirtualSqlPlan::extract_plan_ids(const common::ObIArray<common::ObNewRa
   bool is_always_true = false;
   bool is_always_false = false;
   plan_ids_.reuse();
-  
+  if (ranges.empty()) {
+    ret = dump_plans();
+  }
+
   for (int64_t i = 0; OB_SUCC(ret) && !is_always_true && !is_always_false && i < N; i++) {
     start_key.reset();
     end_key.reset();

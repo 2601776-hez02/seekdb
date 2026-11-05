@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_SESSION
+#include "sql/table_function/table_function.h"
 #include "sql/privilege_check/ob_privilege_check.h"
 #include "sql/resolver/cmd/ob_load_data_stmt.h"
 
@@ -340,6 +341,16 @@ int get_dml_stmt_need_privs(
           const TableItem *table_item = dml_stmt->get_table_item(i);
           if (OB_ISNULL(table_item)) {
             ret = OB_ERR_UNEXPECTED;
+          } else if (table_item->is_function_table()) {
+            const TableFunctionDescriptor *definition = TableFunctionRegistry::find(table_item->table_function_id_);
+            if (definition == nullptr) { ret = OB_ERR_UNEXPECTED; }
+            else if (definition->required_database_ != nullptr) {
+              ObNeedPriv function_priv;
+              function_priv.db_ = ObString::make_string(definition->required_database_);
+              function_priv.priv_set_ = OB_PRIV_SELECT;
+              function_priv.priv_level_ = OB_PRIV_DB_LEVEL;
+              ADD_NEED_PRIV(function_priv);
+            }
           } else if (TableItem::BASE_TABLE == table_item->type_
             || TableItem::ALIAS_TABLE == table_item->type_
             || table_item->is_view_table_) {

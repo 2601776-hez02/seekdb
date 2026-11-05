@@ -545,11 +545,16 @@ int ObSql::fill_select_result_set(ObResultSet &result_set, ObSqlCtx *context, co
                   || PL_NESTED_TABLE_TYPE == expr->get_result_type().get_extend_type()
                   || PL_ASSOCIATIVE_ARRAY_TYPE == expr->get_result_type().get_extend_type()
                   || PL_RECORD_TYPE == expr->get_result_type().get_extend_type())) {
-            if (PC_TEXT_MODE == mode
+            if (PC_PL_MODE != mode
                 && NULL == context->secondary_namespace_
                 && NULL == context->session_info_->get_pl_context()) {
-              // Text protocol convert extend type field to varchar
+              // Both wire protocols send a composite as one JSON text cell.
+              // Internal PL result metadata keeps the logical composite type.
               field.type_.set_varchar(type_name);
+              field.type_.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+              field.type_.set_collation_level(CS_LEVEL_IMPLICIT);
+              field.charsetnr_ = ObCharset::is_valid_collation(collation_type)
+                  && CS_TYPE_BINARY != collation_type ? collation_type : CS_TYPE_UTF8MB4_BIN;
             }
           }
         } else if (!expr->get_result_type().is_ext()
@@ -3528,7 +3533,7 @@ int ObSql::need_add_plan(const ObPlanCacheCtx &pc_ctx,
   } else if (OB_ISNULL(result.get_exec_context().get_stmt_factory())
              || OB_ISNULL(result.get_exec_context().get_stmt_factory()->get_query_ctx())) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (result.get_exec_context().get_stmt_factory()->get_query_ctx()->has_hybrid_search()) {
+  } else if (result.get_exec_context().get_stmt_factory()->get_query_ctx()->disable_plan_cache()) {
     need_add_plan = false;
   }
   return ret;

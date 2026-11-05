@@ -72,7 +72,7 @@ private:
         my_session_(NULL),
         schema_guard_(NULL),
         output_column_ids_(),
-        table_schema_(NULL)
+        time_column_(NULL)
     {
       trace_id_[0] = '\0';
     }
@@ -84,7 +84,7 @@ private:
              common::ObNewRow *cur_row,
              const ObIArray<uint64_t> &column_ids,
              share::schema::ObSchemaGetterGuard* schema_guard,
-             const share::schema::ObTableSchema *table_schema);
+             const sql::TableFunctionColumn *time_column);
     inline void reset();
   private:
       ObIAllocator *allocator_;
@@ -94,7 +94,7 @@ private:
       share::schema::ObSchemaGetterGuard* schema_guard_;
       ObSEArray<uint64_t, common::OB_PREALLOCATED_NUM> output_column_ids_;
       char trace_id_[common::OB_MAX_TRACE_ID_BUFFER_SIZE];
-      const share::schema::ObTableSchema *table_schema_;
+      const sql::TableFunctionColumn *time_column_;
       DISALLOW_COPY_AND_ASSIGN(FillScanner);
   };
   sql::ObSQLSessionMgr *session_mgr_;

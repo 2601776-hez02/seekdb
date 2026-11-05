@@ -23,6 +23,10 @@
 #include "observer/virtual_table/ob_show_table_status.h"
 #include "observer/virtual_table/ob_show_tables.h"
 #include "observer/virtual_table/ob_virtual_warning.h"
+#include "sql/table_function/table_function.h"
+#include "sql/resolver/expr/ob_raw_expr_util.h"
+#include "sql/engine/ob_exec_context.h"
+#include "sql/engine/ob_physical_plan_ctx.h"
 #include "observer/virtual_table/ob_session_variables.h"
 #include "observer/virtual_table/ob_global_variables.h"
 #include "observer/virtual_table/ob_table_columns.h"
@@ -173,31 +177,27 @@ using namespace rootserver;
 using namespace transaction;
 namespace observer
 {
-#define NEW_VIRTUAL_TABLE(virtual_table, vt, ...)                                       \
-  ({                                                                                    \
-	  void *tmp_ptr = NULL;                                                               \
-    vt = NULL;                                                                          \
-    if (OB_UNLIKELY(NULL == (tmp_ptr = allocator.alloc(sizeof(virtual_table))))) {      \
-      ret = OB_ALLOCATE_MEMORY_FAILED;                                                  \
-      SERVER_LOG(ERROR, "fail to alloc memory", K(pure_tid), K(ret));                   \
-    } else if (OB_UNLIKELY(NULL == (vt = new (tmp_ptr) virtual_table(__VA_ARGS__)))) {  \
-      ret = OB_ALLOCATE_MEMORY_FAILED;                                                  \
-      SERVER_LOG(ERROR, "fail to new", K(ret), K(pure_tid));                            \
-    } else {                                                                            \
-      vt_iter = static_cast<ObVirtualTableIterator *>(vt);                              \
-      if (OB_FAIL(vt_iter->set_key_ranges(params.key_ranges_))) {                       \
-          allocator.free(tmp_ptr);                                                      \
-          SERVER_LOG(WARN, "fail to set key ranges", K(ret), K(params));                \
-      } else {                                                                          \
-        vt_iter->set_session(session);                                                  \
-        vt_iter->set_schema_guard(&schema_guard);                                       \
-        vt_iter->set_table_schema(table_schema);                                        \
-        vt_iter->set_index_schema(index_schema);                                        \
-        vt_iter->set_scan_flag(params.scan_flag_);                                      \
-        SERVER_LOG(DEBUG, "set schema guard");                                          \
-      }                                                                                 \
-    }                                                                                   \
-    ret;                                                                                \
+#define NEW_VIRTUAL_TABLE(virtual_table, vt, ...) \
+  ({ \
+    void *storage = allocator.alloc(sizeof(virtual_table)); \
+    vt = nullptr; \
+    if (OB_ISNULL(storage)) { \
+      ret = OB_ALLOCATE_MEMORY_FAILED; \
+    } else { \
+      vt = new (storage) virtual_table(__VA_ARGS__); \
+      vt_iter = static_cast<ObVirtualTableIterator *>(vt); \
+      if (OB_FAIL(vt_iter->set_key_ranges(key_ranges))) { \
+        vt_iter->~ObVirtualTableIterator(); \
+        allocator.free(storage); \
+        vt_iter = nullptr; \
+      } else { \
+        vt_iter->set_session(session); \
+        vt_iter->set_schema_guard(&schema_guard); \
+        vt_iter->set_function_definition(&definition); \
+        vt_iter->set_scan_flag(scan_flag); \
+      } \
+    } \
+    ret; \
   })
 
 #define BEGIN_CREATE_VT_ITER_SWITCH_LAMBDA                                              \
@@ -263,147 +263,47 @@ int ObVirtualTableIteratorFactory::check_can_create_iter(common::ObVTableScanPar
   return ret;
 }
 
-int ObVTIterCreator::get_latest_expected_schema(
-    const uint64_t table_id,
-    const int64_t table_version,
-    ObSchemaGetterGuard &schema_guard,
-    const ObTableSchema *&t_schema)
-{
-  int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(table_version < 0)) {
-    ret = OB_INVALID_ARGUMENT;
-    SERVER_LOG(WARN, "invalid schema version", K(table_version), K(ret));
-  } else if (OB_FAIL(local_management_service_.get_schema_service().get_runtime_schema_guard(schema_guard))) {
-  } else if (OB_FAIL(schema_guard.get_table_schema( table_id, t_schema))) {
-  } else if(NULL == t_schema
-            || OB_UNLIKELY(table_version != t_schema->get_schema_version())) {
-    ret = OB_SCHEMA_ERROR;
-    if (NULL != t_schema) {
-      SERVER_LOG(WARN, "current schema version", K(t_schema->get_schema_version()));
-    }
-    t_schema = NULL;
-  }
-  return ret;
-}
-
-// %table.get_index_name() contain the name of table name, to simplify the check logic,
-// we only check if %index_name is a suffix of %table.get_index_name()
-int ObVTIterCreator::check_is_index(const share::schema::ObTableSchema &table,
-    const char *index_name, bool &is_index) const
-{
-  int ret = OB_SUCCESS;
-  if (NULL == index_name) {
-    ret = OB_INVALID_ARGUMENT;
-  } else {
-    is_index = false;
-    int64_t index_name_len = strlen(index_name);
-    if (table.is_index_table()) {
-      ObString name;
-      if (OB_FAIL(table.get_index_name(name))) {
-      } else {
-        if (name.case_compare(index_name) == 0) {
-          is_index = true;
-        } else if (name.length() > index_name_len + 1
-            && '_' == name.ptr()[name.length() - index_name_len - 1]) {
-          is_index = (0 == strncasecmp(name.ptr() + name.length() - index_name_len,
-              index_name, index_name_len));
-        }
-      }
-    }
-  }
-  return ret;
-}
-
 int ObVTIterCreator::create_vt_iter(ObVTableScanParam &params,
                                     ObVirtualTableIterator *&vt_iter)
 {
   int ret = OB_SUCCESS;
-  const ObTableSchema *table_schema = NULL;
-  const ObTableSchema *index_schema = NULL;
-
+  const TableFunctionDescriptor *definition = TableFunctionRegistry::find(params.index_id_);
   ObSchemaGetterGuard &schema_guard = params.get_schema_guard();
-  // We also support index on virtual table.
-  uint64_t index_id = params.index_id_;
-  
-  if (OB_UNLIKELY(OB_INVALID_ID == index_id)) {
-     ret = OB_INVALID_ARGUMENT;
-     SERVER_LOG(WARN, "invalid index_id", K(index_id), K(ret));
-  } else if (OB_FAIL(get_latest_expected_schema(index_id,
-                                                params.schema_version_,
-                                                schema_guard,
-                                                index_schema))) {
+  if (OB_ISNULL(definition) || OB_ISNULL(params.op_)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(local_management_service_.get_schema_service().get_runtime_schema_guard(schema_guard))) {
+  } else if (OB_FAIL(create_function_iter(*definition, *params.scan_allocator_,
+                 params.op_->get_eval_ctx().exec_ctx_.get_my_session(), schema_guard,
+                 params.key_ranges_, params.scan_flag_, vt_iter))) {
   } else {
-    if (index_schema->is_index_table()) {
-      // access via index
-      if (OB_FAIL(schema_guard.get_table_schema(
-                  index_schema->get_data_table_id(),
-                  table_schema))) {
-      } else if (NULL == table_schema) {
-        ret = OB_TABLE_NOT_EXIST;
-        SERVER_LOG(WARN, "failed to get table schema", K(ret), K(index_id), K(index_schema->get_data_table_id()));
-      }
-    } else {
-      // access data table directly
-      table_schema = index_schema;
-    }
+    vt_iter->set_timeout(params.timeout_);
+  }
+  return ret;
+}
 
-    if (OB_SUCC(ret)) {
-      uint64_t data_table_id = table_schema->get_table_id();
-      uint64_t pure_tid = data_table_id;
-      int simulate_error = EVENT_CALL(EventTable::EN_DAS_SIMULATE_VT_CREATE_ERROR);
-      if (OB_UNLIKELY(OB_SUCCESS != simulate_error)) {
-        ret = simulate_error;
-      } else if (OB_ISNULL(params.op_)
-                 || OB_ISNULL(params.op_->get_eval_ctx().exec_ctx_.get_my_session())
-                 || OB_ISNULL(index_schema)
-                 || OB_ISNULL(get_observer_sql_engine())
-                 || OB_ISNULL(GCTX.schema_service_)
-                 || OB_ISNULL(GCTX.sql_proxy_)) {
-        ret = OB_ERR_UNEXPECTED;
-        SERVER_LOG(WARN,
-                   "some variable is NULL",
-                   K(ret),
-                   KP(params.op_),
-                   KP(index_schema),
-                   KP(get_observer_sql_engine()),
-                   KP(GCTX.schema_service_),
-                   KP(GCTX.sql_proxy_));
-      } else if (is_extended_sys_view_table(pure_tid)
-                 || is_extended_virtual_table(pure_tid)) {
-        ret = OB_NOT_SUPPORTED;
-        SERVER_LOG(WARN, "access extended virtual table/sys view through mysql virtual table iterator",
-                   K(ret), K(pure_tid));
-        LOG_USER_ERROR(OB_NOT_SUPPORTED, "access extended virtual table/sys view through mysql virtual table iterator");
-      } else {
-        void *tmp_ptr = NULL;
-        ObIAllocator &allocator = *params.scan_allocator_;
-        ObSQLSessionInfo *session = params.op_->get_eval_ctx().exec_ctx_.get_my_session();
-
+int ObVTIterCreator::create_function_iter(const TableFunctionDescriptor &definition,
+                                         ObIAllocator &allocator,
+                                         ObSQLSessionInfo *session,
+                                         ObSchemaGetterGuard &schema_guard,
+                                         const ObIArray<ObNewRange> &key_ranges,
+                                         const ObQueryFlag &scan_flag,
+                                         ObVirtualTableIterator *&vt_iter)
+{
+  int ret = OB_SUCCESS;
+  const uint64_t pure_tid = definition.id_;
+  vt_iter = nullptr;
+  const int simulate_error = EVENT_CALL(EventTable::EN_DAS_SIMULATE_VT_CREATE_ERROR);
+  if (OB_UNLIKELY(OB_SUCCESS != simulate_error)) {
+    ret = simulate_error;
+  } else if (OB_ISNULL(session) || OB_ISNULL(get_observer_sql_engine())
+             || OB_ISNULL(GCTX.schema_service_) || OB_ISNULL(GCTX.sql_proxy_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
         bool processed = false;
 
         BEGIN_CREATE_VT_ITER_SWITCH_LAMBDA
-          case OB_SCHEMA_PRIVILEGES_OLD_TID: {
-            ObInfoSchemaSchemaPrivilegesTable *schema_privileges = NULL;
-            if (OB_FAIL(NEW_VIRTUAL_TABLE(ObInfoSchemaSchemaPrivilegesTable, schema_privileges))) {
-            } else {
-              schema_privileges->set_allocator(&allocator);
-              
-              schema_privileges->set_user_id(session->get_user_id());
-              vt_iter = static_cast<ObVirtualTableIterator *>(schema_privileges);
-            }
-            break;
-          }
-          case OB_USER_PRIVILEGES_OLD_TID: {
-            ObInfoSchemaUserPrivilegesTable *user_privileges = NULL;
-            if (OB_FAIL(NEW_VIRTUAL_TABLE(ObInfoSchemaUserPrivilegesTable, user_privileges))) {
-            } else {
-              user_privileges->set_allocator(&allocator);
-              
-              user_privileges->set_user_id(session->get_user_id());
-              vt_iter = static_cast<ObVirtualTableIterator *>(user_privileges);
-            }
-            break;
-          }
+
+
           case OB_ALL_VIRTUAL_PRIVILEGE_TID: {
             ObVirtualPrivilege *privilege_iter = NULL;
             if (OB_FAIL(NEW_VIRTUAL_TABLE(ObVirtualPrivilege, privilege_iter))) {
@@ -412,17 +312,7 @@ int ObVTIterCreator::create_vt_iter(ObVTableScanParam &params,
             }
             break;
           }
-          case OB_TABLE_PRIVILEGES_OLD_TID: {
-            ObInfoSchemaTablePrivilegesTable *table_privileges = NULL;
-            if (OB_FAIL(NEW_VIRTUAL_TABLE(ObInfoSchemaTablePrivilegesTable, table_privileges))) {
-            } else {
-              table_privileges->set_allocator(&allocator);
-              
-              table_privileges->set_user_id(session->get_user_id());
-              vt_iter = static_cast<ObVirtualTableIterator *>(table_privileges);
-            }
-            break;
-          }
+
           case OB_ALL_VIRTUAL_ALL_TABLE_TID: {
             ObShowTableStatus *table_status = NULL;
             if (OB_FAIL(NEW_VIRTUAL_TABLE(ObShowTableStatus, table_status))) {
@@ -867,32 +757,9 @@ int ObVTIterCreator::create_vt_iter(ObVTableScanParam &params,
             }
             break;
           }
-          case OB_ALL_VIRTUAL_REFERENTIAL_CONSTRAINTS_OLD_TID: {
-            ObInfoSchemaReferentialConstraintsTable *referential_constraint = NULL;
-            if (OB_SUCC(NEW_VIRTUAL_TABLE(ObInfoSchemaReferentialConstraintsTable,
-                                          referential_constraint))) {
-              
-              vt_iter = static_cast<ObVirtualTableIterator *>(referential_constraint);
-            }
-            break;
-          }
-          case OB_ALL_VIRTUAL_TABLE_CONSTRAINTS_OLD_TID: {
-            ObInfoSchemaTableConstraintsTable *table_constraint = NULL;
-            if (OB_SUCC(NEW_VIRTUAL_TABLE(ObInfoSchemaTableConstraintsTable,
-                                          table_constraint))) {
-              
-              vt_iter = static_cast<ObVirtualTableIterator *>(table_constraint);
-            }
-            break;
-          }
-          case OB_ALL_VIRTUAL_CHECK_CONSTRAINTS_OLD_TID: {
-            ObInfoSchemaCheckConstraintsTable* check_constraint = NULL;
-            if (OB_SUCC(NEW_VIRTUAL_TABLE(ObInfoSchemaCheckConstraintsTable, check_constraint))) {
-              
-              vt_iter = static_cast<ObVirtualTableIterator*>(check_constraint);
-            }
-            break;
-          }
+
+
+
         END_CREATE_VT_ITER_SWITCH_LAMBDA
 
         BEGIN_CREATE_VT_ITER_SWITCH_LAMBDA
@@ -946,38 +813,10 @@ int ObVTIterCreator::create_vt_iter(ObVTableScanParam &params,
             }
             break;
           }
-          case OB_ALL_VIRTUAL_PROC_OLD_TID: {
-            ObMySQLProcTable *mysql_proc_table = NULL;
-            if (OB_SUCC(NEW_VIRTUAL_TABLE(ObMySQLProcTable, mysql_proc_table))) {
-              
-              vt_iter = static_cast<ObVirtualTableIterator *>(mysql_proc_table);
-            }
-            break;
-          }
-          case OB_ALL_VIRTUAL_TRIGGERS_OLD_TID: {
-            ObInfoSchemaTriggersTable *tg_table = NULL;
-            if (OB_SUCC(NEW_VIRTUAL_TABLE(ObInfoSchemaTriggersTable, tg_table))) {
-              
-              vt_iter = static_cast<ObVirtualTableIterator *>(tg_table);
-            }
-            break;
-          }
-          case OB_ALL_VIRTUAL_PARAMETERS_OLD_TID: {
-            ObInformationParametersTable *information_parameters_table = NULL;
-            if (OB_SUCC(NEW_VIRTUAL_TABLE(ObInformationParametersTable, information_parameters_table))) {
-              
-              vt_iter = static_cast<ObInformationParametersTable *>(information_parameters_table);
-            }
-            break;
-          }
-          case OB_PARTITIONS_OLD_TID: {
-            ObInfoSchemaPartitionsTable *partitions_table = NULL;
-            if (OB_SUCC(NEW_VIRTUAL_TABLE(ObInfoSchemaPartitionsTable, partitions_table))) {
-              
-              vt_iter = static_cast<ObVirtualTableIterator *>(partitions_table);
-            }
-            break;
-          }
+
+
+
+
           case OB_ALL_VIRTUAL_KVCACHE_INFO_TID: {
             ObInfoSchemaKvCacheTable *cache_table = NULL;
             if (OB_FAIL(NEW_VIRTUAL_TABLE(ObInfoSchemaKvCacheTable, cache_table))) {
@@ -1726,62 +1565,257 @@ int ObVTIterCreator::create_vt_iter(ObVTableScanParam &params,
 #include "share/inner_table/ob_inner_table_schema_misc.ipp"
 #undef LOCAL_VIRTUAL_TABLE_CREATE_ITER
 
-        if (OB_SUCC(ret) && !processed) {
-          ret = OB_ERR_UNEXPECTED;
-          SERVER_LOG(WARN, "invalid virtual table id",
-                           K(ret), K(pure_tid), K(data_table_id), K(index_id));
-        }
-      }
-
-      if (OB_SUCC(ret)) {
-        if (OB_ISNULL(vt_iter)) {
-          ret = OB_ERR_UNEXPECTED;
-          SERVER_LOG(WARN, "vt_iter is NULL", K(ret));
-        }
-      }
+    if (OB_SUCC(ret) && !processed) {
+      ret = OB_INVALID_ARGUMENT;
+      SERVER_LOG(WARN, "unknown system table function provider", K(ret), K(pure_tid));
+    }
+    if (OB_SUCC(ret) && OB_ISNULL(vt_iter)) {
+      ret = OB_ERR_UNEXPECTED;
     }
   }
-
   return ret;
 }
 
 int ObVTIterCreator::check_can_create_iter(ObVTableScanParam &params)
 {
-  int ret = OB_SUCCESS;
-  const ObTableSchema *table_schema = NULL;
-  const ObTableSchema *index_schema = NULL;
+  return TableFunctionRegistry::find(params.index_id_) != nullptr ? OB_SUCCESS : OB_INVALID_ARGUMENT;
+}
 
-  ObSchemaGetterGuard &schema_guard = params.get_schema_guard();
-  // We also support index on virtual table.
-  uint64_t index_id = params.index_id_;
-  
-  if (OB_UNLIKELY(OB_INVALID_ID == index_id)) {
-     ret = OB_INVALID_ARGUMENT;
-     SERVER_LOG(WARN, "invalid index_id", K(index_id), K(ret));
-  } else if (OB_FAIL(get_latest_expected_schema(index_id,
-                                                params.schema_version_,
-                                                schema_guard,
-                                                index_schema))) {
-  } else {
-    if (index_schema->is_index_table()) {
-      // access via index
-      if (OB_FAIL(schema_guard.get_table_schema(
-                  index_schema->get_data_table_id(),
-                  table_schema))) {
-      } else if (NULL == index_schema) {
-        ret = OB_TABLE_NOT_EXIST;
-        SERVER_LOG(WARN, "failed to get table schema",
-                   K(ret), K(index_id), K(index_schema->get_data_table_id()));
-      }
+
+
+// Adapts the existing collectors to an execution-local table-function scan.
+// Each rescan owns a new collector and arena so cursors, guards and sampled rows
+// cannot escape to another invocation or accumulate with correlated outer rows.
+class SystemTableFunctionScan final : public sql::ITableFunctionScan
+{
+public:
+  explicit SystemTableFunctionScan(const sql::TableFunctionScanContext &context)
+    : exec_ctx_(context.exec_ctx_), definition_(context.descriptor_),
+      lookups_(context.lookups_), allocator_("SysTableFunc"), schema_guard_(ObSchemaMgrItem::MOD_VTABLE_SCAN_PARAM),
+      address_(ObServer::get_instance().get_self()),
+      creator_(ObServer::get_instance().get_local_management_service(), address_),
+      iterator_(nullptr)
+  {}
+  ~SystemTableFunctionScan() override { close(); }
+
+  int initialize(const sql::TableFunctionScanContext &context)
+  {
+    int ret = column_ids_.assign(context.column_ids_);
+    if (OB_SUCC(ret)) { ret = prepare_arguments(context.arguments_); }
+    return ret;
+  }
+
+  int open() override
+  {
+    int ret = OB_SUCCESS;
+    if (nullptr != iterator_) {
+      ret = OB_INIT_TWICE;
+    } else if (OB_ISNULL(exec_ctx_.get_my_session()) || OB_ISNULL(GCTX.schema_service_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(schema_guard_))) {
     } else {
-      // access data table directly
-      table_schema = index_schema;
+      ObQueryFlag scan_flag;
+      if (OB_FAIL(creator_.create_function_iter(definition_, allocator_,
+                    exec_ctx_.get_my_session(), schema_guard_, ranges_, scan_flag, iterator_))) {
+      } else if (OB_FAIL(iterator_->set_output_column_ids(column_ids_))) {
+      } else {
+        iterator_->set_allocator(&allocator_);
+        iterator_->set_reserved_column_cnt(column_ids_.count());
+        const ObPhysicalPlanCtx *plan_ctx = exec_ctx_.get_physical_plan_ctx();
+        iterator_->set_timeout(plan_ctx == nullptr ? INT64_MAX : plan_ctx->get_timeout_timestamp());
+        ret = iterator_->open();
+      }
     }
+    if (OB_FAIL(ret)) {
+      const int saved_ret = ret;
+      close();
+      ret = saved_ret;
+    }
+    return ret;
+  }
 
+  int get_next_row(ObNewRow *&row) override
+  {
+    return iterator_ == nullptr ? OB_NOT_INIT : iterator_->get_next_row(row);
+  }
+
+  int rescan(const ObIArray<ObObj> &arguments) override
+  {
+    int ret = close();
+    if (OB_SUCC(ret)) { ret = prepare_arguments(arguments); }
+    if (OB_SUCC(ret)) { ret = open(); }
+    return ret;
+  }
+
+  int close() override
+  {
+    int ret = OB_SUCCESS;
+    if (iterator_ != nullptr) {
+      ret = iterator_->close();
+      iterator_->~ObVirtualTableIterator();
+      iterator_ = nullptr;
+    }
+    ranges_.reuse();
+    schema_guard_.reset();
+    allocator_.reset();
+    return ret;
+  }
+
+private:
+  int prepare_arguments(const ObIArray<ObObj> &arguments)
+  {
+    int ret = OB_SUCCESS;
+    if (arguments.count() < definition_.min_arguments_
+        || (definition_.max_arguments_ >= 0 && arguments.count() > definition_.max_arguments_)) {
+      ret = OB_INVALID_ARGUMENT;
+    } else if (definition_.id_ == OB_ALL_VIRTUAL_INFORMATION_COLUMNS_TID) {
+      ObSEArray<ObObj, 2> located_arguments;
+      // A database is needed before a table name can avoid global enumeration.
+      // Explicit arguments take priority; residual SQL filters still apply.
+      for (int64_t i = 0; OB_SUCC(ret) && i < definition_.lookup_column_count_; ++i) {
+        const ObObj *value = i < arguments.count() ? &arguments.at(i) : nullptr;
+        for (int64_t j = 0; value == nullptr && j < lookups_.count(); ++j) {
+          if (lookups_.at(j).column_id_ == definition_.lookup_column_ids_[i]) {
+            value = &lookups_.at(j).value_;
+          }
+        }
+        if (value == nullptr) { break; }
+        ret = located_arguments.push_back(*value);
+      }
+      if (OB_SUCC(ret)) { ret = build_key_ranges(located_arguments); }
+    } else {
+      ret = build_key_ranges(arguments);
+    }
+    return ret;
+  }
+
+  int build_key_ranges(const ObIArray<ObObj> &arguments)
+  {
+    int ret = OB_SUCCESS;
+    if (arguments.count() > 0) {
+      const bool names = definition_.id_ == OB_ALL_VIRTUAL_INFORMATION_COLUMNS_TID;
+      const bool tablet_ids = definition_.id_ == OB_ALL_VIRTUAL_MDS_NODE_STAT_TID;
+      const bool separate_ranges = tablet_ids || definition_.id_ == OB_ALL_VIRTUAL_PRIVILEGE_GRANT_TID;
+      const ObObjType key_type = names ? ObVarcharType : tablet_ids ? ObUInt64Type : ObIntType;
+      const int64_t key_count = names ? 2 : arguments.count();
+      void *storage = allocator_.alloc(sizeof(ObObj) * key_count);
+      if (OB_ISNULL(storage) || OB_ISNULL(exec_ctx_.get_my_session())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        ObObj *keys = new (storage) ObObj[key_count];
+        const ObDataTypeCastParams dtc_params =
+            ObBasicSessionInfo::create_dtc_params(exec_ctx_.get_my_session());
+        ObCastCtx cast_ctx(&allocator_, &dtc_params, CM_NONE,
+                          ObCharset::get_default_collation(ObCharset::get_default_charset()));
+        for (int64_t i = 0; OB_SUCC(ret) && i < arguments.count(); ++i) {
+          ObObj converted;
+          if (arguments.at(i).is_null()) {
+            ret = OB_INVALID_ARGUMENT;
+          } else if (OB_FAIL(ObObjCaster::to_type(key_type,
+                             names ? ObCharset::get_default_collation(ObCharset::get_default_charset())
+                                   : CS_TYPE_BINARY,
+                             cast_ctx, arguments.at(i), converted))) {
+          } else {
+            ret = ob_write_obj(allocator_, converted, keys[i]);
+          }
+        }
+        if (OB_SUCC(ret)) {
+          if (names && arguments.count() == 1) { keys[1].set_max_value(); }
+          for (int64_t i = 0; OB_SUCC(ret) && i < (separate_ranges ? arguments.count() : 1); ++i) {
+            ObNewRange range;
+            range.start_key_.assign(keys + (separate_ranges ? i : 0), separate_ranges ? 1 : key_count);
+            range.end_key_ = range.start_key_;
+            range.border_flag_.set_inclusive_start();
+            range.border_flag_.set_inclusive_end();
+            ret = ranges_.push_back(range);
+          }
+        }
+      }
+    }
+    return ret;
+  }
+
+  ObExecContext &exec_ctx_;
+  const TableFunctionDescriptor &definition_;
+  const ObIArray<TableFunctionLookup> &lookups_;
+  ObArenaAllocator allocator_;
+  ObSchemaGetterGuard schema_guard_;
+  ObAddr address_;
+  ObVTIterCreator creator_;
+  ObSEArray<uint64_t, 64> column_ids_;
+  ObSEArray<ObNewRange, 4> ranges_;
+  ObVirtualTableIterator *iterator_;
+};
+
+int create_system_table_function_scan(const TableFunctionScanContext &context,
+                                      ITableFunctionScan *&scan)
+{
+  int ret = OB_SUCCESS;
+  scan = nullptr;
+  void *storage = context.allocator_.alloc(sizeof(SystemTableFunctionScan));
+  if (OB_ISNULL(storage)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    auto *provider = new (storage) SystemTableFunctionScan(context);
+    if (OB_FAIL(provider->initialize(context))) {
+      provider->~SystemTableFunctionScan();
+      context.allocator_.free(storage);
+    } else {
+      scan = provider;
+    }
   }
   return ret;
 }
 
-
 }/* ns observer*/
 }/* ns oceanbase */
+
+namespace oceanbase {
+namespace sql {
+using namespace common;
+using namespace share;
+
+static TableFunctionColumn make_system_table_column(const char *name, ObObjType type,
+    ObCollationType collation, int64_t length, int16_t precision, int16_t scale, bool nullable, uint64_t id)
+{
+  TableFunctionColumn column;
+  column.name_ = name;
+  column.id_ = id;
+  column.nullable_ = nullable;
+  column.type_.set_obj_type(type);
+  // Match the SQL type normalization used by inner-table column definitions,
+  // without creating column or table schema objects.
+  const ObAccuracy &defaults = ObAccuracy::DDL_DEFAULT_ACCURACY[type];
+  if (ob_is_string_tc(type)) {
+    column.type_.set_length(static_cast<ObLength>(length));
+    column.type_.set_precision(precision);
+  } else if (ob_is_text_tc(type) || ob_is_json_tc(type) || ob_is_geometry_tc(type)) {
+    column.type_.set_length(defaults.get_length());
+  } else if (ob_is_datetime_tc(type) || ob_is_time_tc(type)) {
+    const ObScale resolved_scale = scale == -1 ? defaults.get_scale() : scale;
+    column.type_.set_precision(static_cast<ObPrecision>(defaults.get_precision() + resolved_scale));
+    column.type_.set_scale(resolved_scale);
+  } else {
+    column.type_.set_precision(precision == -1 ? defaults.get_precision() : precision);
+    column.type_.set_scale(scale == -1 ? defaults.get_scale() : scale);
+  }
+  if (CS_TYPE_INVALID == collation) {
+    collation = ob_is_string_type(type)
+        ? ObCharset::get_default_collation(ObCharset::get_default_charset()) : CS_TYPE_BINARY;
+  }
+  column.type_.set_collation_type(collation);
+  column.type_.set_charset_type(ObCharset::charset_type_by_coll(collation));
+  column.type_.set_collation_level(ObRawExprUtils::get_column_collation_level(type));
+  return column;
+}
+
+const TableFunctionDescriptor *get_system_table_functions(int64_t &count)
+{
+#define SYSTEM_TABLE_FUNCTION_DEFINITIONS
+#include "share/inner_table/ob_inner_table_schema_misc.ipp"
+#undef SYSTEM_TABLE_FUNCTION_DEFINITIONS
+  count = ARRAYSIZEOF(system_table_functions);
+  return system_table_functions;
+}
+} // namespace sql
+} // namespace oceanbase

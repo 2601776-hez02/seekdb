@@ -366,8 +366,7 @@ int ObGetDiagnosticsExecutor::execute(ObExecContext &ctx, ObGetDiagnosticsStmt &
                          session_info, conn_guard))) {
   } else if (OB_ISNULL(conn = conn_guard.get_ptr())) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(query_virtual.assign_fmt("select count(*) from %s.%s", 
-                      OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_WARNING_TNAME))) {
+  } else if (OB_FAIL(query_virtual.assign_fmt("select count(*) from warning()"))) {
   } else {
     SMART_VAR(ObISQLClient::ReadResult, res) {
       common::sqlclient::ObMySQLResult *result = NULL;
@@ -404,8 +403,8 @@ int ObGetDiagnosticsExecutor::execute(ObExecContext &ctx, ObGetDiagnosticsStmt &
       ObString err_msg, err_msg_c, sqlstate, sqlstate_c;
       ObSqlString query_virtual;
       if (OB_FAIL(query_virtual.assign_fmt(
-        "select message, ori_code, sql_state from %s.%s limit %ld, 1", 
-        OB_SYS_DATABASE_NAME, OB_ALL_VIRTUAL_WARNING_TNAME, restored_arg - 1))) {
+        "select message, ori_code, sql_state from warning() limit %ld, 1",
+        restored_arg - 1))) {
       } else {
         SMART_VAR(ObISQLClient::ReadResult, res) {
           common::sqlclient::ObMySQLResult *result = NULL;

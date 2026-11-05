@@ -16,19 +16,82 @@ create database check_privilege_db;
 use check_privilege_db;
 create table t1(id int, name char(20));
 
-# case 1: __all_virtual_information_columns
-select count(privileges)>10000 from oceanbase.__all_virtual_information_columns;
+# Fixed-output table functions preserve existing column privileges.
+select count(privileges)>10000 from information_columns();
 
-# case 2: __tenant_virtual_privilege_grant
+# SHOW supplies required user locators.
 create user if not exists 'check_privilege_user';
 grant select on check_privilege_db.* to check_privilege_user;
 show grants for check_privilege_user;
 
-# case 3: __tenant_virtual_table_column
+# SHOW supplies required table and database locators.
 show columns from t1;
 
-# case 4: __tenant_virtual_show_tables
+
 show tables;
+
+# A restricted user can use SHOW and information_schema for granted objects,
+# while protected direct calls still require their declared database privilege.
+create table hidden(id int, secret varchar(32));
+revoke select on check_privilege_db.* from check_privilege_user;
+grant select on check_privilege_db.t1 to check_privilege_user;
+connect (reader,$OBMYSQL_MS0,check_privilege_user,,check_privilege_db,$OBMYSQL_PORT);
+connection reader;
+show tables;
+--replace_column 6 EXTRA
+show columns from t1;
+select distinct table_name from information_schema.columns
+  where table_schema='check_privilege_db' order by table_name;
+select table_name from information_schema.tables
+  where table_schema='check_privilege_db' order by table_name;
+--error ER_TABLEACCESS_DENIED_ERROR
+show columns from hidden;
+--error ER_DBACCESS_DENIED_ERROR
+select * from mysql_users() limit 1;
+--error ER_DBACCESS_DENIED_ERROR
+select * from memory_info() limit 1;
+--error ER_DBACCESS_DENIED_ERROR
+select * from information_columns() limit 1;
+select count(*) > 0 from session_variables();
+disconnect reader;
+connection sys;
+
+# Equality locators keep SQL residuals and do not change case, NULL, cast or
+# outer-join semantics. Repeated prepared execution reevaluates the locators.
+select column_name from information_columns()
+  where table_schema='CHECK_PRIVILEGE_DB' and table_name='T1'
+  order by ordinal_position;
+select column_name from information_columns()
+  where table_schema='check_privilege_db' and table_name=null;
+select column_name from information_columns()
+  where table_schema='check_privilege_db' and table_name collate utf8mb4_bin='T1';
+create table `123`(id int);
+select column_name from information_columns()
+  where table_schema='check_privilege_db' and table_name=123;
+select s.name,c.column_name
+  from (select 't1' name union all select 'absent' union all select null) s
+  left join information_columns() c
+    on c.table_schema='check_privilege_db' and c.table_name=s.name
+  order by s.name,c.ordinal_position;
+--error ER_WRONG_ARGUMENTS
+select * from information_columns('check_privilege_db',null);
+prepare tf_locator from 'select column_name from information_columns() where table_schema=? and table_name=? order by ordinal_position';
+set @tf_db='check_privilege_db', @tf_table='t1';
+execute tf_locator using @tf_db,@tf_table;
+set @tf_table='123';
+execute tf_locator using @tf_db,@tf_table;
+set @tf_table=null;
+execute tf_locator using @tf_db,@tf_table;
+deallocate prepare tf_locator;
+
+# Stored program descriptions use explicit routine/trigger IDs.
+set @tf_old_sql_mode=@@sql_mode;
+set sql_mode='';
+create procedure locator_proc() select 1;
+create trigger locator_trigger before insert on t1 for each row set new.id=coalesce(new.id,0);
+show create procedure locator_proc;
+show create trigger locator_trigger;
+set sql_mode=@tf_old_sql_mode;
 
 # clear
 drop user if exists check_privilege_user;

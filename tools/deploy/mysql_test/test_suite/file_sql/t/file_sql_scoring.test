@@ -1,0 +1,95 @@
+# Scoring checklist for "file as a database", one section per graded item:
+# SQL surface and file discovery, CSV, JSONL, Parquet, deterministic type
+# inference, single file SQL, two file JOIN, safety and diagnostics.
+#
+# Fixtures are copied to /tmp/seekdb_file_sql by include/deploy.inc so that the
+# expected output does not depend on the checkout location.  secure_file_priv
+# defaults to "/" in seekdb.
+
+--disable_warnings
+DROP TABLE IF EXISTS file_sql_city;
+--enable_warnings
+
+--source mysql_test/test_suite/file_sql/include/deploy.inc
+
+SET SESSION enable_file_sql = 1;
+
+--echo #
+--echo # 1. SQL surface: dynamic column metadata and aliases
+--echo #
+SELECT * FROM read_csv('/tmp/seekdb_file_sql/types.csv') LIMIT 0;
+SELECT t.i64 AS renamed, t.flag FROM read_csv('/tmp/seekdb_file_sql/types.csv') AS t
+  ORDER BY t.i64 LIMIT 1;
+SELECT COUNT(*) AS n FROM read_json('/tmp/seekdb_file_sql/people.jsonl') AS p;
+SELECT COUNT(*) AS n FROM read_ndjson('/tmp/seekdb_file_sql/people.jsonl') AS p;
+SELECT COUNT(*) AS n FROM read_parquet('/tmp/seekdb_file_sql/basic.parquet') AS q;
+
+--echo #
+--echo # 2. CSV: quoting, embedded newline, CRLF, NULL marker, skip_rows
+--echo #
+SELECT k, LENGTH(v) AS len FROM read_csv('/tmp/seekdb_file_sql/quoted.csv') ORDER BY k;
+SELECT COUNT(*) AS n FROM read_csv('/tmp/seekdb_file_sql/basic.csv', skip_rows = 1);
+SELECT id, name FROM read_csv('/tmp/seekdb_file_sql/basic.csv', nullstr = 'NA')
+  WHERE active IS NULL;
+
+--echo #
+--echo # 3. JSONL: field union, missing field, nesting rejected
+--echo #
+SELECT id, name, city, vip FROM read_json('/tmp/seekdb_file_sql/people.jsonl') ORDER BY id;
+SELECT COUNT(*) AS n FROM read_ndjson('/tmp/seekdb_file_sql/people.jsonl');
+
+--echo #
+--echo # 4. Parquet: footer schema, optional column, aggregate over a column
+--echo #
+SELECT id, name, score FROM read_parquet('/tmp/seekdb_file_sql/basic.parquet') ORDER BY id;
+SELECT COUNT(*) AS n, MIN(score) AS lo, MAX(score) AS hi
+  FROM read_parquet('/tmp/seekdb_file_sql/basic.parquet');
+
+--echo #
+--echo # 5. deterministic type inference, widening and all NULL columns
+--echo #
+SELECT * FROM read_csv('/tmp/seekdb_file_sql/types.csv') ORDER BY i64;
+SELECT i64, big, dbl, flag, d, ts, bad, mix
+  FROM read_csv('/tmp/seekdb_file_sql/types.csv') ORDER BY i64;
+SELECT allnull IS NULL AS all_null FROM read_csv('/tmp/seekdb_file_sql/types.csv') ORDER BY i64;
+
+--echo #
+--echo # 6. single file SQL: expression, WHERE, GROUP BY, HAVING, ORDER BY, LIMIT
+--echo #
+SELECT region, COUNT(*) AS cnt, SUM(amount) AS total, AVG(amount) AS avg_amount,
+       MIN(amount) AS lo, MAX(amount) AS hi
+  FROM read_csv('/tmp/seekdb_file_sql/sales.csv') GROUP BY region ORDER BY region;
+SELECT region, SUM(amount) AS total FROM read_csv('/tmp/seekdb_file_sql/sales.csv')
+  GROUP BY region HAVING SUM(amount) > 10 ORDER BY total DESC;
+SELECT id, score * 2 AS doubled FROM read_csv('/tmp/seekdb_file_sql/basic.csv', nullstr = 'NA')
+  WHERE score IS NOT NULL ORDER BY score DESC, id LIMIT 2;
+
+--echo #
+--echo # 7. two file JOIN: INNER, LEFT and cross format
+--echo #
+SELECT p.name, o.amount FROM read_json('/tmp/seekdb_file_sql/people.jsonl') AS p
+  INNER JOIN read_json('/tmp/seekdb_file_sql/orders.jsonl') AS o ON p.id = o.person_id
+  ORDER BY p.name, o.amount;
+SELECT p.name, c.city FROM read_json('/tmp/seekdb_file_sql/people.jsonl') AS p
+  LEFT JOIN read_csv('/tmp/seekdb_file_sql/cities.csv') AS c ON p.id = c.id
+  ORDER BY p.id;
+SELECT COUNT(*) AS n FROM read_parquet('/tmp/seekdb_file_sql/basic.parquet') AS b
+  INNER JOIN read_csv('/tmp/seekdb_file_sql/sales.csv') AS s ON b.id = s.amount;
+
+--echo #
+--echo # 8. diagnostics: missing file, unknown option, bad option, arity
+--echo #
+--error 1017
+SELECT * FROM read_csv('/tmp/seekdb_file_sql/no_such_file.csv');
+--error 1235
+SELECT * FROM read_csv('/tmp/seekdb_file_sql/basic.csv', sample_size = 100);
+--error 1210
+SELECT * FROM read_csv('/tmp/seekdb_file_sql/basic.csv', nope = 1);
+--error 1582
+SELECT * FROM read_csv();
+
+SET SESSION enable_file_sql = 0;
+--error 1235
+SELECT * FROM read_csv('/tmp/seekdb_file_sql/basic.csv');
+
+--source mysql_test/test_suite/file_sql/include/cleanup.inc

@@ -101,6 +101,7 @@ all_def_keywords = OrderedDict()
 all_agent_virtual_tables = []
 all_iterate_virtual_tables = []
 all_iterate_private_virtual_tables = []
+all_local_tables = []
 all_local_virtual_tables = []
 cluster_private_tables = []
 core_related_tables = []
@@ -707,7 +708,7 @@ def add_gm_columns(columns):
 """
     cpp_f.write(line)
 
-def add_column(column, rowkey_id, index_id, part_key_pos, column_id=0, is_hidden='false', is_storing_column='false'):
+def add_column(column, rowkey_id, index_id, part_key_pos, column_id=0, is_hidden='false', is_storing_column='false', column_sink=None):
   global column_collation
   global is_extended_sys_table
   column_name = None
@@ -797,6 +798,13 @@ def add_column(column, rowkey_id, index_id, part_key_pos, column_id=0, is_hidden
 
   if len(column) >= 6:
     is_on_update_for_timestamp = column[5]
+
+  if column_sink is not None:
+    if column_type is None or column_name.startswith('[discard]'):
+      raise ValueError('Invalid system table function column: ' + str(column))
+    column_sink.append((column_name, column_type, column_collation_type,
+                        column_length, column_precision, column_scale, is_nullable))
+    return
 
   log_debug(column_name, rowkey_id, index_id, part_key_pos, column_type, column_length, is_nullable, is_autoincrement, default_value)
   if column_name.find("[discard]") == 0:
@@ -1289,6 +1297,86 @@ def generate_cluster_private_table(f):
       cluster_private_switch += 'case ' + table_name2tid(kw['table_name'] + kw['name_postfix']) + ':\n'
   f.write('\n\n#ifdef CLUSTER_PRIVATE_TABLE_SWITCH\n' + cluster_private_switch + '\n#endif\n')
 
+
+# Public names and required locator inputs are defined once for generation,
+# consumer migration and the implementation manifest.
+SYSTEM_FUNCTION_NAMES = {
+  '__all_virtual_all_table': 'table_status',
+  '__all_virtual_table_column': 'table_columns',
+  '__all_virtual_table_index': 'table_indexes',
+  'user': 'mysql_users',
+  'db': 'mysql_database_privileges',
+}
+SYSTEM_FUNCTION_ARGUMENTS = {
+  'table_status': (1, 1, 'database_id'),
+  'show_tables': (1, 1, 'database_id'),
+  'table_columns': (1, 1, 'table_id'),
+  'show_create_database': (1, 1, 'database_id'),
+  'show_create_table': (1, 1, 'table_id'),
+  'show_create_procedure': (1, 1, 'routine_id'),
+  'show_create_trigger': (1, 1, 'trigger_id'),
+  'privilege_grant': (1, -1, 'user_id, role_id...'),
+  'tx_data': (1, 1, 'tx_id'),
+  'mds_node_stat': (1, -1, 'tablet_id, tablet_id...'),
+  'information_columns': (0, 2, '[database_name, table_name]'),
+  'table_indexes': (0, 1, '[table_id]'),
+  'plan_cache_plan_explain': (0, 1, '[plan_id]'),
+}
+
+
+def system_table_function_name(name):
+  lowered = name.lower()
+  return SYSTEM_FUNCTION_NAMES.get(lowered,
+                                   re.sub(r'^__all_virtual_', '', lowered))
+
+
+def generate_system_table_functions(f):
+  global column_collation
+  global is_extended_sys_table
+  column_collation = 'CS_TYPE_INVALID'
+  is_extended_sys_table = False
+  definitions = sorted((kw for kw in all_def_keywords.values()
+                        if kw.get('table_type') == 'VIRTUAL_TABLE'),
+                       key=lambda kw: int(kw['table_id']))
+  seen = set()
+  f.write('\n#ifdef SYSTEM_TABLE_FUNCTION_DEFINITIONS\n')
+  for kw in definitions:
+    name = system_table_function_name(kw['table_name'])
+    if name in seen or kw.get('gm_columns'):
+      raise ValueError('Invalid system table function definition: ' + name)
+    seen.add(name)
+    columns = []
+    for col in kw['rowkey_columns'] + kw['normal_columns']:
+      add_column(col, 0, 0, 0, column_sink=columns)
+    if len({col[0].lower() for col in columns}) != len(columns):
+      raise ValueError('Duplicate output columns: ' + name)
+    f.write('static const TableFunctionColumn system_columns_{0}[] = {{\n'.format(kw['table_id']))
+    for i, col in enumerate(columns):
+      f.write('  make_system_table_column("{0}", {1}, {2}, {3}, {4}, {5}, {6}, OB_APP_MIN_COLUMN_ID + {7}),\n'.format(*(col + (i,))))
+    f.write('};\n')
+    if name == 'information_columns':
+      names = [col[0].lower() for col in columns]
+      lookup_ids = ['OB_APP_MIN_COLUMN_ID + ' + str(names.index(col))
+                    for col in ('table_schema', 'table_name')]
+      f.write('static const uint64_t system_lookup_columns_{0}[] = {{{1}}};\n'.format(
+          kw['table_id'], ', '.join(lookup_ids)))
+  f.write('static const TableFunctionDescriptor system_table_functions[] = {\n')
+  for kw in definitions:
+    name = system_table_function_name(kw['table_name'])
+    minimum, maximum, arguments = SYSTEM_FUNCTION_ARGUMENTS.get(name, (0, 0, ''))
+    database = kw.get('database_id', 'OB_SYS_DATABASE_ID')
+    required_database = ('nullptr' if database == 'OB_INFORMATION_SCHEMA_ID' else
+                         '"mysql"' if database == 'OB_MYSQL_SCHEMA_ID' else '"oceanbase"')
+    lookup = (', system_lookup_columns_{0}, ARRAYSIZEOF(system_lookup_columns_{0})'.format(
+        kw['table_id']) if name == 'information_columns' else '')
+    f.write('  {{{0}, "{1}", "{1}({2})", "{3}", {4}, {5}, system_columns_{0}, '
+            'ARRAYSIZEOF(system_columns_{0}), bind_fixed_table_function, '
+            'observer::create_system_table_function_scan, {6}{7}}},\n'.format(
+                kw['table_id'], name, arguments, 'System information: ' + name,
+                minimum, maximum, required_database, lookup))
+  f.write('};\n#endif // SYSTEM_TABLE_FUNCTION_DEFINITIONS\n')
+
+
 def generate_local_virtual_table_registration(f):
   """
   Generate local virtual table registration code snippets
@@ -1756,9 +1844,9 @@ def local_column_enum(name):
   return ''.join(part.capitalize() for part in name.split('_'))
 
 
-def def_local_table(table_name, table_id, namespace, namespace_id, columns,
-                    primary_key, indexes=()):
-  """Define storage and its read-only virtual table from the same columns.
+def def_local_table(table_name, namespace, namespace_id, columns,
+                    primary_key, indexes=(), virtual_table=False, table_id=None):
+  """Define local storage, optionally exposing a read-only virtual table.
 
   Column tuples use the regular inner-table format: name, SQL type, nullable,
   optional SQL default. Their order is the stored row layout.
@@ -1770,9 +1858,10 @@ def def_local_table(table_name, table_id, namespace, namespace_id, columns,
     raise ValueError('Unknown local key or index column: ' + table_name)
   if not 0 <= namespace_id <= 255:
     raise ValueError('Local namespace ID is out of range: ' + table_name)
-  for kw in all_local_virtual_tables:
-    storage = kw['storage']
-    if storage and (storage['namespace_id'] == namespace_id or storage['namespace'] == namespace):
+  if virtual_table and table_id is None:
+    raise ValueError('Missing virtual table ID: ' + table_name)
+  for storage in all_local_tables:
+    if storage['namespace_id'] == namespace_id or storage['namespace'] == namespace:
       raise ValueError('Duplicate local namespace: ' + namespace)
   for column in columns:
     local_column_kind(column[1])
@@ -1780,8 +1869,10 @@ def def_local_table(table_name, table_id, namespace, namespace_id, columns,
       raise ValueError('Invalid local column nullability: ' + column[0])
   storage = dict(namespace=namespace, namespace_id=namespace_id,
                  columns=columns, primary_key=primary_key, indexes=indexes)
-  _def_local_virtual_table(table_id, table_name.replace('__all_', '__all_virtual_', 1),
-                           columns, primary_key, storage)
+  all_local_tables.append(storage)
+  if virtual_table:
+    _def_local_virtual_table(table_id, table_name.replace('__all_', '__all_virtual_', 1),
+                             columns, primary_key, storage)
 
 
 def def_config_virtual_table(table_id, table_name, columns, primary_key):
@@ -1814,10 +1905,7 @@ def generate_local_table_schema():
     f.write('// Generated from ob_inner_table_schema_def.py. Do not edit.\n')
     f.write('#include "share/storage/local_store.h"\n\n')
     f.write('namespace oceanbase { namespace share {\n\n')
-    for kw in all_local_virtual_tables:
-      storage = kw['storage']
-      if storage is None:
-        continue
+    for storage in all_local_tables:
       namespace = storage['namespace']
       f.write('namespace {0}\n{{\n'.format(namespace))
       f.write('enum Column : uint32_t {{ {0} }};\n'.format(', '.join(
@@ -1984,6 +2072,19 @@ def def_table_schema(**keywords):
   check_fileds(fields, keywords)
 
   get_column_def_enum(**keywords)
+
+  # Virtual sources have program definitions, not table/index schema objects.
+  # Retain provider constants used by collectors while their callers migrate.
+  if keywords['table_type'] == 'VIRTUAL_TABLE':
+    name = keywords['table_name'] + keywords['name_postfix']
+    table_name_postfix_ids.append((name, int(keywords['table_id'])))
+    table_name_postfix_table_names.append((name, keywords['table_name']))
+    table_name_ids.append((keywords['table_name'], int(keywords['table_id']),
+                           keywords['base_table_name'], keywords['base_table_name1'],
+                           keywords['base_table_name2']))
+    if keywords.get('index'):
+      raise ValueError('System function lookup keys must not create index schemas')
+    return
 
   if 'index_name' in keywords:
     print_method_start(keywords['table_name'] + keywords['name_postfix'] + '_' + keywords['index_name'])
@@ -2421,7 +2522,8 @@ def generate_h_content():
   h_f.write("\npublic:\n")
   method_line = "  static int {0}_schema(share::schema::ObTableSchema &table_schema);\n"
   for (table_name, table_id) in new_table_name_postfix_ids:
-    h_f.write(method_line.format(table_name.replace('$', '_').lower().strip('_'), table_id))
+    if not is_virtual_table(table_id):
+      h_f.write(method_line.format(table_name.replace('$', '_').lower().strip('_'), table_id))
   for line in new_index_name_ids:
     h_f.write(method_line.format(line[2].replace('$', '_').strip('_').lower()+'_'+line[0].lower(), line[1]))
   line = """
@@ -2461,25 +2563,6 @@ private:
     if is_sys_table(table_id) and not is_core_table(table_id):
       h_f.write(method_name.format(table_name.replace('$', '_').lower().strip('_'), table_name))
       sys_table_count = sys_table_count + 1
-  h_f.write("  NULL,};\n\n")
-
-  h_f.write("const schema_create_func virtual_table_schema_creators [] = {\n")
-  for (table_name, table_id) in new_table_name_postfix_ids:
-    if is_mysql_virtual_table(table_id):
-      h_f.write(method_name.format(table_name.replace('$', '_').lower().strip('_'), table_name))
-      virtual_table_count = virtual_table_count + 1
-  for index_l in new_index_name_ids:
-    if is_mysql_virtual_table(index_l[1]):
-      h_f.write(method_name.format(index_l[2].replace('$', '_').strip('_').lower()+'_'+index_l[0].lower(), index_l[2]))
-      virtual_table_count = virtual_table_count + 1
-  for (table_name, table_id) in new_table_name_postfix_ids:
-    if is_extended_virtual_table(table_id):
-      h_f.write(method_name.format(table_name.replace('$', '_').lower().strip('_'), table_name))
-      virtual_table_count = virtual_table_count + 1
-  for index_l in new_index_name_ids:
-    if is_extended_virtual_table(index_l[1]):
-      h_f.write(method_name.format(index_l[2].replace('$', '_').strip('_').lower()+'_'+index_l[0].lower(), index_l[2]))
-      virtual_table_count = virtual_table_count + 1
   h_f.write("  NULL,};\n\n")
 
   h_f.write("const schema_create_func sys_view_schema_creators [] = {\n")
@@ -2760,6 +2843,7 @@ if __name__ == "__main__":
   generate_cluster_private_table(f)
   generate_sys_index_table_misc_data(f)
   generate_local_virtual_table_registration(f)
+  generate_system_table_functions(f)
 
   f.close()
 

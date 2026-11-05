@@ -115,36 +115,6 @@ private:
     } \
   } while (false)
 
-class ObSimpleVirtualTableIterator: public ObVirtualTableProjector
-{
-public:
-  ObSimpleVirtualTableIterator(uint64_t table_id);
-  virtual ~ObSimpleVirtualTableIterator() {}
-
-  virtual int inner_open() override;
-  virtual int inner_get_next_row(common::ObNewRow *&row) override;
-
-  // interface for subclass:
-  virtual int get_next_full_row(const share::schema::ObTableSchema *table,
-                            common::ObIArray<Column> &columns) = 0;
-  virtual int init_all_data() { return common::OB_SUCCESS; }
-private:
-  // types and constants
-  static const int64_t MAX_COLUMN_NUM = 32;
-private:
-  // disallow copy
-  DISALLOW_COPY_AND_ASSIGN(ObSimpleVirtualTableIterator);
-  // function members
-  int get_table_schema( uint64_t table_id);
-private:
-  // data members
-  uint64_t table_id_;
-  common::ObSEArray<Column, MAX_COLUMN_NUM> columns_;
-  share::schema::ObSchemaGetterGuard schema_guard_;
-  share::schema::ObMultiVersionSchemaService *schema_service_;
-  const share::schema::ObTableSchema *table_schema_;
-};
-
 }//end namespace common
 }//end namespace oceanbase
 

@@ -1,0 +1,4 @@
+id,name,score,active,day
+1,alice,1.5,true,2024-01-15
+2,"bob, jr",2,false,2024-02-29
+3,carol,NA,,2024-03-01

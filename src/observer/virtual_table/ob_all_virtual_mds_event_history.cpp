@@ -28,7 +28,8 @@ namespace observer
 
 bool ObAllVirtualMdsEventHistory::judge_key_in_ranges_(const MdsEventKey &key) const
 {
-  bool in_tablet_ranges = false;
+  // An invocation without a locator scans the complete event buffer.
+  bool in_tablet_ranges = key_ranges_.empty();
   for (int64_t idx = 0; idx < tablet_ranges_.count(); ++idx) {
     if (key.tablet_id_ >= tablet_ranges_[idx].element<0>() && key.tablet_id_ <= tablet_ranges_[idx].element<1>()) {
       in_tablet_ranges = true;
@@ -109,7 +110,7 @@ int ObAllVirtualMdsEventHistory::inner_get_next_row(common::ObNewRow *&row)
         ret = OB_ALLOCATE_MEMORY_FAILED;
         MDS_LOG(WARN, "fail to alloc buffer", K(*this));
       } else {
-        if (key_ranges_.count() >= 1 || !tablet_ranges_.empty()) {// scan read
+        if (key_ranges_.empty() || !tablet_ranges_.empty()) {// scan read
           ret = range_scan_(temp_buffer, BUFFER_SIZE);
         } else {// point read
           ret = point_read_(temp_buffer, BUFFER_SIZE);

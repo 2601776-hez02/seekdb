@@ -19,8 +19,18 @@ select count(*) from oceanbase.__all_user where user_name='root';
 |        4 |
 +----------+
 
-call dbms_stats.gather_table_stats('oceanbase', '__all_virtual_core_all_table');
-call dbms_stats.gather_table_stats('oceanbase', '__all_virtual_core_column_table');
+select count(*) > 0 as has_rows from core_all_table();
++----------+
+| has_rows |
++----------+
+|        1 |
++----------+
+select count(*) > 0 as has_rows from core_column_table();
++----------+
+| has_rows |
++----------+
+|        1 |
++----------+
 call dbms_stats.gather_table_stats('oceanbase', '__all_table');
 call dbms_stats.gather_table_stats('oceanbase', '__all_column');
 select OWNER, TABLE_NAME, NUM_ROWS from OCEANBASE.DBA_TAB_STATISTICS where table_name='__all_core_table' and NUM_ROWS > 0;
@@ -28,18 +38,6 @@ select OWNER, TABLE_NAME, NUM_ROWS from OCEANBASE.DBA_TAB_STATISTICS where table
 | OWNER | TABLE_NAME | NUM_ROWS |
 +-------+------------+----------+
 +-------+------------+----------+
-select OWNER, TABLE_NAME, NUM_ROWS from OCEANBASE.DBA_TAB_STATISTICS where table_name='__ALL_VIRTUAL_CORE_ALL_TABLE' and NUM_ROWS > 0;
-+-----------+------------------------------+----------+
-| OWNER     | TABLE_NAME                   | NUM_ROWS |
-+-----------+------------------------------+----------+
-| oceanbase | __all_virtual_core_all_table |       23 |
-+-----------+------------------------------+----------+
-select OWNER, TABLE_NAME, NUM_ROWS from OCEANBASE.DBA_TAB_STATISTICS where table_name='__ALL_VIRTUAL_CORE_COLUMN_TABLE' and NUM_ROWS > 0;
-+-----------+---------------------------------+----------+
-| OWNER     | TABLE_NAME                      | NUM_ROWS |
-+-----------+---------------------------------+----------+
-| oceanbase | __all_virtual_core_column_table |      290 |
-+-----------+---------------------------------+----------+
 select count(*) from OCEANBASE.DBA_TAB_STATISTICS where table_name='__all_table' and NUM_ROWS > 0;
 +----------+
 | count(*) |

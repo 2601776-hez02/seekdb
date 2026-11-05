@@ -653,10 +653,9 @@ int ObDMLResolver::bind_file_table_function(const TableFunctionCall &call, Table
       }
     } else if (positional_count > 0) {
       // Only the path may be passed positionally; every other argument has to
-      // be written as "name = value".  Report it as a syntax error so that
-      // clients see ER_PARSE_ERROR (1064), which is how a malformed argument
-      // list is reported for any other builtin.
-      ret = OB_ERR_PARSER_SYNTAX;
+      // be written as "name = value".  Report it with ER_PARSE_ERROR (1064) so
+      // that it matches how a malformed builtin argument list is reported.
+      ret = OB_ERR_PARSE_SQL;
     } else {
       ObObj value;
       ++positional_count;

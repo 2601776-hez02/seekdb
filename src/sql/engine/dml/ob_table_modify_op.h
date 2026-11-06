@@ -298,6 +298,31 @@ protected:
   int discharge_das_write_buffer();
   virtual void record_err_for_load_data(int err_ret, int row_num) { UNUSED(err_ret); UNUSED(row_num); }
 public:
+  // ---- AI COLUMN task queue ----------------------------------------------
+  // One row of the queue maintenance: the row predicate and the ai column of one
+  // row written by this dml (column_id_ is OB_INVALID_ID for a deleted row).
+  struct ObAIColumnTaskRow
+  {
+    common::ObString row_key_;
+    uint64_t table_id_;
+    uint64_t column_id_;
+    bool drop_;
+  };
+  // called for every row written to the das write buffer, renders the row
+  // predicate from the rowkey columns of the storage row and remembers the
+  // (row, ai column) pairs the statement has to enqueue.
+  int record_ai_column_task_row(const ObDASDMLBaseCtDef &das_ctdef,
+                                const ObChunkDatumStore::StoredRow &row,
+                                const int64_t das_op_type);
+  // render the row predicate of one written row from its rowkey columns
+  int build_ai_column_row_key(const ObDASDMLBaseCtDef &das_ctdef,
+                              const ObChunkDatumStore::StoredRow &row,
+                              const ObString &rowkey_columns,
+                              ObString &row_key);
+  static int parse_ai_column_task_target(const ObString &str, uint64_t &value);
+  // insert the task rows of the statement through the inner sql connection of the
+  // session, so they are visible in the same transaction and roll back with it.
+  int enqueue_ai_column_tasks();
   common::ObMySQLProxy *sql_proxy_;
   common::sqlclient::ObISQLConnectionGuard inner_conn_guard_;
   ObIInnerSQLConnection *inner_conn_;
@@ -313,6 +338,9 @@ public:
   ObDMLModifyRowsList dml_modify_rows_;
   ObSEArray<ObForeignKeyChecker *, 4> fk_checkers_;
   ObChunkDatumStore::ShadowStoredRow last_store_row_;
+  // AI COLUMN task queue: the rows written by this dml, see record_ai_column_task_row()
+  common::ObArenaAllocator ai_column_task_alloc_;
+  common::ObSEArray<ObAIColumnTaskRow, 8> ai_column_task_rows_;
 private:
   ObSQLSessionInfo::StmtSavedValue *saved_session_;
   char saved_session_buf_[sizeof(ObSQLSessionInfo::StmtSavedValue)] __attribute__((aligned (16)));;

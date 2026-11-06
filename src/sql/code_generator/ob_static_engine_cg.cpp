@@ -5854,6 +5854,150 @@ static int collect_ai_column_check_targets(const ObDMLStmt &stmt,
   return ret;
 }
 
+// AI COLUMN: the "cid:name" list of the rowkey columns of a table, used by the
+// dml operators to render the row predicate of a task row. Every column of the
+// rowkey has to be addressable, a table without a rowkey can not be maintained.
+static int build_ai_column_task_rowkey(const ObTableSchema &table_schema,
+                                       ObSqlString &rowkey_columns)
+{
+  int ret = OB_SUCCESS;
+  ObSEArray<uint64_t, 4> rowkey_column_ids;
+  if (OB_FAIL(table_schema.get_rowkey_info().get_column_ids(rowkey_column_ids))) {
+    LOG_WARN("failed to get the rowkey column ids", K(ret), K(table_schema.get_table_id()));
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_column_ids.count(); ++i) {
+    const ObColumnSchemaV2 *column = table_schema.get_column_schema(rowkey_column_ids.at(i));
+    if (OB_ISNULL(column)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("the rowkey column is not found", K(ret), K(rowkey_column_ids.at(i)));
+    } else if (OB_FAIL(rowkey_columns.append_fmt("%s%lu:%.*s",
+                                                 (0 == i) ? "" : ",",
+                                                 static_cast<unsigned long>(column->get_column_id()),
+                                                 column->get_column_name_str().length(),
+                                                 column->get_column_name_str().ptr()))) {
+      LOG_WARN("failed to append a rowkey column", K(ret));
+    }
+  }
+  return ret;
+}
+
+// AI COLUMN: the hidden status companion column (__ai_status_<c>) of an ai column.
+static const ObColumnSchemaV2 *find_ai_column_status_column(const ObTableSchema &table_schema,
+                                                            const ObColumnSchemaV2 &ai_column)
+{
+  const ObColumnSchemaV2 *status_column = NULL;
+  const ObString &ai_column_name = ai_column.get_column_name_str();
+  const ObString prefix = ObString::make_string(OB_AI_COLUMN_STATUS_COLUMN_PREFIX);
+  for (ObTableSchema::const_column_iterator iter = table_schema.column_begin();
+       NULL == status_column && iter != table_schema.column_end(); ++iter) {
+    const ObColumnSchemaV2 *column = *iter;
+    const ObString name = NULL == column ? ObString() : column->get_column_name_str();
+    if (NULL == column) {
+      // nothing to do
+    } else if (!column->is_ai_status_column()) {
+      // not a companion column
+    } else if (name.length() != prefix.length() + ai_column_name.length()) {
+      // not the companion of this ai column
+    } else if (0 != MEMCMP(name.ptr(), prefix.ptr(), prefix.length())) {
+      // a different prefix
+    } else if (0 != MEMCMP(name.ptr() + prefix.length(), ai_column_name.ptr(),
+                           ai_column_name.length())) {
+      // the companion of another ai column
+    } else {
+      status_column = column;
+    }
+  }
+  return status_column;
+}
+
+// AI COLUMN: record the ai columns of the tables written by this statement in the
+// plan. The dml operators use the record to maintain the task queue of the rows
+// they write: the task rows of a dml are inserted through the inner sql connection
+// of the session, so they are visible in the same transaction and disappear on a
+// rollback.
+static int collect_ai_column_task_targets(const ObDMLStmt &stmt,
+                                          ObSqlSchemaGuard &sql_schema_guard,
+                                          const ObIArray<uint64_t> &written_table_ids,
+                                          const ObIArray<uint64_t> &written_column_ids,
+                                          ObPhysicalPlan &phy_plan)
+{
+  int ret = OB_SUCCESS;
+  const ObDelUpdStmt *del_upd_stmt = NULL;
+  ObSEArray<const ObDmlTableInfo*, 2> table_infos;
+  if (!stmt.is_insert_stmt() && !stmt.is_update_stmt() && !stmt.is_delete_stmt()) {
+    // only insert/update/delete/replace write rows
+  } else if (NULL == (del_upd_stmt = dynamic_cast<const ObDelUpdStmt *>(&stmt))) {
+    // not a dml statement
+  } else if (OB_FAIL(del_upd_stmt->get_dml_table_infos(table_infos))) {
+    LOG_WARN("failed to get dml table infos", K(ret));
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_infos.count(); ++i) {
+    const ObDmlTableInfo *table_info = table_infos.at(i);
+    const TableItem *table_item = NULL;
+    const ObTableSchema *table_schema = NULL;
+    ObSqlString rowkey_columns;
+    if (OB_ISNULL(table_info)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("dml table info is null", K(ret));
+    } else if (OB_ISNULL(table_item = stmt.get_table_item_by_id(table_info->loc_table_id_))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("table item is null", K(ret), K(table_info->loc_table_id_));
+    } else if (!table_item->is_basic_table()) {
+      // the ai columns of a view are the ones of its base table, they are
+      // collected from the child statement
+    } else if (OB_FAIL(sql_schema_guard.get_table_schema(table_info->ref_table_id_, table_schema))) {
+      LOG_WARN("failed to get the table schema", K(ret), K(table_info->ref_table_id_));
+    } else if (OB_ISNULL(table_schema)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("table schema is null", K(ret), KPC(table_item));
+    } else if (OB_FAIL(build_ai_column_task_rowkey(*table_schema, rowkey_columns))) {
+    } else if (rowkey_columns.empty()) {
+      // a row that can not be addressed can not be maintained
+    } else {
+      for (ObTableSchema::const_column_iterator iter = table_schema->column_begin();
+           OB_SUCC(ret) && iter != table_schema->column_end(); ++iter) {
+        const ObColumnSchemaV2 *column_schema = *iter;
+        const ObColumnSchemaV2 *status_column = NULL;
+        uint64_t flags = 0;
+        bool invalidated = false;
+        if (OB_ISNULL(column_schema)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("column schema is null", K(ret));
+        } else if (!column_schema->is_ai_column()) {
+          // not an ai column, nothing to maintain
+        } else if (NULL == (status_column = find_ai_column_status_column(*table_schema,
+                                                                        *column_schema))) {
+          // the companion column is missing, the table is not usable
+          LOG_WARN("the ai column status column is not found",
+                   K(column_schema->get_column_name_str()));
+        } else {
+          // the statement invalidates the ai column of a row when it writes the
+          // hidden status companion column of the ai column: that is the mark the
+          // resolver sets on an insert and on an update that touches a dependency.
+          for (int64_t j = 0; OB_SUCC(ret) && !invalidated && j < written_table_ids.count(); ++j) {
+            invalidated = (written_table_ids.at(j) == table_info->table_id_
+                           || written_table_ids.at(j) == table_info->loc_table_id_)
+                       && written_column_ids.at(j) == status_column->get_column_id();
+          }
+          if (invalidated) {
+            flags |= ObPhysicalPlan::AI_COLUMN_TASK_FLAG_ENQUEUE;
+          }
+          const int tmp_ret = phy_plan.add_ai_column_task_target(table_info->ref_table_id_,
+                                                                 column_schema->get_column_id(),
+                                                                 flags,
+                                                                 rowkey_columns.string());
+          if (OB_SUCCESS != tmp_ret) {
+            // the target list is a bounded buffer, never fail the statement for it
+            LOG_WARN("failed to record an ai column task target", K(tmp_ret),
+                     K(table_info->ref_table_id_), K(column_schema->get_column_id()));
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObStaticEngineCG::set_properties_post(const ObLogPlan &log_plan, ObPhysicalPlan &phy_plan)
 {
   int ret = OB_SUCCESS;
@@ -6089,6 +6233,16 @@ int ObStaticEngineCG::set_properties_post(const ObLogPlan &log_plan, ObPhysicalP
                                                        written_table_ids,
                                                        written_column_ids,
                                                        phy_plan))) {
+    } else if (OB_NOT_NULL(my_session) && my_session->is_inner()) {
+      // AI COLUMN: the task queue is maintained for the statements of a client
+      // session only. The ai column worker publishes the value of an ai column with
+      // an inner statement that writes the hidden status companion column as READY:
+      // that write completes a task and must not enqueue one.
+    } else if (OB_FAIL(collect_ai_column_task_targets(*log_plan.get_stmt(),
+                                                      *sql_schema_guard,
+                                                      written_table_ids,
+                                                      written_column_ids,
+                                                      phy_plan))) {
     }
   }
 

@@ -21,6 +21,9 @@
 #include "query/session/ob_inner_sql_connection_access.h"
 #include "sql/engine/ob_physical_plan.h"
 #include "sql/engine/dml/ob_dml_service.h"
+#include "common/storage/ob_sequence.h"
+#include "lib/string/ob_sql_string.h"
+#include "share/inner_table/ob_inner_table_schema_constants.h"
 
 namespace oceanbase
 {
@@ -623,6 +626,8 @@ ObTableModifyOp::ObTableModifyOp(ObExecContext &ctx,
     execute_single_row_(false),
     dml_modify_rows_(ctx.get_allocator()),
     last_store_row_(),
+    ai_column_task_alloc_(),
+    ai_column_task_rows_(),
     saved_session_(NULL)
 {
   obj_print_params_ = CREATE_OBJ_PRINT_PARAM(ctx_.get_my_session());
@@ -844,6 +849,10 @@ int ObTableModifyOp::inner_rescan()
   }
   if (OB_SUCC(ret)) {
     dml_modify_rows_.clear();
+    // AI COLUMN: a rescan writes another batch of rows, the task rows of the
+    // previous batch have been enqueued already
+    ai_column_task_rows_.reset();
+    ai_column_task_alloc_.reset();
     if (OB_FAIL(calc_single_table_loc())) {
     }
   }
@@ -906,6 +915,322 @@ int ObTableModifyOp::calc_single_table_loc()
     } else {
       get_input()->table_loc_ = table_loc;
       get_input()->tablet_loc_ = table_loc->get_first_tablet_loc();
+    }
+  }
+  return ret;
+}
+
+// ---------------------------------------------------------------------------
+// AI COLUMN task queue
+// ---------------------------------------------------------------------------
+// The task rows are written through the inner sql connection of the session, which
+// runs the statement in the transaction of the session: the rows are visible to the
+// statement of the user in the same transaction and they are rolled back with it.
+// The task table is maintenance metadata, a failure here never fails the dml.
+static const int64_t MAX_AI_COLUMN_TASK_ROWS_PER_STMT = 4096;
+// __all_ai_column_task.task_status of a task that waits for a worker, see
+// ObAIColumnStatus::PENDING in observer/omt/ob_ai_service.h.
+static const int64_t OB_AI_COLUMN_TASK_STATUS_PENDING = 1;
+
+// escaping of a text literal, the same rules ObAIColumnWorker::append_text_literal_
+// uses, so the row_key of a task written here and by the worker are comparable.
+static int append_sql_text_literal(const ObString &value, ObSqlString &sql)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(sql.append("'"))) {
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < value.length(); ++i) {
+    const char c = value.ptr()[i];
+    switch (c) {
+      case '\'': ret = sql.append("''"); break;
+      case '\\': ret = sql.append("\\\\"); break;
+      case '\0': ret = sql.append("\\0"); break;
+      case '\n': ret = sql.append("\\n"); break;
+      case '\r': ret = sql.append("\\r"); break;
+      case '\032': ret = sql.append("\\Z"); break;
+      default: ret = sql.append(&c, 1); break;
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ret = sql.append("'");
+  }
+  return ret;
+}
+
+// the position of a column in the storage row of a dml ctdef
+static int64_t find_storage_column_position(const ObDASDMLBaseCtDef &das_ctdef,
+                                            const uint64_t column_id)
+{
+  int64_t pos = -1;
+  for (int64_t i = 0; -1 == pos && i < das_ctdef.column_ids_.count(); ++i) {
+    if (das_ctdef.column_ids_.at(i) == column_id) {
+      pos = i;
+    }
+  }
+  return pos;
+}
+
+// render the row predicate of one written row: "`id` = 2" or "`a` = 1 AND `b` = 2".
+// The format is the one ObAIColumnWorker generates for the rows it claims, so the
+// row_key of a task row written by a dml is the row_key of the same row.
+int ObTableModifyOp::build_ai_column_row_key(const ObDASDMLBaseCtDef &das_ctdef,
+                                             const ObChunkDatumStore::StoredRow &row,
+                                             const ObString &rowkey_columns,
+                                             ObString &row_key)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString text;
+  ObString desc = rowkey_columns;
+  row_key.reset();
+  while (OB_SUCC(ret) && !desc.empty()) {
+    ObString pair = desc.split_on(',');
+    if (pair.empty()) {
+      pair = desc;
+      desc.reset();
+    }
+    ObString column_id_str = pair.split_on(':');
+    const ObString column_name = pair;
+    uint64_t column_id = 0;
+    if (OB_UNLIKELY(column_id_str.empty() || column_name.empty())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid rowkey column description", K(ret), K(rowkey_columns));
+    } else {
+      for (int32_t i = 0; OB_SUCC(ret) && i < column_id_str.length(); ++i) {
+        const char c = column_id_str.ptr()[i];
+        if (OB_UNLIKELY(c < '0' || c > '9')) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("invalid rowkey column id", K(ret), K(column_id_str));
+        } else {
+          column_id = column_id * 10 + static_cast<uint64_t>(c - '0');
+        }
+      }
+    }
+    const int64_t pos = OB_FAIL(ret) ? -1 : find_storage_column_position(das_ctdef, column_id);
+    ObObj obj;
+    char *literal = NULL;
+    int64_t literal_len = 0;
+    int64_t literal_pos = 0;
+    if (OB_FAIL(ret)) {
+    } else if (OB_UNLIKELY(pos < 0 || pos >= row.cnt_ || pos >= das_ctdef.column_types_.count())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("the rowkey column is not in the storage row", K(ret), K(column_id),
+               K(row.cnt_), K(das_ctdef.column_ids_));
+    } else if (OB_UNLIKELY(row.cells()[pos].is_null())) {
+      // a null rowkey can not address a row: skip it silently
+      ret = OB_ERR_NULL_VALUE;
+    } else if (OB_FAIL(row.cells()[pos].to_obj(obj, das_ctdef.column_types_.at(pos)))) {
+      LOG_WARN("failed to convert a rowkey datum", K(ret), K(column_id));
+    } else if (OB_FAIL(obj.print_sql_literal(literal, literal_len, literal_pos,
+                                             ai_column_task_alloc_, obj_print_params_))) {
+      LOG_WARN("failed to print a rowkey literal", K(ret), K(obj));
+    } else if (OB_FAIL(text.append_fmt("%s`%.*s` = ", text.empty() ? "" : " AND ",
+                                       column_name.length(), column_name.ptr()))) {
+    } else if (OB_FAIL(text.append(literal, literal_pos))) {
+    }
+  }
+  if (OB_SUCC(ret)) {
+    char *buf = static_cast<char *>(ai_column_task_alloc_.alloc(text.length()));
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("failed to allocate the row key", K(ret));
+    } else {
+      MEMCPY(buf, text.ptr(), text.length());
+      row_key.assign_ptr(buf, static_cast<int32_t>(text.length()));
+    }
+  }
+  return ret;
+}
+
+int ObTableModifyOp::record_ai_column_task_row(const ObDASDMLBaseCtDef &das_ctdef,
+                                               const ObChunkDatumStore::StoredRow &row,
+                                               const int64_t das_op_type)
+{
+  int ret = OB_SUCCESS;
+  const char *targets = NULL == MY_SPEC.plan_ ? NULL : MY_SPEC.plan_->get_ai_column_task_targets();
+  const bool is_delete = DAS_OP_TABLE_DELETE == das_op_type;
+  if (NULL == targets || '\0' == targets[0] || das_ctdef.rowkey_cnt_ <= 0) {
+    // this statement does not maintain the task queue
+  } else if (OB_UNLIKELY(!is_delete
+                         && DAS_OP_TABLE_INSERT != das_op_type
+                         && DAS_OP_TABLE_UPDATE != das_op_type)) {
+    // locking does not change a row
+  } else if (ai_column_task_rows_.count() >= MAX_AI_COLUMN_TASK_ROWS_PER_STMT) {
+    // bounded buffer: the queue is metadata, a bigger statement keeps the rows it
+    // saw first instead of growing without limit
+  } else {
+    ObString records(targets);
+    while (OB_SUCC(ret) && !records.empty()) {
+      ObString record = records.split_on(ObPhysicalPlan::AI_COLUMN_TARGET_RECORD_SEP);
+      if (record.empty()) {
+        record = records;
+        records.reset();
+      }
+      ObString table_id_str = record.split_on(ObPhysicalPlan::AI_COLUMN_TARGET_FIELD_SEP);
+      ObString column_id_str = record.split_on(ObPhysicalPlan::AI_COLUMN_TARGET_FIELD_SEP);
+      ObString flags_str = record.split_on(ObPhysicalPlan::AI_COLUMN_TARGET_FIELD_SEP);
+      const ObString rowkey_columns = record;
+      uint64_t table_id = 0;
+      uint64_t column_id = 0;
+      uint64_t flags = 0;
+      if (OB_UNLIKELY(table_id_str.empty() || column_id_str.empty() || flags_str.empty()
+                      || rowkey_columns.empty())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("invalid ai column task target", K(ret), K(table_id_str), K(column_id_str));
+      } else if (OB_FAIL(parse_ai_column_task_target(table_id_str, table_id))) {
+        LOG_WARN("invalid ai column task target table id", K(ret), K(table_id_str));
+      } else if (OB_FAIL(parse_ai_column_task_target(column_id_str, column_id))) {
+        LOG_WARN("invalid ai column task target column id", K(ret), K(column_id_str));
+      } else if (OB_FAIL(parse_ai_column_task_target(flags_str, flags))) {
+        LOG_WARN("invalid ai column task target flags", K(ret), K(flags_str));
+      } else if (table_id != das_ctdef.index_tid_ && table_id != das_ctdef.table_id_) {
+        // the storage row belongs to an index table of the written table
+      } else if (!is_delete
+                 && 0 == (flags & ObPhysicalPlan::AI_COLUMN_TASK_FLAG_ENQUEUE)) {
+        // this statement does not invalidate the ai column
+      } else {
+        ObString row_key;
+        int tmp_ret = build_ai_column_row_key(das_ctdef, row, rowkey_columns, row_key);
+        if (OB_SUCCESS != tmp_ret) {
+          if (OB_ERR_NULL_VALUE != tmp_ret) {
+            LOG_WARN_RET(tmp_ret, "failed to render an ai column row key", K(tmp_ret),
+                         K(table_id), K(column_id));
+          }
+        } else {
+          const uint64_t record_column_id = is_delete ? OB_INVALID_ID : column_id;
+          bool exist = false;
+          for (int64_t i = 0; !exist && i < ai_column_task_rows_.count(); ++i) {
+            const ObAIColumnTaskRow &exist_row = ai_column_task_rows_.at(i);
+            exist = exist_row.table_id_ == table_id
+                 && exist_row.column_id_ == record_column_id
+                 && exist_row.drop_ == is_delete
+                 && exist_row.row_key_.length() == row_key.length()
+                 && 0 == MEMCMP(exist_row.row_key_.ptr(), row_key.ptr(), row_key.length());
+          }
+          if (exist) {
+            // the same row was written twice by this statement
+          } else {
+            ObAIColumnTaskRow task_row;
+            task_row.row_key_ = row_key;
+            task_row.table_id_ = table_id;
+            task_row.column_id_ = record_column_id;
+            task_row.drop_ = is_delete;
+            if (OB_FAIL(ai_column_task_rows_.push_back(task_row))) {
+              LOG_WARN("failed to record an ai column task row", K(ret));
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTableModifyOp::parse_ai_column_task_target(const ObString &str, uint64_t &value)
+{
+  int ret = OB_SUCCESS;
+  value = 0;
+  if (OB_UNLIKELY(str.empty())) {
+    ret = OB_INVALID_ARGUMENT;
+  }
+  for (int32_t i = 0; OB_SUCC(ret) && i < str.length(); ++i) {
+    const char c = str.ptr()[i];
+    if (OB_UNLIKELY(c < '0' || c > '9')) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      value = value * 10 + static_cast<uint64_t>(c - '0');
+    }
+  }
+  return ret;
+}
+
+int ObTableModifyOp::enqueue_ai_column_tasks()
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  if (ai_column_task_rows_.empty()) {
+    // nothing to maintain
+  } else if (OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("session is null", K(ret));
+  } else if (NULL == inner_conn_ && OB_FAIL(open_inner_conn())) {
+    LOG_WARN("failed to open the inner connection of the dml", K(ret));
+  } else if (OB_ISNULL(inner_conn_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("inner connection is null", K(ret));
+  } else {
+    int end_ret = OB_SUCCESS;
+    // The statements below write an engine table (__all_ai_column_task), so they run
+    // the way the engine itself runs such a statement: as an inner session that is
+    // not a nested one, see ObSqlPlan::prepare_and_store_session(). The transaction
+    // of the user statement is deliberately kept, so the task rows are visible in
+    // the statement transaction and disappear with its rollback.
+    ObSQLSessionInfo::StmtSavedValue &saved_session = get_saved_session();
+    const int64_t saved_nested_count = session->get_nested_count();
+    bool saved = false;
+    if (OB_FAIL(session->save_session(saved_session))) {
+      LOG_WARN("failed to save the session state", K(ret));
+    } else {
+      saved = true;
+      session->set_inner_session();
+      session->set_nested_count(-1);
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < ai_column_task_rows_.count(); ++i) {
+      const ObAIColumnTaskRow &task_row = ai_column_task_rows_.at(i);
+      // One task row per (table, row): the queue entry of the row is refreshed, this
+      // also replaces a pending entry the same row already had.
+      ObSqlString drop_sql;
+      if (OB_FAIL(drop_sql.assign_fmt("DELETE FROM oceanbase.%s WHERE table_id = %lu "
+                                      "AND row_key = ",
+                                      OB_ALL_AI_COLUMN_TASK_TNAME,
+                                      static_cast<unsigned long>(task_row.table_id_)))) {
+        LOG_WARN("failed to build the task cleanup statement", K(ret));
+      } else if (OB_FAIL(append_sql_text_literal(task_row.row_key_, drop_sql))) {
+        LOG_WARN("failed to append the row key", K(ret));
+      } else {
+        int64_t affected_rows = 0;
+        if (OB_FAIL(inner_conn_->execute_write(drop_sql.string(), affected_rows))) {
+          LOG_WARN("failed to clean the task queue of a row", K(ret), K(drop_sql));
+        } else if (task_row.drop_) {
+          // a deleted row leaves no task behind
+        } else {
+          ObSqlString insert_sql;
+          const int64_t task_id = (ObTimeUtility::current_time() << 10)
+                                | (ObSequence::inc_and_get_max_seq_no() & 0x3ff);
+          if (OB_FAIL(insert_sql.assign_fmt(
+                  "INSERT INTO oceanbase.%s (task_id, table_id, row_key, column_ids, "
+                  "srcvers, def_versions, request_id, task_status, retry_count, "
+                  "lease_owner, lease_expire_ts, input_snapshot, rowkey_predicate, "
+                  "eligible_ts) VALUES (%ld, %lu, ",
+                  OB_ALL_AI_COLUMN_TASK_TNAME, task_id,
+                  static_cast<unsigned long>(task_row.table_id_)))) {
+            LOG_WARN("failed to build the task statement", K(ret));
+          } else if (OB_FAIL(append_sql_text_literal(task_row.row_key_, insert_sql))) {
+            LOG_WARN("failed to append the row key", K(ret));
+          } else if (OB_FAIL(insert_sql.append_fmt(
+                       ", '%lu', '0', '0', '', %ld, 0, '', 0, '', ",
+                       static_cast<unsigned long>(task_row.column_id_),
+                       OB_AI_COLUMN_TASK_STATUS_PENDING))) {
+            LOG_WARN("failed to append the task columns", K(ret));
+          } else if (OB_FAIL(append_sql_text_literal(task_row.row_key_, insert_sql))) {
+            LOG_WARN("failed to append the row key", K(ret));
+          } else if (OB_FAIL(insert_sql.append(", now(6))"))) {
+            LOG_WARN("failed to finish the task statement", K(ret));
+          } else if (OB_FAIL(inner_conn_->execute_write(insert_sql.string(), affected_rows))) {
+            LOG_WARN("failed to enqueue an ai column task", K(ret), K(insert_sql));
+          }
+        }
+      }
+    }
+    if (saved) {
+      session->set_nested_count(saved_nested_count);
+      end_ret = session->restore_session(saved_session);
+      saved_session.reset();
+      if (OB_SUCCESS != end_ret && OB_SUCCESS == ret) {
+        ret = end_ret;
+      }
+      if (OB_SUCCESS != end_ret) {
+        LOG_WARN("failed to restore the session state", K(end_ret));
+      }
     }
   }
   return ret;
@@ -1134,6 +1459,13 @@ int ObTableModifyOp::inner_get_next_row()
     //to post process the DML info after writing all data to the storage or returning one row
     ret = write_rows_post_proc(ret);
     if (OB_SUCC(ret) && iter_end_) {
+      // AI COLUMN: the statement has written all of its rows, maintain the task
+      // queue of the rows it invalidated. A failure here is only logged, the task
+      // queue is maintenance metadata and never fails the dml.
+      const int tmp_ret = enqueue_ai_column_tasks();
+      if (OB_SUCCESS != tmp_ret) {
+        LOG_WARN_RET(tmp_ret, "failed to enqueue the ai column tasks of the statement", K(tmp_ret));
+      }
       ret = OB_ITER_END;
     }
   }

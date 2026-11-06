@@ -1763,6 +1763,16 @@ int ObDMLService::write_row_to_das_op(const ObDASDMLBaseCtDef &ctdef,
   } else if (OB_FAIL(dml_op->write_row(row, dml_rtctx.get_eval_ctx(), stored_row))) {
   } else if (OB_ISNULL(stored_row)) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (DAS_OP_TABLE_LOCK != N) {
+    // AI COLUMN: remember the row predicate of the row so the dml operator can
+    // maintain the ai column task queue of the tables it writes. The task queue is
+    // maintenance metadata: a failure here is logged and never fails the dml.
+    const int tmp_ret = dml_rtctx.op_.record_ai_column_task_row(ctdef, *stored_row, N);
+    if (OB_SUCCESS != tmp_ret) {
+      LOG_WARN_RET(tmp_ret, "failed to record an ai column task row", K(tmp_ret));
+    }
+  }
+  if (OB_FAIL(ret)) {
   } else if (FALSE_IT(dml_rtctx.add_das_task_memory_size(stored_row->row_size_))) {
     // do nothing
   } else if (OB_NOT_NULL(trans_info_expr) &&

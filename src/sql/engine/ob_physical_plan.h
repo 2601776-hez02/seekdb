@@ -223,6 +223,7 @@ public:
   // one ai column. The check targets are carried as "db\x1ftable\x1fcolumn"
   // records separated by '\x1e', they are only filled when the flag is set.
   static const int64_t MAX_AI_COLUMN_CHECK_TARGETS_LEN = 4096;
+  static const int64_t MAX_AI_COLUMN_TASK_TARGETS_LEN = 8192;
   static constexpr char AI_COLUMN_TARGET_FIELD_SEP = '\x1f';
   static constexpr char AI_COLUMN_TARGET_RECORD_SEP = '\x1e';
   inline bool get_plan_references_ai_column() const { return plan_references_ai_column_; }
@@ -236,6 +237,19 @@ public:
                                  const common::ObString &column_name,
                                  const uint64_t table_id,
                                  const uint64_t column_id);
+  // ---- AI COLUMN task queue ----------------------------------------------
+  // The targets of the task queue maintenance, one record per (table, ai column):
+  // "table id\x1f column id\x1f flags\x1f rk column id:name, ...". A dml operator
+  // renders the row predicate of a written row from the rowkey column list and
+  // enqueues a task row in the same transaction (see ObTableModifyOp).
+  // flags bit 0: a row written by this statement invalidates the ai column.
+  static const uint64_t AI_COLUMN_TASK_FLAG_ENQUEUE = 1ULL << 0;
+  inline const char *get_ai_column_task_targets() const { return ai_column_task_targets_; }
+  inline bool has_ai_column_task_targets() const { return '\0' != ai_column_task_targets_[0]; }
+  int add_ai_column_task_target(const uint64_t table_id,
+                                const uint64_t column_id,
+                                const uint64_t flags,
+                                const common::ObString &rowkey_columns);
   // ---- end of AI COLUMN strict read support ------------------------------
   void set_is_wise_join(const bool is_wise_join) { is_wise_join_ = is_wise_join; }
   bool is_wise_join() const { return is_wise_join_; }
@@ -551,6 +565,9 @@ private:
   // (database, table, column) triples that have to pass the readiness check.
   bool plan_references_ai_column_;
   char ai_column_check_targets_[MAX_AI_COLUMN_CHECK_TARGETS_LEN];
+  // AI COLUMN task queue: the ai columns of the tables written by this dml and the
+  // rowkey columns used to render the row predicate of the task rows.
+  char ai_column_task_targets_[MAX_AI_COLUMN_TASK_TARGETS_LEN];
 };
 
 inline void ObPhysicalPlan::set_affected_last_insert_id(bool affected_last_insert_id)

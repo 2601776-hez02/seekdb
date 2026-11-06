@@ -547,6 +547,7 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
         } else if (FALSE_IT(column_id = column_schema->get_column_id())) {
           //do nothing
         } else if (OB_FAIL(check_need_assignment(assigns.at(i).assignments_,
+                                                 *table_schema,
                                                  table_item->table_id_,
                                                  trigger_exist,
                                                  *column_schema,
@@ -823,6 +824,7 @@ int ObDelUpdResolver::add_assignment(common::ObIArray<ObTableAssignment> &assign
 }
 
 int ObDelUpdResolver::check_need_assignment(const common::ObIArray<ObAssignment> &assigns,
+                                            const ObTableSchema &table_schema,
                                             uint64_t table_id,
                                             bool before_update_row_trigger_exist,
                                             const ObColumnSchemaV2 &column,
@@ -859,19 +861,27 @@ int ObDelUpdResolver::check_need_assignment(const common::ObIArray<ObAssignment>
     // AI COLUMN: the ai column result is derived from its dependency columns.
     // Once any dependency column is assigned by this statement the stored result
     // becomes stale, so the ai column must be invalidated in the same statement.
+    // The row identity is a dependency too: when the rowkey changes the row is
+    // replaced by a new one, whose ai column has to be generated again.
     if (OB_FAIL(ObResolverUtils::check_whether_assigned(stmt, assigns, table_id, column.get_column_id(), exist))) {
     } else if (!exist) {
       ObArray<uint64_t> dep_columns;
-      if (OB_FAIL(ObDMLResolver::get_ai_dep_column_ids(column, dep_columns))) {
+      ObArray<uint64_t> rowkey_columns;
+      if (OB_FAIL(ObDMLResolver::get_ai_dep_column_ids(table_schema, column, dep_columns))) {
+      } else if (table_schema.get_rowkey_info().get_size() > 0
+                 && OB_FAIL(table_schema.get_rowkey_info().get_column_ids(rowkey_columns))) {
+        LOG_WARN("failed to get rowkey column ids", K(ret), K(column));
       }
-      LOG_WARN("[AI_COLUMN][DEBUG] ai dep check", K(column.get_column_name_str()),
-               "dep_cnt", dep_columns.count(), K(table_id));
       for (int64_t i = 0; OB_SUCC(ret) && !exist && i < dep_columns.count(); ++i) {
         if (OB_FAIL(ObResolverUtils::check_whether_assigned(stmt, assigns, table_id, dep_columns.at(i), exist))) {
         }
       }
+      for (int64_t i = 0; OB_SUCC(ret) && !exist && i < rowkey_columns.count(); ++i) {
+        if (OB_FAIL(ObResolverUtils::check_whether_assigned(stmt, assigns, table_id, rowkey_columns.at(i), exist))) {
+        }
+      }
       if (OB_SUCC(ret) && exist) {
-        //a dependency column of the ai column has been assigned
+        //a dependency column (or the rowkey) of the ai column has been assigned
         need_assign = true;
       }
     }

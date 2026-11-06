@@ -64,6 +64,10 @@ const char *const OB_AI_COLUMN_FUNC_RERANK = "AI_RERANK";
 const char *const OB_AI_COLUMN_STATUS_COLUMN_PREFIX = "__ai_status_";
 const char *const OB_AI_COLUMN_SRCVER_COLUMN_PREFIX = "__ai_srcver_";
 const char *const OB_AI_COLUMN_RESULT_SPEC_COLUMN_PREFIX = "__ai_resultspec_";
+// AI column: the comment of the status companion column starts with this marker and
+// carries the dependency column ids of the ai column ("<prefix><id>,<id>").  It is
+// the only carrier that survives a reload of the table schema from the catalog.
+const char *const OB_AI_COLUMN_DEPS_COMMENT_PREFIX = "__ai_deps:";
 // AI column: default value of option max_retries
 static const int64_t OB_DEFAULT_AI_COLUMN_MAX_RETRIES = 3;
 static const int64_t OB_MAX_AI_COLUMN_MAX_RETRIES = 100;

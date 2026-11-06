@@ -1523,9 +1523,11 @@ int ObAIColumnWorker::publish_row_(ObInnerSQLConnection &conn,
                                   : ((exhausted_cnt > 0) ? AI_TASK_FAILED
                                   : ((retry_cnt > 0) ? AI_TASK_RUNNING
                                                      : AI_TASK_DONE));
+      // a finished (or dropped) row leaves no task row behind: the queue entry the
+      // dml of the row wrote is dropped together with the claim row of this worker.
       int tmp_ret = (AI_TASK_RUNNING == task_status)
                         ? update_task_row_(conn, task_id, task_status, max_retry_count, ObString())
-                        : delete_task_row_(conn, task_id);
+                        : delete_row_tasks_(conn, table.table_id_, row.row_key_);
       if (OB_SUCCESS != tmp_ret) {
         LOG_WARN_RET(tmp_ret, "[AI_COLUMN_WORKER] fail to update task row",
                      K(tmp_ret), K(task_id), K(task_status));
@@ -1795,13 +1797,13 @@ int ObAIColumnWorker::publish_retry_(ObInnerSQLConnection &conn,
     ++published_count_;
     LOG_INFO("[AI_COLUMN_WORKER] retried ai column published",
              K(table.table_id_), K(def.column_id_), K(backoff.retry_count_));
-    int tmp_ret = delete_task_row_(conn, backoff.task_id_);
+    int tmp_ret = delete_row_tasks_(conn, table.table_id_, ObString(backoff.row_key_len_, backoff.row_key_));
     LOG_WARN_RET(tmp_ret, "fail to delete finished task row", K(tmp_ret));
   } else {
     ++dropped_count_;
     LOG_INFO("[AI_COLUMN_WORKER] stale retried publish dropped", K(affected_rows),
              K(table.table_id_), K(def.column_id_));
-    int tmp_ret = delete_task_row_(conn, backoff.task_id_);
+    int tmp_ret = delete_row_tasks_(conn, table.table_id_, ObString(backoff.row_key_len_, backoff.row_key_));
     LOG_WARN_RET(tmp_ret, "fail to delete dropped task row", K(tmp_ret));
   }
   return ret;
@@ -1837,7 +1839,8 @@ int ObAIColumnWorker::fail_retry_(ObInnerSQLConnection &conn,
       ++failed_count_;
       LOG_INFO("[AI_COLUMN_WORKER] ai column reached terminal FAILED",
                K(table.table_id_), K(def.column_id_), K(affected_rows));
-      int tmp_ret = delete_task_row_(conn, backoff.task_id_);
+      int tmp_ret = delete_row_tasks_(conn, table.table_id_,
+                                      ObString(backoff.row_key_len_, backoff.row_key_));
       LOG_WARN_RET(tmp_ret, "fail to delete failed task row", K(tmp_ret));
     }
   }
@@ -1986,6 +1989,27 @@ int ObAIColumnWorker::delete_task_row_(ObInnerSQLConnection &conn, const int64_t
                                     OB_ALL_AI_COLUMN_TASK_TNAME, task_id))) {
   } else if (OB_FAIL(execute_sql_(conn, sql, SHORT_STMT_TIMEOUT_US, affected_rows))) {
     LOG_WARN("fail to delete ai column task row", KR(ret), K(sql));
+  }
+  return ret;
+}
+
+// The task row of a row is written by the dml of the statement that invalidated the
+// row (visible in its transaction), the worker only claims the row. Both rows have
+// the same (table_id, row_key) and the queue entry is dropped whenever the work of
+// the row is finished, whichever task row it belongs to.
+int ObAIColumnWorker::delete_row_tasks_(ObInnerSQLConnection &conn,
+                                       const uint64_t table_id,
+                                       const ObString &row_key)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  int64_t affected_rows = 0;
+  if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE table_id = %lu AND row_key = ",
+                             OB_ALL_AI_COLUMN_TASK_TNAME,
+                             static_cast<unsigned long>(table_id)))) {
+  } else if (OB_FAIL(append_text_literal_(row_key, sql))) {
+  } else if (OB_FAIL(execute_sql_(conn, sql, SHORT_STMT_TIMEOUT_US, affected_rows))) {
+    LOG_WARN("fail to delete the ai column task rows of a row", KR(ret), K(sql));
   }
   return ret;
 }

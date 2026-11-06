@@ -80,6 +80,7 @@ protected:
                              const ColumnItem *col_item,
                              ObAssignment &assign);
   int check_need_assignment(const common::ObIArray<ObAssignment> &assigns,
+                            const share::schema::ObTableSchema &table_schema,
                             uint64_t table_id,
                             bool before_update_row_trigger_exist,
                             const share::schema::ObColumnSchemaV2 &column,

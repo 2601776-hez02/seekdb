@@ -8532,6 +8532,7 @@ int ObDDLResolver::build_ai_column_hidden_columns(ObColumnSchemaV2 &ai_column,
         OB_AI_COLUMN_STATUS_COLUMN_PREFIX, OB_AI_COLUMN_SRCVER_COLUMN_PREFIX,
         OB_AI_COLUMN_RESULT_SPEC_COLUMN_PREFIX};
     const uint64_t column_ids[] = {status_column_id, srcver_column_id, result_spec_column_id};
+    const int64_t first_hidden_column = hidden_columns.count();
     for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
       ObColumnSchemaV2 hidden_column;
       char name_buf[OB_MAX_COLUMN_NAME_LENGTH] = {'\0'};
@@ -8563,6 +8564,31 @@ int ObDDLResolver::build_ai_column_hidden_columns(ObColumnSchemaV2 &ai_column,
         }
         if (OB_FAIL(hidden_columns.push_back(hidden_column))) {
           LOG_WARN("fail to push back ai column hidden column", K(ret));
+        }
+      }
+    }
+    // The dependency column ids of the ai column have to survive into the table
+    // schema that is loaded from the catalog: the ai column spec is a resolve
+    // time structure that is not persisted, and the expression text is only kept
+    // in the default value slot, whose type handling loses it for a non string
+    // ai column (json / bigint / vector).  The comment of the engine owned status
+    // companion column carries them instead, see
+    // ObDMLResolver::get_ai_dep_column_ids().
+    if (OB_SUCC(ret) && hidden_columns.count() > first_hidden_column) {
+      ObSqlString deps;
+      ObColumnSchemaV2 &status_column = hidden_columns.at(first_hidden_column);
+      for (int64_t j = 0; OB_SUCC(ret) && j < ai_spec.dep_column_ids_.count(); ++j) {
+        if (OB_FAIL(deps.append_fmt("%s%lu", (0 == j) ? "" : ",",
+                                    static_cast<unsigned long>(ai_spec.dep_column_ids_.at(j))))) {
+          LOG_WARN("fail to build the ai column dependency list", K(ret));
+        }
+      }
+      if (OB_SUCC(ret) && !deps.empty()) {
+        ObSqlString comment;
+        if (OB_FAIL(comment.append_fmt("%s%s", OB_AI_COLUMN_DEPS_COMMENT_PREFIX,
+                                       deps.string().ptr()))) {
+        } else if (OB_FAIL(status_column.set_comment(comment.string()))) {
+          LOG_WARN("fail to set the ai column dependency comment", K(ret));
         }
       }
     }

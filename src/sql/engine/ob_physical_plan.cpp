@@ -115,6 +115,7 @@ ObPhysicalPlan::ObPhysicalPlan(MemoryContext &mem_context /* = CURRENT_CONTEXT *
     plan_references_ai_column_(false)
 {
   ai_column_check_targets_[0] = '\0';
+  ai_column_task_targets_[0] = '\0';
 }
 
 ObPhysicalPlan::~ObPhysicalPlan()
@@ -197,6 +198,7 @@ void ObPhysicalPlan::reset()
   px_worker_share_plan_enabled_ = false;
   plan_references_ai_column_ = false;
   ai_column_check_targets_[0] = '\0';
+  ai_column_task_targets_[0] = '\0';
 }
 void ObPhysicalPlan::destroy()
 {
@@ -655,7 +657,8 @@ OB_SERIALIZE_MEMBER(ObPhysicalPlan,
                     px_parallel_rule_,
                     px_worker_share_plan_enabled_,
                     plan_references_ai_column_,
-                    ai_column_check_targets_);
+                    ai_column_check_targets_,
+                    ai_column_task_targets_);
 
 int ObPhysicalPlan::add_ai_column_check_target(const common::ObString &database_name,
                                                const common::ObString &table_name,
@@ -698,6 +701,51 @@ int ObPhysicalPlan::add_ai_column_check_target(const common::ObString &database_
       MEMCPY(pos, id_buf[i], id_len[i]);
       pos += id_len[i];
     }
+    *pos = '\0';
+  }
+  return ret;
+}
+
+// AI COLUMN task queue: one record per (table, ai column) written by the statement.
+int ObPhysicalPlan::add_ai_column_task_target(const uint64_t table_id,
+                                              const uint64_t column_id,
+                                              const uint64_t flags,
+                                              const common::ObString &rowkey_columns)
+{
+  int ret = OB_SUCCESS;
+  char table_id_buf[24];
+  char column_id_buf[24];
+  char flags_buf[24];
+  const int table_id_len = snprintf(table_id_buf, sizeof(table_id_buf), "%lu", table_id);
+  const int column_id_len = snprintf(column_id_buf, sizeof(column_id_buf), "%lu", column_id);
+  const int flags_len = snprintf(flags_buf, sizeof(flags_buf), "%lu", flags);
+  const int64_t len = static_cast<int64_t>(strlen(ai_column_task_targets_));
+  const int64_t need = table_id_len + column_id_len + flags_len + rowkey_columns.length()
+                     + 3 /* three separators */ + 1 /* record separator when len > 0 */;
+  if (OB_UNLIKELY(OB_INVALID_ID == table_id || OB_INVALID_ID == column_id
+                  || table_id_len <= 0 || column_id_len <= 0 || flags_len <= 0
+                  || rowkey_columns.empty())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid ai column task target", K(ret), K(table_id), K(column_id), K(rowkey_columns));
+  } else if (OB_UNLIKELY(len + need >= MAX_AI_COLUMN_TASK_TARGETS_LEN)) {
+    ret = OB_SIZE_OVERFLOW;
+    LOG_WARN("ai column task targets buffer is full", K(ret), K(len), K(need));
+  } else {
+    char *pos = ai_column_task_targets_ + len;
+    if (len > 0) {
+      *pos++ = AI_COLUMN_TARGET_RECORD_SEP;
+    }
+    MEMCPY(pos, table_id_buf, table_id_len);
+    pos += table_id_len;
+    *pos++ = AI_COLUMN_TARGET_FIELD_SEP;
+    MEMCPY(pos, column_id_buf, column_id_len);
+    pos += column_id_len;
+    *pos++ = AI_COLUMN_TARGET_FIELD_SEP;
+    MEMCPY(pos, flags_buf, flags_len);
+    pos += flags_len;
+    *pos++ = AI_COLUMN_TARGET_FIELD_SEP;
+    MEMCPY(pos, rowkey_columns.ptr(), rowkey_columns.length());
+    pos += rowkey_columns.length();
     *pos = '\0';
   }
   return ret;

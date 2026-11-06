@@ -278,6 +278,12 @@ private:
                        const char *request_id,
                        int64_t &task_id);
   int delete_task_row_(ObInnerSQLConnection &conn, const int64_t task_id);
+  // Drop every task row of one row: the queue entry written by the dml of the row
+  // and the claim row of the worker itself. A task row only lives while the work is
+  // outstanding, so finishing (or dropping) a row leaves no task row behind.
+  int delete_row_tasks_(ObInnerSQLConnection &conn,
+                        const uint64_t table_id,
+                        const common::ObString &row_key);
   int update_task_row_(ObInnerSQLConnection &conn,
                        const int64_t task_id,
                        const int64_t task_status,

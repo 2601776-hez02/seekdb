@@ -516,8 +516,13 @@ public:
                                      const share::schema::ObColumnSchemaV2 &ai_column,
                                      const bool want_status_column,
                                      const share::schema::ObColumnSchemaV2 *&companion);
-  static int get_ai_dep_column_ids(const share::schema::ObColumnSchemaV2 &ai_column,
+  static int get_ai_dep_column_ids(const share::schema::ObTableSchema &table,
+                                   const share::schema::ObColumnSchemaV2 &ai_column,
                                    common::ObIArray<uint64_t> &dep_column_ids);
+  // AI COLUMN: parse the dependency column ids the DDL stores in the comment of
+  // the hidden status companion column (see OB_AI_COLUMN_DEPS_COMMENT_PREFIX).
+  static int parse_ai_column_deps_comment(const common::ObString &comment,
+                                          common::ObIArray<uint64_t> &dep_column_ids);
   // a per-statement monotonic source version used as the durable invalidation mark,
   // see notes/module-dml.md for why a resolve time constant is enough.
   static int64_t build_ai_srcver_value();

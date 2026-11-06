@@ -5932,21 +5932,68 @@ int ObDMLResolver::get_ai_companion_column(const ObTableSchema &table,
   return ret;
 }
 
-// AI COLUMN: dependency columns of an ai column, recorded by the DDL in the ai
-// column metadata. get_cascaded_column_ids() only works while resolving the
-// column definition itself (it reads a resolve time bit set), so it is used as a
-// fallback only.
-int ObDMLResolver::get_ai_dep_column_ids(const ObColumnSchemaV2 &ai_column,
+// AI COLUMN: dependency columns of an ai column. The DDL records them in two
+// places: the ai column spec (only alive while the table is being created or
+// altered) and the comment of the hidden status companion column, which is the
+// only carrier that survives a reload of the table schema from the catalog.
+int ObDMLResolver::get_ai_dep_column_ids(const ObTableSchema &table,
+                                         const ObColumnSchemaV2 &ai_column,
                                          ObIArray<uint64_t> &dep_column_ids)
 {
   int ret = OB_SUCCESS;
   const ObAIColumnSpec &ai_spec = ai_column.get_ai_spec();
+  const ObColumnSchemaV2 *status_column = NULL;
   if (!ai_spec.dep_column_ids_.empty()) {
     if (OB_FAIL(append(dep_column_ids, ai_spec.dep_column_ids_))) {
       LOG_WARN("failed to get ai column dependency columns", K(ret), K(ai_column));
     }
   } else if (OB_FAIL(ai_column.get_cascaded_column_ids(dep_column_ids))) {
     LOG_WARN("failed to get ai column dependency columns", K(ret), K(ai_column));
+  } else if (!dep_column_ids.empty()) {
+    // the resolve time dependency set is complete
+  } else if (OB_FAIL(get_ai_companion_column(table, ai_column, true, status_column))) {
+    LOG_WARN("failed to get the ai column status column", K(ret), K(ai_column));
+  } else if (NULL == status_column) {
+    // a table without the companion columns, no dependency to collect
+  } else if (OB_FAIL(parse_ai_column_deps_comment(status_column->get_comment_str(),
+                                                  dep_column_ids))) {
+    LOG_WARN("failed to parse the ai column dependencies", K(ret),
+             K(status_column->get_comment_str()));
+  }
+  return ret;
+}
+
+// AI COLUMN: "<prefix><id>,<id>,..." -> dependency column ids
+int ObDMLResolver::parse_ai_column_deps_comment(const ObString &comment,
+                                                ObIArray<uint64_t> &dep_column_ids)
+{
+  int ret = OB_SUCCESS;
+  const ObString prefix = ObString::make_string(OB_AI_COLUMN_DEPS_COMMENT_PREFIX);
+  if (comment.empty() || comment.length() <= prefix.length()
+      || 0 != MEMCMP(comment.ptr(), prefix.ptr(), prefix.length())) {
+    // not a dependency marker
+  } else {
+    int64_t i = prefix.length();
+    while (OB_SUCC(ret) && i < comment.length()) {
+      uint64_t id = 0;
+      const int64_t start = i;
+      while (i < comment.length() && comment.ptr()[i] >= '0' && comment.ptr()[i] <= '9') {
+        id = id * 10 + static_cast<uint64_t>(comment.ptr()[i] - '0');
+        ++i;
+      }
+      if (OB_UNLIKELY(i == start || OB_INVALID_ID == id)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("invalid ai column dependency marker", K(ret), K(comment));
+      } else if (!has_exist_in_array(dep_column_ids, id)
+                 && OB_FAIL(dep_column_ids.push_back(id))) {
+        LOG_WARN("failed to record an ai column dependency", K(ret), K(id));
+      } else if (i < comment.length() && ',' == comment.ptr()[i]) {
+        ++i;
+      } else if (i < comment.length()) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("invalid ai column dependency marker", K(ret), K(comment));
+      }
+    }
   }
   return ret;
 }

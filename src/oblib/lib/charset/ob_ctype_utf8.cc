@@ -120,7 +120,11 @@ static inline size_t ob_well_formed_len_utf8mb4(const ObCharsetInfo *cs,
   return (size_t) (b - b_start);
 }
 
-static int ob_mb_wc_utf8mb4(const ObCharsetInfo *cs __attribute__((unused)),
+// Inlined: the general utf8mb4 collation decodes both strings character by
+// character for every comparison and hash, so the call overhead of this decoder
+// is paid on the hottest path of fulltext index build (memtable rowkey
+// comparison) and of fulltext queries (rowkey merge).
+static OB_INLINE int ob_mb_wc_utf8mb4(const ObCharsetInfo *cs __attribute__((unused)),
                  ob_wc_t * pwc, const uchar *s, const uchar *e)
 {
   uchar c;

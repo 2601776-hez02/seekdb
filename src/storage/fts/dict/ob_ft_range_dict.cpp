@@ -378,26 +378,60 @@ int ObFTRangeDict::match_with_hit(const ObString &single_word,
   return last_hit.dict_->match_with_hit(single_word, last_hit, hit);
 }
 
+bool ObFTRangeDict::range_contains(const ObFTRange &range, const ObString &single_word)
+{
+  return ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                           range.start_.get_word(),
+                           single_word)
+             <= 0
+      && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                           range.end_.get_word(),
+                           single_word)
+             >= 0;
+}
+
 int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const
 {
   int ret = OB_SUCCESS;
-  bool found = false;
-  for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
-      dict = range_dicts_[i].dict_;
-      found = true;
-    }
-  }
-  if (!found) {
-    // not found, dis match
+  dict = nullptr;
+  const int64_t range_cnt = range_dicts_.size();
+  if (OB_UNLIKELY(range_cnt <= 0)) {
     ret = OB_ENTRY_NOT_EXIST;
+  } else {
+    int64_t hit_idx = -1;
+    // The text being segmented is local, so adjacent characters usually fall
+    // into the same range: try the cached hint before searching.
+    const int64_t hint = last_range_hint_;
+    if (hint >= 0 && hint < range_cnt && range_contains(range_dicts_.at(hint), single_word)) {
+      hit_idx = hint;
+    } else {
+      // Ranges are non-overlapping and sorted by their start word, so the only
+      // candidate is the last range whose start_ is not greater than the word.
+      // This replaces the former linear scan over all ranges.
+      int64_t left = 0;
+      int64_t right = range_cnt - 1;
+      while (left <= right) {
+        const int64_t mid = left + (right - left) / 2;
+        if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                              range_dicts_.at(mid).start_.get_word(),
+                              single_word)
+            <= 0) {
+          hit_idx = mid;
+          left = mid + 1;
+        } else {
+          right = mid - 1;
+        }
+      }
+      if (hit_idx >= 0 && !range_contains(range_dicts_.at(hit_idx), single_word)) {
+        hit_idx = -1;
+      }
+    }
+    if (hit_idx < 0) {
+      ret = OB_ENTRY_NOT_EXIST;
+    } else {
+      dict = range_dicts_.at(hit_idx).dict_;
+      last_range_hint_ = static_cast<int32_t>(hit_idx);
+    }
   }
   return ret;
 }

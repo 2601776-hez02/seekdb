@@ -92,6 +92,9 @@ ObSRDaaTIterImpl::ObSRDaaTIterImpl()
     next_round_iter_idxes_(),
     next_round_cnt_(0),
     set_datum_func_(nullptr),
+    small_dim_cnt_(0),
+    small_live_cnt_(0),
+    use_small_merge_(false),
     filter_is_trivial_match_(false)
 {
 }
@@ -151,7 +154,9 @@ int ObSRDaaTIterImpl::init(
     } else if (OB_FAIL(buffered_relevances_.init(max_batch_size))) {
     } else if (OB_FAIL(buffered_relevances_.prepare_allocate(max_batch_size))) {
     } else if (OB_FAIL(merge_cmp_.init(iter_param_->id_proj_expr_->datum_meta_, &iter_domain_ids_))) {
-    } else if (OB_FAIL(init_merge_heap(dim_iters_->count()))) {
+    } else if (FALSE_IT(use_small_merge_ = dim_iters.count() <= SMALL_MERGE_MAX_DIM_CNT
+                                                   && support_small_merge())) {
+    } else if (!use_small_merge_ && OB_FAIL(init_merge_heap(dim_iters_->count()))) {
     } else {
       for (int64_t i = 0; i < dim_iters.count(); ++i) {
         next_round_iter_idxes_[i] = i;
@@ -160,6 +165,7 @@ int ObSRDaaTIterImpl::init(
 
     if (OB_SUCC(ret)) {
       next_round_cnt_ = dim_iters.count();
+      reset_small_merge_state(dim_iters.count());
       input_row_cnt_ = 0;
       output_row_cnt_ = 0;
       filter_is_trivial_match_ = is_trivial_match_filter(iter_param_->filter_expr_);
@@ -184,6 +190,9 @@ void ObSRDaaTIterImpl::reset()
   buffered_relevances_.reset();
   next_round_iter_idxes_.reset();
   next_round_cnt_ = 0;
+  small_dim_cnt_ = 0;
+  small_live_cnt_ = 0;
+  use_small_merge_ = false;
   input_row_cnt_ = 0;
   output_row_cnt_ = 0;
   is_inited_ = false;
@@ -199,6 +208,9 @@ void ObSRDaaTIterImpl::reuse(const bool switch_tablet)
     next_round_cnt_ = dim_iters_->count();
     for (int64_t i = 0; i < next_round_cnt_; ++i) {
       next_round_iter_idxes_[i] = i;
+    }
+    if (use_small_merge_) {
+      reset_small_merge_state(dim_iters_->count());
     }
   }
   if (OB_NOT_NULL(relevance_collector_)) {
@@ -287,7 +299,17 @@ int ObSRDaaTIterImpl::do_one_merge_round(int64_t &count)
   bool need_project = true;
   double relevance = 0.0;
   const ObDatum *id_datum = nullptr;
-  if (OB_FAIL(fill_merge_heap())) {
+  if (OB_UNLIKELY(use_small_merge_)) {
+    if (OB_FAIL(small_advance_dims())) {
+    } else if (OB_UNLIKELY(0 == small_live_cnt_)) {
+      ret = OB_ITER_END;
+    } else if (OB_FAIL(small_collect_dims_by_id(id_datum, relevance, need_project))) {
+    } else if (need_project && OB_FAIL(filter_on_demand(count, relevance, need_project))) {
+    } else if (need_project && OB_FAIL(cache_result(count, *id_datum, relevance))) {
+      if (OB_ITER_END != ret) {
+      }
+    }
+  } else if (OB_FAIL(fill_merge_heap())) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
     }
   } else if (OB_FAIL(collect_dims_by_id(id_datum, relevance, need_project))) {
@@ -297,6 +319,107 @@ int ObSRDaaTIterImpl::do_one_merge_round(int64_t &count)
     }
   }
   return ret;
+}
+
+int ObSRDaaTIterImpl::small_advance_dims()
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < next_round_cnt_; ++i) {
+    const int64_t iter_idx = next_round_iter_idxes_[i];
+    ObISRDaaTDimIter *dim_iter = nullptr;
+    if (OB_UNLIKELY(iter_idx < 0 || iter_idx >= small_dim_cnt_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_ISNULL(dim_iter = dim_iters_->at(iter_idx))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(dim_iter->get_next_row())) {
+      if (OB_ITER_END == ret) {
+        // this dimension is exhausted, it stops taking part in the merge
+        ret = OB_SUCCESS;
+        if (small_live_[iter_idx]) {
+          small_live_[iter_idx] = false;
+          --small_live_cnt_;
+        }
+      }
+    } else if (OB_FAIL(dim_iter->get_curr_score(small_items_[iter_idx].relevance_))) {
+    } else if (OB_NOT_NULL(iter_param_->dim_weights_) &&
+               FALSE_IT(small_items_[iter_idx].relevance_ = small_items_[iter_idx].relevance_
+                        * iter_param_->field_boost_ * iter_param_->dim_weights_->at(iter_idx))) {
+    } else if (OB_FAIL(dim_iter->get_curr_id(iter_domain_ids_[iter_idx]))) {
+    } else {
+      small_items_[iter_idx].iter_idx_ = iter_idx;
+    }
+  }
+  if (OB_SUCC(ret)) {
+    next_round_cnt_ = 0;
+  }
+  return ret;
+}
+
+int ObSRDaaTIterImpl::small_collect_dims_by_id(const ObDatum *&id_datum,
+                                               double &relevance,
+                                               bool &got_valid_id)
+{
+  int ret = OB_SUCCESS;
+  int64_t champion = -1;
+  int64_t matched_mask = 0;
+  // one linear scan picks the smallest document id and remembers every
+  // dimension that has a row for it
+  for (int64_t i = 0; OB_SUCC(ret) && i < small_dim_cnt_; ++i) {
+    if (!small_live_[i]) {
+      continue;
+    } else if (OB_UNLIKELY(champion < 0)) {
+      champion = i;
+      matched_mask = 1LL << i;
+    } else {
+      int64_t cmp_ret = 0;
+      if (OB_FAIL(merge_cmp_.cmp(small_items_[i], small_items_[champion], cmp_ret))) {
+      } else if (cmp_ret < 0) {
+        champion = i;
+        matched_mask = 1LL << i;
+      } else if (0 == cmp_ret) {
+        matched_mask |= 1LL << i;
+      }
+    }
+  }
+
+  relevance = 0.0;
+  got_valid_id = false;
+  if (OB_FAIL(ret)) {
+  } else if (OB_UNLIKELY(champion < 0)) {
+    ret = OB_ITER_END;
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < small_dim_cnt_; ++i) {
+      if (0 == (matched_mask & (1LL << i))) {
+        continue;
+      } else if (OB_FAIL(relevance_collector_->collect_one_dim(i, small_items_[i].relevance_))) {
+      } else if (OB_UNLIKELY(next_round_cnt_ >= small_dim_cnt_)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        // the dimension is advanced in the next round
+        next_round_iter_idxes_[next_round_cnt_++] = i;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      id_datum = iter_domain_ids_[champion];
+      if (OB_ISNULL(id_datum)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(relevance_collector_->get_result(relevance, got_valid_id))) {
+      } else if (got_valid_id && OB_FAIL(process_collected_row(*id_datum, relevance))) {
+      }
+    }
+  }
+  return ret;
+}
+
+void ObSRDaaTIterImpl::reset_small_merge_state(const int64_t dim_cnt)
+{
+  small_dim_cnt_ = dim_cnt;
+  small_live_cnt_ = dim_cnt;
+  for (int64_t i = 0; i < SMALL_MERGE_MAX_DIM_CNT; ++i) {
+    small_live_[i] = i < dim_cnt;
+    small_items_[i].iter_idx_ = i;
+    small_items_[i].relevance_ = 0.0;
+  }
 }
 
 int ObSRDaaTIterImpl::fill_merge_heap()

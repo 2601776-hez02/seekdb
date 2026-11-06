@@ -106,6 +106,10 @@ protected:
   ObFixedArray<int64_t, ObIAllocator> next_round_iter_idxes_;
   int64_t next_round_cnt_;
   void (*set_datum_func_)(ObDatum &, const ObDocIdExt &);
+  // True when the pushed filter is the plain "WHERE MATCH(...)" predicate, which
+  // is implied by the exact [token, MIN] .. [token, MAX] inverted index scan
+  // range and therefore cannot reject a row (see filter_on_demand()).
+  bool filter_is_trivial_match_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObSRDaaTIterImpl);
 };

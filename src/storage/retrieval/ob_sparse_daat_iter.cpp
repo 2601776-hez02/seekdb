@@ -82,10 +82,28 @@ ObSRDaaTIterImpl::ObSRDaaTIterImpl()
     buffered_relevances_(),
     next_round_iter_idxes_(),
     next_round_cnt_(0),
-    set_datum_func_(nullptr)
+    set_datum_func_(nullptr),
+    filter_is_trivial_match_(false)
 {
 }
 
+namespace {
+// The pushed match filter of a fulltext scan is the plain "WHERE MATCH(...)"
+// predicate (T_OP_BOOL over the MATCH AGAINST expression).  The inverted index
+// scan range is built as exactly [token, MIN] .. [token, MAX], so every row the
+// scan returns has a word equal to one of the query tokens and this predicate
+// cannot reject the row.  Score thresholds, NOT (...) and the remaining
+// conditions are filters above the scan, they keep working.
+bool is_trivial_match_filter(const ObExpr *expr)
+{
+  return nullptr != expr
+      && T_OP_BOOL == expr->type_
+      && 1 == expr->arg_cnt_
+      && nullptr != expr->args_
+      && nullptr != expr->args_[0]
+      && T_FUN_MATCH_AGAINST == expr->args_[0]->type_;
+}
+} // namespace
 int ObSRDaaTIterImpl::init(
     ObSparseRetrievalMergeParam &iter_param,
     ObIArray<ObISRDaaTDimIter *> &dim_iters,
@@ -135,6 +153,7 @@ int ObSRDaaTIterImpl::init(
       next_round_cnt_ = dim_iters.count();
       input_row_cnt_ = 0;
       output_row_cnt_ = 0;
+      filter_is_trivial_match_ = is_trivial_match_filter(iter_param_->filter_expr_);
       is_inited_ = true;
     }
   }
@@ -356,6 +375,19 @@ int ObSRDaaTIterImpl::filter_on_demand(const int64_t count, const double relevan
 
   if (!iter_param_->need_filter()) {
     need_project = true;
+  } else if (filter_is_trivial_match_ && eval_ctx->is_vectorized()) {
+    // The predicate is implied by the exact scan range: only publish the
+    // relevance of the accepted document, no need to evaluate the filter.
+    if (OB_UNLIKELY(count >= eval_ctx->max_batch_size_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      guard.set_batch_idx(count);
+      ObDatum &relevance_proj_datum = relevance_proj_expr->locate_datum_for_write(*eval_ctx);
+      relevance_proj_datum.set_double(relevance);
+      relevance_proj_expr->get_evaluated_flags(*eval_ctx).set(count);
+      relevance_proj_expr->set_evaluated_projected(*eval_ctx);
+      need_project = true;
+    }
   } else if (eval_ctx->is_vectorized()) {
     if (OB_UNLIKELY(count >= eval_ctx->max_batch_size_)) {
       ret = OB_ERR_UNEXPECTED;

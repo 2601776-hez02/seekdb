@@ -26,6 +26,7 @@ namespace storage
 ObSRMergeCmp::ObSRMergeCmp()
   : cmp_func_(nullptr),
     iter_ids_(nullptr),
+    is_uint_id_(false),
     is_inited_(false)
 {
 }
@@ -39,6 +40,7 @@ int ObSRMergeCmp::init(
     ret = OB_ERR_UNEXPECTED;
   } else {
     iter_ids_ = iter_ids;
+    is_uint_id_ = (ObUInt64Type == id_meta.type_);
     common::ObDatumBasicFuncs *basic_funcs = ObDatumFuncs::get_basic_func(id_meta.type_, id_meta.cs_type_);
     cmp_func_ = basic_funcs->null_first_cmp_;
     if (OB_ISNULL(cmp_func_)) {
@@ -59,11 +61,18 @@ int ObSRMergeCmp::cmp(
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
   } else {
-    int tmp_ret = 0;
-    if (OB_FAIL(cmp_func_(
-            get_id_datum(l.iter_idx_), get_id_datum(r.iter_idx_), tmp_ret, nullptr))) {
+    const ObDatum &l_id = get_id_datum(l.iter_idx_);
+    const ObDatum &r_id = get_id_datum(r.iter_idx_);
+    if (OB_LIKELY(is_uint_id_ && !l_id.is_null() && !r_id.is_null())) {
+      const uint64_t l_val = l_id.get_uint64();
+      const uint64_t r_val = r_id.get_uint64();
+      cmp_ret = l_val < r_val ? -1 : (l_val == r_val ? 0 : 1);
     } else {
-      cmp_ret = tmp_ret;
+      int tmp_ret = 0;
+      if (OB_FAIL(cmp_func_(l_id, r_id, tmp_ret, nullptr))) {
+      } else {
+        cmp_ret = tmp_ret;
+      }
     }
   }
   return ret;

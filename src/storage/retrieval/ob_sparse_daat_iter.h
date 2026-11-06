@@ -98,6 +98,17 @@ protected:
   virtual int cache_result(int64_t &count, const ObDatum &id_datum, const double relevance);
   virtual int project_results(const int64_t count);
   int init_merge_heap(const int64_t count);
+  // Fast path of the merge when only a few dimensions are involved: keep the
+  // head item of every dimension in a small fixed array and pick the smallest
+  // document id with one linear scan, instead of pushing and popping a rows
+  // merger for every document.
+  // the block max iterator keeps its own heap and must not take this path
+  virtual bool support_small_merge() const { return true; }
+  int small_advance_dims();
+  int small_collect_dims_by_id(const ObDatum *&id_datum, double &relevance, bool &got_valid_id);
+  void reset_small_merge_state(const int64_t dim_cnt);
+protected:
+  static const int64_t SMALL_MERGE_MAX_DIM_CNT = 4;
 protected:
   ObIAllocator *iter_allocator_;
   ObSparseRetrievalMergeParam *iter_param_;
@@ -111,6 +122,12 @@ protected:
   ObFixedArray<int64_t, ObIAllocator> next_round_iter_idxes_;
   int64_t next_round_cnt_;
   void (*set_datum_func_)(ObDatum &, const ObDocIdExt &);
+  // state of the small dimension merge fast path, see small_advance_dims()
+  ObSRMergeItem small_items_[SMALL_MERGE_MAX_DIM_CNT];
+  bool small_live_[SMALL_MERGE_MAX_DIM_CNT];
+  int64_t small_dim_cnt_;
+  int64_t small_live_cnt_;
+  bool use_small_merge_;
   // True when the pushed filter is the plain "WHERE MATCH(...)" predicate, which
   // is implied by the exact [token, MIN] .. [token, MAX] inverted index scan
   // range and therefore cannot reject a row (see filter_on_demand()).

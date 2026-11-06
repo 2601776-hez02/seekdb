@@ -18,6 +18,9 @@
 #include "lib/container/ob_se_array.h"
 #include "common/json_type/ob_json_bin.h"
 #include "share/ob_errno.h"
+
+#include <algorithm>
+
 #define USING_LOG_PREFIX SQL_DAS
 
 #include "ob_das_domain_utils.h"
@@ -309,13 +312,41 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
   } else {
     int64_t i = 0;
     rows = new (rows_buf) blocksstable::ObDatumRow[ft_word_map.size()];
+    // Emit the index rows in word order.  The inverted index key is
+    // (word, doc_id) [or (doc_id, word) for the doc-word table], so writing the
+    // words of one document in ascending order keeps the memtable b-tree write
+    // path sequential inside the document instead of jumping over the whole key
+    // space in hash order, which is what the word map iteration gives us.
+    struct FTWordItem
+    {
+      const char *ptr_;
+      int32_t len_;
+      int64_t cnt_;
+    };
+    common::ObSEArray<FTWordItem, 64> items;
     for (ObFTWordMap::const_iterator iter = ft_word_map.begin();
          OB_SUCC(ret) && iter != ft_word_map.end();
          ++iter) {
+      const ObString word_str = iter->first.get_word().get_string();
+      FTWordItem item;
+      item.ptr_ = word_str.ptr();
+      item.len_ = static_cast<int32_t>(word_str.length());
+      item.cnt_ = iter->second;
+      if (OB_FAIL(items.push_back(item))) {
+      }
+    }
+    if (OB_SUCC(ret)) {
+      std::sort(items.begin(), items.end(),
+                [](const FTWordItem &lhs, const FTWordItem &rhs) {
+                  const int32_t min_len = MIN(lhs.len_, rhs.len_);
+                  const int cmp = 0 == min_len ? 0 : MEMCMP(lhs.ptr_, rhs.ptr_, min_len);
+                  return 0 != cmp ? cmp < 0 : lhs.len_ < rhs.len_;
+                });
+    }
+    for (int64_t k = 0; OB_SUCC(ret) && k < items.count(); ++k) {
       if (OB_FAIL(rows[i].init(allocator, FT_WORD_DOC_COL_CNT))) {
       } else {
-        const ObFTWord &ft_word = iter->first;
-        const int64_t word_cnt = iter->second;
+        const int64_t word_cnt = items.at(k).cnt_;
         // index row format
         //  -    FTS_INDEX: [WORD], [DOC_ID], [WORD_COUNT], [DOC_LENGTH]
         //  - FTS_DOC_WORD: [DOC_ID], [WORD], [WORD_COUNT], [DOC_LENGTH]
@@ -323,7 +354,8 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
         const int64_t doc_id_idx = is_fts_index_aux ? 1 : 0;
         const int64_t word_cnt_idx = 2;
         const int64_t doc_len_idx = 3;
-        rows[i].storage_datums_[word_idx].set_datum(ft_word.get_word());
+        rows[i].storage_datums_[word_idx].set_string(
+            ObString(items.at(k).len_, items.at(k).ptr_));
         rows[i].storage_datums_[doc_id_idx].shallow_copy_from_datum(doc_id_datum);
         rows[i].storage_datums_[word_cnt_idx].set_uint(word_cnt);
         rows[i].storage_datums_[doc_len_idx].set_uint(doc_length);

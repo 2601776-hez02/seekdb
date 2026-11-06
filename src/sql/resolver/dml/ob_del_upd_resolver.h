@@ -229,6 +229,15 @@ protected:
                                                 ObSchemaGetterGuard *schema_guard,
                                                 const common::ObIArray<ObAssignment> &assigns,
                                                 bool &update_with_vector_index);
+  // AI COLUMN: invalidating an ai column that carries a vector index writes the column,
+  // see the definition for the details.
+  int check_ai_column_vector_index(ObSchemaGetterGuard *schema_guard,
+                                   const ObTableSchema &table_schema,
+                                   const uint64_t table_id,
+                                   const bool before_update_row_trigger_exist,
+                                   const common::ObIArray<ObAssignment> &assigns,
+                                   const ObStmtScope scope,
+                                   bool &update_with_vector_index);
 protected:
   int generate_insert_table_info(const TableItem &table_item,
                                  ObInsertTableInfo &table_info,

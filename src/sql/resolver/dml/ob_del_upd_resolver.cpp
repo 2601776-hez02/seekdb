@@ -494,6 +494,51 @@ int ObDelUpdResolver::check_update_vector_col_with_vector_index(const ObTableSch
   return ret;
 }
 
+// AI COLUMN: an ai column may carry a vector index. Invalidating it writes the column
+// (the value is reset), so the statement is an update of a vector indexed column and the
+// hidden domain columns (the vid of the row) have to be renewed exactly like a statement
+// that assigns the column itself does: without a new vid the vector index maintenance
+// keeps writing the old key and the second update of the row fails with a duplicate key.
+// The check has to run before the implicit invalidation assignments are added, because
+// they are what makes the statement a writer of the column.
+int ObDelUpdResolver::check_ai_column_vector_index(ObSchemaGetterGuard *schema_guard,
+                                                   const ObTableSchema &table_schema,
+                                                   const uint64_t table_id,
+                                                   const bool before_update_row_trigger_exist,
+                                                   const common::ObIArray<ObAssignment> &assigns,
+                                                   const ObStmtScope scope,
+                                                   bool &update_with_vector_index)
+{
+  int ret = OB_SUCCESS;
+  ObIndexType index_type = INDEX_TYPE_MAX;
+  for (ObTableSchema::const_column_iterator iter = table_schema.column_begin();
+       OB_SUCC(ret) && !update_with_vector_index && iter != table_schema.column_end();
+       ++iter) {
+    const ObColumnSchemaV2 *column = *iter;
+    bool need_assign = false;
+    bool has_vector_index = false;
+    if (OB_ISNULL(column)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("the column of the table schema is null", K(ret));
+    } else if (!column->is_ai_column()) {
+      // an ordinary column is handled by check_update_vector_col_with_vector_index()
+    } else if (OB_FAIL(check_need_assignment(assigns, table_schema, table_id,
+                                             before_update_row_trigger_exist,
+                                             *column, need_assign))) {
+      LOG_WARN("failed to check the assignment of an ai column", K(ret));
+    } else if (!need_assign && T_INSERT_SCOPE != scope) {
+      // the statement keeps the value of this ai column, its vector is not rewritten
+    } else if (OB_FAIL(ObVectorIndexUtil::check_column_has_vector_index(
+                         table_schema, *schema_guard, column->get_column_id(),
+                         has_vector_index, index_type))) {
+      LOG_WARN("failed to check the vector index of an ai column", K(ret));
+    } else if (has_vector_index) {
+      update_with_vector_index = true;
+    }
+  }
+  return ret;
+}
+
 int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment> &assigns,
                                                      const ObStmtScope scope)
 {
@@ -530,6 +575,15 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
                                                                  schema_guard,
                                                                  assigns.at(i).assignments_,
                                                                  update_with_vector_index))) {
+    } else if (!update_with_vector_index
+               && OB_FAIL(check_ai_column_vector_index(schema_guard,
+                                                       *table_schema,
+                                                       table_item->table_id_,
+                                                       trigger_exist,
+                                                       assigns.at(i).assignments_,
+                                                       scope,
+                                                       update_with_vector_index))) {
+      LOG_WARN("failed to check the vector index of the invalidated ai columns", K(ret));
     } else {
       // AI COLUMN: the source version used to invalidate ai columns. It is taken
       // once per statement and per table, all rows invalidated by this statement

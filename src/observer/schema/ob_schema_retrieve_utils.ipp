@@ -978,14 +978,23 @@ int fill_column_schema_default_value(T &result,
                                      common::ColumnType default_type)
 {
   int ret = common::OB_SUCCESS;
-  EXTRACT_DEFAULT_VALUE_FIELD_MYSQL(result, orig_default_value, default_type,
-                                    column,false, false);
-  EXTRACT_DEFAULT_VALUE_FIELD_MYSQL_V2(result, default_type,
-                                    column, true, false);
-  EXTRACT_DEFAULT_VALUE_FIELD_MYSQL(result, orig_default_value_v2, default_type,
-                                    column, false, true);
-  EXTRACT_DEFAULT_VALUE_FIELD_MYSQL(result, cur_default_value_v2, default_type,
-                                    column, true, true);
+  if (column.is_ai_column()) {
+    // AI COLUMN: the default value slot of an ai column carries the expression text
+    // of the column (see ObDDLResolver::resolve_ai_column_attribute), it is not a
+    // value of the column type. Parsing it as a default value would cast the text to
+    // the result type and fail (e.g. "Incorrect integer value" for a bigint ai
+    // column), the text is only needed by the ddl that writes __all_ai_column, so it
+    // is not loaded here.
+  } else {
+    EXTRACT_DEFAULT_VALUE_FIELD_MYSQL(result, orig_default_value, default_type,
+                                      column,false, false);
+    EXTRACT_DEFAULT_VALUE_FIELD_MYSQL_V2(result, default_type,
+                                      column, true, false);
+    EXTRACT_DEFAULT_VALUE_FIELD_MYSQL(result, orig_default_value_v2, default_type,
+                                      column, false, true);
+    EXTRACT_DEFAULT_VALUE_FIELD_MYSQL(result, cur_default_value_v2, default_type,
+                                      column, true, true);
+  }
   return ret;
 }
 

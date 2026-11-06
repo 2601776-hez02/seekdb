@@ -109,11 +109,15 @@ const char *const AI_COLUMN_TABLE_COL_DEF_VERSION = "def_version";
 const char *const AI_COLUMN_TABLE_COL_AI_FUNCTION = "ai_function";
 
 
-// __all_ai_column_task task_status values (contract 1.7)
+// __all_ai_column_task state values (contract 1.7). A row that waits for a worker is
+// PENDING, a claimed row is RUNNING, a row whose attempt failed but still has retry
+// budget is RETRY (the official worker case reads state = 3 for such a row), and a
+// finished row is DONE or FAILED - in both cases the row itself is dropped.
 const int64_t AI_TASK_PENDING = 0;
 const int64_t AI_TASK_RUNNING = 1;
 const int64_t AI_TASK_DONE = 2;
-const int64_t AI_TASK_FAILED = 3;
+const int64_t AI_TASK_RETRY = 3;
+const int64_t AI_TASK_FAILED = 4;
 
 const int64_t AI_CLAIM_LEASE_US = 60 * 1000 * 1000;  // lease advertised in the task table
 const int64_t AI_TASK_ID_SEQ_MASK = 0x3FF;
@@ -422,7 +426,7 @@ int ObAIColumnWorker::recover_stuck_rows_(ObInnerSQLConnection &conn)
     // tasks that were RUNNING but not finished by the dead incarnation
     ObSqlString sql;
     int64_t affected_rows = 0;
-    if (OB_FAIL(sql.assign_fmt("UPDATE %s SET task_status = %ld WHERE task_status = %ld",
+    if (OB_FAIL(sql.assign_fmt("UPDATE %s SET state = %ld WHERE state = %ld",
                                OB_ALL_AI_COLUMN_TASK_TNAME,
                                AI_TASK_PENDING,
                                AI_TASK_RUNNING))) {
@@ -1518,14 +1522,16 @@ int ObAIColumnWorker::publish_row_(ObInnerSQLConnection &conn,
       }
     }
     if (OB_SUCC(ret) && task_id > 0) {
-      // a stale publish is not a failure: the request is simply superseded
+      // a stale publish is not a failure: the request is simply superseded.
+      // A retryable failure keeps the task row alive as RETRY, every other outcome
+      // finishes the work of the row.
       const int64_t task_status = dropped ? AI_TASK_DONE
                                   : ((exhausted_cnt > 0) ? AI_TASK_FAILED
-                                  : ((retry_cnt > 0) ? AI_TASK_RUNNING
+                                  : ((retry_cnt > 0) ? AI_TASK_RETRY
                                                      : AI_TASK_DONE));
       // a finished (or dropped) row leaves no task row behind: the queue entry the
       // dml of the row wrote is dropped together with the claim row of this worker.
-      int tmp_ret = (AI_TASK_RUNNING == task_status)
+      int tmp_ret = (AI_TASK_RETRY == task_status)
                         ? update_task_row_(conn, task_id, task_status, max_retry_count, ObString())
                         : delete_row_tasks_(conn, table.table_id_, row.row_key_);
       if (OB_SUCCESS != tmp_ret) {
@@ -1754,7 +1760,7 @@ int ObAIColumnWorker::process_backoffs_(ObInnerSQLConnection &conn)
             } else {
               backoff.retry_count_ = item.retry_count_;
               backoff.next_ts_ = next_backoff_ts_(item.retry_count_);
-              int upd_ret = update_task_row_(conn, backoff.task_id_, AI_TASK_RUNNING,
+              int upd_ret = update_task_row_(conn, backoff.task_id_, AI_TASK_RETRY,
                                              item.retry_count_, item.err_msg_);
               LOG_WARN_RET(upd_ret, "fail to update retry task row", K(upd_ret));
             }
@@ -1916,7 +1922,7 @@ int ObAIColumnWorker::insert_task_row_(ObInnerSQLConnection &conn,
                                         NULL == request_id ? "" : request_id))) {
   } else if (OB_FAIL(sql.assign_fmt(
                  "INSERT INTO %s (task_id, table_id, row_key, column_ids, srcvers, "
-                 "def_versions, request_id, task_status, retry_count, lease_owner, "
+                 "def_versions, request_id, state, retry_count, lease_owner, "
                  "lease_expire_ts, input_snapshot) VALUES (%ld, %lu, ",
                  OB_ALL_AI_COLUMN_TASK_TNAME,
                  new_task_id,
@@ -1962,7 +1968,7 @@ int ObAIColumnWorker::update_task_row_(ObInnerSQLConnection &conn,
   UNUSED(err_msg);
   if (task_id <= 0) {
     // no task row (the insert failed earlier), nothing to keep in sync
-  } else if (OB_FAIL(sql.assign_fmt("UPDATE %s SET task_status = %ld, retry_count = %ld "
+  } else if (OB_FAIL(sql.assign_fmt("UPDATE %s SET state = %ld, retry_count = %ld "
                                     "WHERE task_id = %ld",
                                     OB_ALL_AI_COLUMN_TASK_TNAME,
                                     task_status,

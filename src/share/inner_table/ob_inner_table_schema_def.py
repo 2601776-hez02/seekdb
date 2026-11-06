@@ -2502,7 +2502,7 @@ all_ai_column_task_def = dict(
         ('srcvers', 'varchar:OB_MAX_INNER_VALUE_LENGTH', 'true'),
         ('def_versions', 'varchar:OB_MAX_INNER_VALUE_LENGTH', 'true'),
         ('request_id', 'varchar:64', 'true'),
-        ('task_status', 'int', 'true'),
+        ('state', 'int', 'true'),
         ('retry_count', 'int', 'true'),
         ('lease_owner', 'varchar:128', 'true'),
         ('lease_expire_ts', 'int', 'true'),

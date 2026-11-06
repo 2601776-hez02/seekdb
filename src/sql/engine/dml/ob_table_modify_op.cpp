@@ -928,9 +928,9 @@ int ObTableModifyOp::calc_single_table_loc()
 // statement of the user in the same transaction and they are rolled back with it.
 // The task table is maintenance metadata, a failure here never fails the dml.
 static const int64_t MAX_AI_COLUMN_TASK_ROWS_PER_STMT = 4096;
-// __all_ai_column_task.task_status of a task that waits for a worker, see
-// ObAIColumnStatus::PENDING in observer/omt/ob_ai_service.h.
-static const int64_t OB_AI_COLUMN_TASK_STATUS_PENDING = 1;
+// __all_ai_column_task.state of a queue entry that waits for a worker, see the
+// AI_TASK_* values of ObAIColumnWorker.
+static const int64_t OB_AI_COLUMN_TASK_STATE_PENDING = 0;
 
 // escaping of a text literal, the same rules ObAIColumnWorker::append_text_literal_
 // uses, so the row_key of a task written here and by the worker are comparable.
@@ -1176,8 +1176,10 @@ int ObTableModifyOp::enqueue_ai_column_tasks()
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < ai_column_task_rows_.count(); ++i) {
       const ObAIColumnTaskRow &task_row = ai_column_task_rows_.at(i);
-      // One task row per (table, row): the queue entry of the row is refreshed, this
-      // also replaces a pending entry the same row already had.
+      // One task row per (table, row, ai column): the queue entry of the row is
+      // refreshed, this also replaces a pending entry the same row already had. A
+      // deleted row drops every queue entry of the row, a written row only replaces
+      // the entry of the ai column it invalidated (a table may have several).
       ObSqlString drop_sql;
       if (OB_FAIL(drop_sql.assign_fmt("DELETE FROM oceanbase.%s WHERE table_id = %lu "
                                       "AND row_key = ",
@@ -1186,6 +1188,11 @@ int ObTableModifyOp::enqueue_ai_column_tasks()
         LOG_WARN("failed to build the task cleanup statement", K(ret));
       } else if (OB_FAIL(append_sql_text_literal(task_row.row_key_, drop_sql))) {
         LOG_WARN("failed to append the row key", K(ret));
+      } else if (!task_row.drop_
+                 && OB_FAIL(drop_sql.append_fmt(" AND column_ids = '%lu'",
+                                                static_cast<unsigned long>(
+                                                    task_row.column_id_)))) {
+        LOG_WARN("failed to append the ai column of the queue entry", K(ret));
       } else {
         int64_t affected_rows = 0;
         if (OB_FAIL(inner_conn_->execute_write(drop_sql.string(), affected_rows))) {
@@ -1198,7 +1205,7 @@ int ObTableModifyOp::enqueue_ai_column_tasks()
                                 | (ObSequence::inc_and_get_max_seq_no() & 0x3ff);
           if (OB_FAIL(insert_sql.assign_fmt(
                   "INSERT INTO oceanbase.%s (task_id, table_id, row_key, column_ids, "
-                  "srcvers, def_versions, request_id, task_status, retry_count, "
+                  "srcvers, def_versions, request_id, state, retry_count, "
                   "lease_owner, lease_expire_ts, input_snapshot, rowkey_predicate, "
                   "eligible_ts) VALUES (%ld, %lu, ",
                   OB_ALL_AI_COLUMN_TASK_TNAME, task_id,
@@ -1209,7 +1216,7 @@ int ObTableModifyOp::enqueue_ai_column_tasks()
           } else if (OB_FAIL(insert_sql.append_fmt(
                        ", '%lu', '0', '0', '', %ld, 0, '', 0, '', ",
                        static_cast<unsigned long>(task_row.column_id_),
-                       OB_AI_COLUMN_TASK_STATUS_PENDING))) {
+                       OB_AI_COLUMN_TASK_STATE_PENDING))) {
             LOG_WARN("failed to append the task columns", K(ret));
           } else if (OB_FAIL(append_sql_text_literal(task_row.row_key_, insert_sql))) {
             LOG_WARN("failed to append the row key", K(ret));

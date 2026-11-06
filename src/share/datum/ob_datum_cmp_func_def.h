@@ -380,6 +380,34 @@ struct ObDatumStrCmpImpl
     cmp_ret = cmp_ret > 0 ? 1 : (cmp_ret < 0 ? -1 : 0);
     return OB_SUCCESS;
   }
+
+  // Collation-specialized variant: the charset info is resolved once per
+  // collation instead of validating the arguments and looking the charset up
+  // for every comparison.  Word comparison dominates the fulltext index build
+  // (the generated index rows are sorted by word) and fulltext queries (the
+  // inverted index rowkeys are merged), where the plain version spends a
+  // noticeable amount of time in ObCharset::get_charset()/strcmpsp().
+  template <ObCollationType CS_TYPE>
+  static int OB_INLINE cmp_with_cached_cs(const ObDatum &l, const ObDatum &r,
+                                          int &cmp_ret, const bool with_end_space)
+  {
+    static const ObCharsetInfo *cached_cs = ObCharset::get_charset(CS_TYPE);
+    int ret = OB_SUCCESS;
+    if (OB_UNLIKELY(nullptr == cached_cs)
+        || OB_UNLIKELY(nullptr == l.ptr_ && 0 != l.len_)
+        || OB_UNLIKELY(nullptr == r.ptr_ && 0 != r.len_)) {
+      // keep the validating path for the (abnormal) cases it is there for
+      ret = ObDatumStrCmpImpl::cmp(l, r, cmp_ret, CS_TYPE, with_end_space);
+    } else {
+      const int cmp_val = cached_cs->coll->strnncollsp(
+          cached_cs,
+          reinterpret_cast<const unsigned char *>(l.ptr_), l.len_,
+          reinterpret_cast<const unsigned char *>(r.ptr_), r.len_,
+          with_end_space);
+      cmp_ret = cmp_val > 0 ? 1 : (cmp_val < 0 ? -1 : 0);
+    }
+    return ret;
+  }
 };
 
 template <ObCollationType CS_TYPE, bool WITH_END_SPACE>
@@ -387,7 +415,7 @@ struct ObDatumStrCmp : public ObDefined<SupportedCollection<CS_TYPE>::defined_>
 {
   inline static int cmp(const ObDatum &l, const ObDatum &r, int &cmp_ret)
   {
-    return ObDatumStrCmpImpl::cmp(l, r, cmp_ret, CS_TYPE, WITH_END_SPACE);
+    return ObDatumStrCmpImpl::cmp_with_cached_cs<CS_TYPE>(l, r, cmp_ret, WITH_END_SPACE);
   }
 };
 

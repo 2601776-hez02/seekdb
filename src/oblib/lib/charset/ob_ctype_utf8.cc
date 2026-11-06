@@ -302,6 +302,24 @@ static inline void ob_tosort_unicode(ObUnicaseInfo *uni_plane, ob_wc_t *wc, unsi
   }
 }
 
+// Page 0 of the case folding table holds the weights of all ASCII characters.
+// An ASCII byte is always a complete one-byte UTF-8 sequence, so page0[c].sort
+// (or .tolower when OB_CS_LOWER_SORT is set) is exactly the value that
+// ob_tosort_unicode() derives after a full ob_mb_wc_utf8mb4() decode.  Text made
+// of ASCII words therefore does not need the decode at all; the fulltext index
+// keys and the tokens produced by the beng/ik parsers are mostly ASCII, and
+// this comparison is one of the hottest operations of index build and lookup.
+static inline const ObUnicaseInfoChar *get_ascii_sort_page(const ObCharsetInfo *cs)
+{
+  const ObUnicaseInfoChar *page0 = nullptr;
+  ObUnicaseInfo *uni_plane = cs->caseinfo;
+  if (OB_NOT_NULL(uni_plane) && OB_NOT_NULL(uni_plane->page) && uni_plane->maxchar >= 0xFF) {
+    page0 = uni_plane->page[0];
+  }
+  return page0;
+}
+
+
 static int ob_strnncoll_utf8mb4(const ObCharsetInfo *cs,
                      const unsigned char *src, size_t srclen,
                      const unsigned char *dst, size_t dstlen,
@@ -311,16 +329,29 @@ static int ob_strnncoll_utf8mb4(const ObCharsetInfo *cs,
   const unsigned char *se = src + srclen;
   const unsigned char *te = dst + dstlen;
   ObUnicaseInfo *uni_plane = cs->caseinfo;
+  const ObUnicaseInfoChar *ascii_page = get_ascii_sort_page(cs);
+  const bool lower_sort = (0 != (cs->state & OB_CS_LOWER_SORT));
   while ( src < se && dst < te ) {
-    int s_res = ob_mb_wc_utf8mb4(cs, &src_wc, src, se);
-    int t_res = ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te);
-    if ( s_res <= 0 || t_res <= 0 ) {
+    int s_res = 0;
+    int t_res = 0;
+    ob_wc_t s_val = 0;
+    ob_wc_t t_val = 0;
+    if (OB_LIKELY(OB_NOT_NULL(ascii_page) && *src < 0x80 && *dst < 0x80)) {
+      s_res = 1;
+      t_res = 1;
+      s_val = lower_sort ? ascii_page[*src].tolower : ascii_page[*src].sort;
+      t_val = lower_sort ? ascii_page[*dst].tolower : ascii_page[*dst].sort;
+    } else if (OB_UNLIKELY((s_res = ob_mb_wc_utf8mb4(cs, &src_wc, src, se)) <= 0)
+               || OB_UNLIKELY((t_res = ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te)) <= 0)) {
       return bincmp_utf8mb4(src, se, dst, te);
+    } else {
+      ob_tosort_unicode(uni_plane, &src_wc, cs->state);
+      ob_tosort_unicode(uni_plane, &dst_wc, cs->state);
+      s_val = src_wc;
+      t_val = dst_wc;
     }
-    ob_tosort_unicode(uni_plane, &src_wc, cs->state);
-    ob_tosort_unicode(uni_plane, &dst_wc, cs->state);
-    if ( src_wc != dst_wc ) {
-      return src_wc > dst_wc ? 1 : -1;
+    if ( s_val != t_val ) {
+      return s_val > t_val ? 1 : -1;
     } else {
       src += s_res;
       dst += t_res;
@@ -381,16 +412,29 @@ static int ob_strnncollsp_utf8mb4(const ObCharsetInfo *cs,
   ob_wc_t src_wc = 0, dst_wc = 0;
   const unsigned char *se= src + srclen, *te= dst + dstlen;
   ObUnicaseInfo *uni_plane= cs->caseinfo;
+  const ObUnicaseInfoChar *ascii_page = get_ascii_sort_page(cs);
+  const bool lower_sort = (0 != (cs->state & OB_CS_LOWER_SORT));
   while ( src < se && dst < te ) {
-    int s_res= ob_mb_wc_utf8mb4(cs, &src_wc, src, se);
-    int t_res= ob_mb_wc_utf8mb4(cs, &dst_wc, dst, te);
-    if ( s_res <= 0 || t_res <= 0 ) {
+    int s_res = 0;
+    int t_res = 0;
+    ob_wc_t s_val = 0;
+    ob_wc_t t_val = 0;
+    if (OB_LIKELY(OB_NOT_NULL(ascii_page) && *src < 0x80 && *dst < 0x80)) {
+      s_res = 1;
+      t_res = 1;
+      s_val = lower_sort ? ascii_page[*src].tolower : ascii_page[*src].sort;
+      t_val = lower_sort ? ascii_page[*dst].tolower : ascii_page[*dst].sort;
+    } else if (OB_UNLIKELY((s_res = ob_mb_wc_utf8mb4(cs, &src_wc, (unsigned char*) src, se)) <= 0)
+               || OB_UNLIKELY((t_res = ob_mb_wc_utf8mb4(cs, &dst_wc, (unsigned char*) dst, te)) <= 0)) {
       return bincmp_utf8mb4(src, se, dst, te);
+    } else {
+      ob_tosort_unicode(uni_plane, &src_wc, cs->state);
+      ob_tosort_unicode(uni_plane, &dst_wc, cs->state);
+      s_val = src_wc;
+      t_val = dst_wc;
     }
-    ob_tosort_unicode(uni_plane, &src_wc, cs->state);
-    ob_tosort_unicode(uni_plane, &dst_wc, cs->state);
-    if ( src_wc != dst_wc ) {
-      return src_wc > dst_wc ? 1 : -1;
+    if ( s_val != t_val ) {
+      return s_val > t_val ? 1 : -1;
     } else {
       src +=s_res;
       dst +=t_res;
@@ -829,9 +873,19 @@ static void ob_hash_sort_utf8mb4(const ObCharsetInfo *cs, const unsigned char *s
       end--;
   }
 
+  const ObUnicaseInfoChar *ascii_page = get_ascii_sort_page(cs);
+  const bool lower_sort = (0 != (cs->state & OB_CS_LOWER_SORT));
+
   if (NULL == hash_algo) {
-    while ((res= ob_mb_wc_utf8mb4(cs, &wc, (unsigned char*) src, (unsigned char*) end)) > 0) {
-      ob_tosort_unicode(uni_plane, &wc, cs->state);
+    while (src < end) {
+      if (OB_LIKELY(OB_NOT_NULL(ascii_page) && *src < 0x80)) {
+        wc = lower_sort ? ascii_page[*src].tolower : ascii_page[*src].sort;
+        res = 1;
+      } else if (OB_UNLIKELY((res = ob_mb_wc_utf8mb4(cs, &wc, (unsigned char*) src, (unsigned char*) end)) <= 0)) {
+        break;
+      } else {
+        ob_tosort_unicode(uni_plane, &wc, cs->state);
+      }
       ob_hash_add(n1, n2, (unsigned int) (wc & 0xFF));
       ob_hash_add(n1, n2, (unsigned int) (wc >> 8)  & 0xFF);
       if (wc > 0xFFFF) {
@@ -840,8 +894,15 @@ static void ob_hash_sort_utf8mb4(const ObCharsetInfo *cs, const unsigned char *s
       src+= res;
     }
   } else {
-    while ((res= ob_mb_wc_utf8mb4(cs, &wc, (unsigned char*) src, (unsigned char*) end)) > 0) {
-      ob_tosort_unicode(uni_plane, &wc, cs->state);
+    while (src < end) {
+      if (OB_LIKELY(OB_NOT_NULL(ascii_page) && *src < 0x80)) {
+        wc = lower_sort ? ascii_page[*src].tolower : ascii_page[*src].sort;
+        res = 1;
+      } else if (OB_UNLIKELY((res = ob_mb_wc_utf8mb4(cs, &wc, (unsigned char*) src, (unsigned char*) end)) <= 0)) {
+        break;
+      } else {
+        ob_tosort_unicode(uni_plane, &wc, cs->state);
+      }
       if (length > HASH_BUFFER_LENGTH - 2 || (HASH_BUFFER_LENGTH - 2 == length && wc > 0xFFFF)) {
         *n1 = hash_algo((void*) &data, length, *n1);
         length = 0;

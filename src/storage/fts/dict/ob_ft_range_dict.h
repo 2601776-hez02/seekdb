@@ -39,7 +39,8 @@ public:
                 ObFTCacheRangeContainer *range_container,
                 const ObFTDictDesc &desc)
       : is_inited_(false), desc_(desc), range_alloc_(lib::ObMemAttr("Range Dict")),
-        range_dicts_(&range_alloc_), range_container_(range_container)
+        range_dicts_(&range_alloc_), range_container_(range_container),
+        last_range_hint_(-1)
   {
   }
   ~ObFTRangeDict() override{};
@@ -99,6 +100,11 @@ private:
 
   int find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const;
 
+  // Returns true when @single_word belongs to the range [range.start_, range.end_].
+  // Range bounds are single characters, so the comparison is the exact same
+  // utf8mb4_bin comparison the previous linear scan used.
+  static bool range_contains(const ObFTRange &range, const ObString &single_word);
+
 private:
   static constexpr int DEFAULT_KEY_PER_RANGE = 50000; // by estimated
   bool is_inited_;
@@ -106,6 +112,11 @@ private:
   ObArenaAllocator range_alloc_;
   ObVector<ObFTRange, ObArenaAllocator> range_dicts_;
   ObFTCacheRangeContainer *range_container_; // only used to read cache
+  // Hint of the last matched range.  Fulltext text is local, so consecutive
+  // characters usually stay in the same range, which turns the common lookup
+  // into a single range check.  A stale hint (possible only if one dictionary
+  // object were shared across threads) just falls back to the binary search.
+  mutable int32_t last_range_hint_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObFTRangeDict);

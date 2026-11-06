@@ -51,7 +51,11 @@ private:
   ObObjMeta meta_;
 };
 
-typedef common::hash::ObHashMap<ObFTWord, int64_t> ObFTWordMap;
+// The word map is a per-document (per segment call) temporary structure that is
+// never shared between threads, so it must not pay for hash table latch
+// protection.  Using NoPthreadDefendMode removes the rwlock operations taken on
+// every set_refactored/reuse, which are visible in the fulltext hot path.
+typedef common::hash::ObHashMap<ObFTWord, int64_t, common::hash::NoPthreadDefendMode> ObFTWordMap;
 
 class ObAddWordFlag final
 {

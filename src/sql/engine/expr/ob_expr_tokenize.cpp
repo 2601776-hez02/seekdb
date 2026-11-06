@@ -16,6 +16,8 @@
 
 #include "sql/engine/expr/ob_expr_tokenize.h"
 
+#include <atomic>
+
 #include "lib/alloc/alloc_struct.h"
 #include "lib/allocator/page_arena.h"
 #include "lib/charset/ob_charset.h"
@@ -397,13 +399,28 @@ int ObExprTokenize::TokenizeParam::try_load_dictionary_for_ik()
   if (OB_FAIL(share::ObFtsIndexBuilderUtil::check_need_to_load_dic(
           parser_name_, need_to_load_dic))) {
   } else if (need_to_load_dic) {
-    if (OB_FAIL(storage::ObGenDicLoader::get_instance().get_dic_loader(
-                    ObString::make_string(storage::ObFTSLiteral::PARSER_NAME_IK), // currently only ik, use parser_name_ without version suffix
-                    ObCharset::charset_type_by_coll(meta_.get_collation_type()),
-                    dic_loader_handle))) {
-    } else if (OB_UNLIKELY(!dic_loader_handle.is_valid())) {
-      ret = OB_ERR_UNEXPECTED;
-    } else if (OB_FAIL(dic_loader_handle.get_loader()->try_load_dictionary_in_trans())) {
+    // The built-in IK dictionary is process wide and is loaded at most once.
+    // Remember the charsets that already loaded it, so that the per-row
+    // evaluation of TOKENIZE() does not have to resolve the dictionary loader
+    // (a locked hash lookup) and re-check the dictionary tables every time.
+    const int64_t charset_val =
+        static_cast<int64_t>(ObCharset::charset_type_by_coll(meta_.get_collation_type()));
+    static std::atomic<uint64_t> loaded_charset_mask(0);
+    const bool can_use_mask = charset_val >= 0 && charset_val < 64;
+    const uint64_t charset_bit = can_use_mask ? (1ULL << charset_val) : 0;
+    if (can_use_mask && 0 != (loaded_charset_mask.load(std::memory_order_acquire) & charset_bit)) {
+      // already loaded, nothing to do
+    } else {
+      if (OB_FAIL(storage::ObGenDicLoader::get_instance().get_dic_loader(
+                      ObString::make_string(storage::ObFTSLiteral::PARSER_NAME_IK), // currently only ik, use parser_name_ without version suffix
+                      ObCharset::charset_type_by_coll(meta_.get_collation_type()),
+                      dic_loader_handle))) {
+      } else if (OB_UNLIKELY(!dic_loader_handle.is_valid())) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(dic_loader_handle.get_loader()->try_load_dictionary_in_trans())) {
+      } else if (can_use_mask) {
+        loaded_charset_mask.fetch_or(charset_bit, std::memory_order_release);
+      }
     }
   }
   return ret;

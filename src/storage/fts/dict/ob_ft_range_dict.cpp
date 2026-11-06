@@ -378,16 +378,31 @@ int ObFTRangeDict::match_with_hit(const ObString &single_word,
   return last_hit.dict_->match_with_hit(single_word, last_hit, hit);
 }
 
+namespace {
+// Same as ObCharset::strcmp(CS_TYPE_UTF8MB4_BIN, ...) but keeps the charset
+// handler instead of validating the arguments and looking the collation up on
+// every call.  The dictionary range search compares the first character of a
+// word against the range bounds for every character of every document.
+int ft_bin_strcmp(const ObString &lhs, const ObString &rhs)
+{
+  static const ObCharsetInfo *cs = ObCharset::get_charset(ObCollationType::CS_TYPE_UTF8MB4_BIN);
+  int result = 0;
+  if (OB_LIKELY(nullptr != cs && nullptr != cs->coll)) {
+    result = cs->coll->strnncoll(cs,
+                                 reinterpret_cast<const unsigned char *>(lhs.ptr()),
+                                 lhs.length(),
+                                 reinterpret_cast<const unsigned char *>(rhs.ptr()),
+                                 rhs.length(),
+                                 false /*t_is_prefix*/);
+  }
+  return result;
+}
+} // namespace
+
 bool ObFTRangeDict::range_contains(const ObFTRange &range, const ObString &single_word)
 {
-  return ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                           range.start_.get_word(),
-                           single_word)
-             <= 0
-      && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                           range.end_.get_word(),
-                           single_word)
-             >= 0;
+  return ft_bin_strcmp(range.start_.get_word(), single_word) <= 0
+      && ft_bin_strcmp(range.end_.get_word(), single_word) >= 0;
 }
 
 int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const
@@ -412,10 +427,7 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
       int64_t right = range_cnt - 1;
       while (left <= right) {
         const int64_t mid = left + (right - left) / 2;
-        if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                              range_dicts_.at(mid).start_.get_word(),
-                              single_word)
-            <= 0) {
+        if (ft_bin_strcmp(range_dicts_.at(mid).start_.get_word(), single_word) <= 0) {
           hit_idx = mid;
           left = mid + 1;
         } else {

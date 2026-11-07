@@ -108,6 +108,10 @@ private:
   int init_topk_limit();
   int init_block_max_iter_param();
   int init_doc_length_est_param();
+  int try_replay_start(bool &hit);
+  int replay_cached_rows(int64_t &count, int64_t capacity);
+  int replay_cached_row();
+  void record_batch_rows(const int64_t count);
 private:
   static const int64_t INV_IDX_ROWKEY_COL_CNT = 2;
 private:
@@ -149,6 +153,21 @@ private:
   bool check_rangekey_inited_;
   bool inv_idx_tablet_switched_;
   bool is_inited_;
+  // fulltext query result cache state, see inner_get_next_rows():
+  // identical queries over unchanged data replay the recorded rows instead of
+  // scanning the inverted index again
+  const void *cur_cache_entry_;
+  void *rec_entry_;
+  int64_t cache_pos_;
+  bool cache_playing_;
+  bool cache_tried_;
+  bool cache_ended_;
+  bool cache_applicable_;
+  // iterator owned copy of the replayed entry, see try_replay_start()
+  int32_t *shadow_row_lens_;
+  char *shadow_row_bytes_;
+  double *shadow_relevances_;
+  int64_t shadow_row_cnt_;
   DISALLOW_COPY_AND_ASSIGN(ObDASLegacyTRMergeIter);
 };
 

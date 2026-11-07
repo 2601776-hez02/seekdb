@@ -20,6 +20,7 @@
 #include "common/ob_timeout_ctx.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "share/ob_server_struct.h"
+#include "sql/das/ob_das_fts_cache_epoch.h"
 #include "sql/engine/cmd/ob_table_executor.h"
 #include "query/command/ob_root_command_service.h"
 #include "query/command/ob_root_service_serialization.h"
@@ -1766,6 +1767,10 @@ int ObTruncateTableExecutor::execute(ObExecContext &ctx, ObTruncateTableStmt &st
       "table_info", truncate_table_arg.table_name_,
       "schema_id", res.schema_id_);
     SQL_ENG_LOG(INFO, "finish truncate table execute.", K(ret), "ddl_event_info", ObDDLEventInfo(GCTX.self_addr()));
+  }
+  if (OB_SUCC(ret)) {
+    // conservative invalidation of the fulltext query result cache
+    bump_fts_dml_epoch();
   }
   return ret;
 }

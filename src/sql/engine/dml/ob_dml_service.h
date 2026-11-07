@@ -22,6 +22,7 @@
 #include "data_plane/ob_i_write_context_service.h"
 #include "sql/das/ob_das_context.h"
 #include "ob_table_modify_op.h"
+#include "sql/das/ob_das_fts_cache_epoch.h"
 
 namespace oceanbase
 {
@@ -399,6 +400,9 @@ int ObDASIndexDMLAdaptor<N, DMLIterator>::write_tablet(DMLIterator &iter, int64_
       }
     }
   }
+  if (OB_SUCC(ret) && affected_rows > 0) {
+    bump_fts_dml_epoch();
+  }
   return ret;
 }
 
@@ -506,6 +510,9 @@ int ObDASIndexDMLAdaptor<N, DMLIterator>::write_tablet_with_ignore(DMLIterator &
   }
   if (OB_ITER_END == ret) {
     ret = OB_SUCCESS;
+  }
+  if (OB_SUCC(ret) && affected_rows > 0) {
+    bump_fts_dml_epoch();
   }
   return ret;
 }

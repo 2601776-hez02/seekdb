@@ -18,7 +18,6 @@
 #define _OCEANBASE_STORAGE_FTS_DICT_OB_FT_RANGE_DICT_H_
 
 #include "lib/alloc/alloc_struct.h"
-#include <atomic>
 #include "lib/allocator/ob_allocator.h"
 #include "lib/allocator/page_arena.h"
 #include "lib/container/ob_vector.h"
@@ -113,12 +112,11 @@ private:
   ObArenaAllocator range_alloc_;
   ObVector<ObFTRange, ObArenaAllocator> range_dicts_;
   ObFTCacheRangeContainer *range_container_; // only used to read cache
-  // Hint of the last matched range.  Consecutive characters of the text being
-  // segmented usually stay in the same range, which turns the common lookup into
-  // a single range check.  The dictionaries (and this hint) are shared between
-  // parser instances, so it is accessed atomically; a stale hint only costs a
-  // binary search.
-  mutable std::atomic<int32_t> last_range_hint_;
+  // Hint of the last matched range.  Fulltext text is local, so consecutive
+  // characters usually stay in the same range, which turns the common lookup
+  // into a single range check.  A stale hint (possible only if one dictionary
+  // object were shared across threads) just falls back to the binary search.
+  mutable int32_t last_range_hint_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObFTRangeDict);

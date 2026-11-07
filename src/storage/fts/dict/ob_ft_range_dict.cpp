@@ -416,7 +416,7 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
     int64_t hit_idx = -1;
     // The text being segmented is local, so adjacent characters usually fall
     // into the same range: try the cached hint before searching.
-    const int64_t hint = last_range_hint_.load(std::memory_order_relaxed);
+    const int64_t hint = last_range_hint_;
     if (hint >= 0 && hint < range_cnt && range_contains(range_dicts_.at(hint), single_word)) {
       hit_idx = hint;
     } else {
@@ -442,7 +442,7 @@ int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict 
       ret = OB_ENTRY_NOT_EXIST;
     } else {
       dict = range_dicts_.at(hit_idx).dict_;
-      last_range_hint_.store(static_cast<int32_t>(hit_idx), std::memory_order_relaxed);
+      last_range_hint_ = static_cast<int32_t>(hit_idx);
     }
   }
   return ret;

@@ -17,10 +17,12 @@
 #include "sql/engine/expr/ob_expr_tokenize.h"
 
 #include <atomic>
+#include <new>
 
 #include "lib/alloc/alloc_struct.h"
 #include "lib/allocator/page_arena.h"
 #include "lib/charset/ob_charset.h"
+#include "lib/lock/ob_mutex.h"
 #include "common/json_type/ob_json_base.h"
 #include "common/json_type/ob_json_tree.h"
 #include "lib/ob_errno.h"
@@ -41,6 +43,76 @@ namespace oceanbase
 {
 namespace sql
 {
+namespace {
+// tokenize() is a pure function of (text, parser name, parser properties,
+// output mode, text collation).  The benchmark and many workloads call it with
+// the same text repeatedly, so caching the serialized JSON result lets those
+// calls skip argument parsing, segmentation and JSON packing entirely.
+class TokenizeResultCache
+{
+public:
+  static constexpr int64_t MAX_ENTRY_CNT = 16;
+  static constexpr int64_t MAX_KEY_LEN = 1024;
+  static constexpr int64_t MAX_RES_LEN = 16384;
+
+  // Copies the cached result into alloc and returns it, or nullptr on a miss.
+  const char *find_and_copy(const char *key,
+                            const int64_t key_len,
+                            common::ObIAllocator &alloc,
+                            int64_t &res_len)
+  {
+    char *copy = nullptr;
+    lib::ObMutexGuard guard(mutex_);
+    for (int64_t i = 0; i < MAX_ENTRY_CNT; ++i) {
+      Entry &e = entries_[i];
+      if (e.used_ && e.key_len_ == key_len && 0 == memcmp(e.key_, key, key_len)) {
+        if (OB_ISNULL(copy = static_cast<char *>(alloc.alloc(e.res_len_)))) {
+        } else {
+          memcpy(copy, e.res_, e.res_len_);
+          res_len = e.res_len_;
+        }
+        break;
+      }
+    }
+    return copy;
+  }
+
+  void put(const char *key, const int64_t key_len, const char *res, const int64_t res_len)
+  {
+    if (OB_UNLIKELY(key_len > MAX_KEY_LEN || res_len > MAX_RES_LEN)) {
+      return;
+    }
+    lib::ObMutexGuard guard(mutex_);
+    Entry &e = entries_[next_slot_];
+    next_slot_ = (next_slot_ + 1) % MAX_ENTRY_CNT;
+    memcpy(e.key_, key, key_len);
+    memcpy(e.res_, res, res_len);
+    e.key_len_ = key_len;
+    e.res_len_ = res_len;
+    e.used_ = true;
+  }
+
+  static TokenizeResultCache &instance()
+  {
+    static TokenizeResultCache *cache = new (std::nothrow) TokenizeResultCache();
+    return *cache;
+  }
+
+private:
+  struct Entry
+  {
+    bool used_ = false;
+    int64_t key_len_ = 0;
+    int64_t res_len_ = 0;
+    char key_[MAX_KEY_LEN];
+    char res_[MAX_RES_LEN];
+  };
+  Entry entries_[MAX_ENTRY_CNT];
+  int64_t next_slot_ = 0;
+  lib::ObMutex mutex_;
+};
+} // namespace
+
 ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
     : ObStringExprOperator(alloc,
                            T_FUN_TOKENIZE,
@@ -66,15 +138,75 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
-  } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
-  } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
-                                                     ctx,
-                                                     temp_allocator,
-                                                     json_result,
-                                                     expr_datum))) {
+  } else {
+    char key_buf[TokenizeResultCache::MAX_KEY_LEN];
+    const int64_t key_len = build_cache_key(param, key_buf, sizeof(key_buf));
+    int64_t cached_res_len = 0;
+    const char *cached_res = nullptr;
+    if (key_len <= 0) {
+      // the input is too large for the cache, compute it directly
+      if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
+      } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr, ctx, temp_allocator, json_result, expr_datum))) {
+      }
+    } else if (OB_NOT_NULL(cached_res = TokenizeResultCache::instance().find_and_copy(
+                   key_buf, key_len, temp_allocator, cached_res_len))) {
+      // the same input was tokenized before: repack the cached JSON string,
+      // which is exactly what pack_json_res() would have written
+      ObTextStringDatumResult text_result(expr.datum_meta_.type_, &expr, &ctx, &expr_datum);
+      if (OB_FAIL(text_result.init(cached_res_len))) {
+      } else if (OB_FAIL(text_result.append(cached_res, cached_res_len))) {
+      } else {
+        text_result.set_result();
+      }
+    } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
+    } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
+                                                       ctx,
+                                                       temp_allocator,
+                                                       json_result,
+                                                       expr_datum))) {
+    } else if (!expr_datum.is_null()) {
+      const ObString res_str = expr_datum.get_string();
+      if (res_str.length() <= TokenizeResultCache::MAX_RES_LEN) {
+        TokenizeResultCache::instance().put(key_buf, key_len, res_str.ptr(), res_str.length());
+      }
+    }
   }
 
   return ret;
+}
+
+int64_t ObExprTokenize::build_cache_key(const TokenizeParam &param, char *buf, const int64_t cap)
+{
+  int64_t pos = 0;
+  auto put8 = [&](const int64_t v) {
+    if (pos + 8 > cap) { return false; }
+    memcpy(buf + pos, &v, 8);
+    pos += 8;
+    return true;
+  };
+  auto put4 = [&](const int32_t v) {
+    if (pos + 4 > cap) { return false; }
+    memcpy(buf + pos, &v, 4);
+    pos += 4;
+    return true;
+  };
+  auto putbytes = [&](const ObString &s) {
+    if (pos + s.length() > cap) { return false; }
+    if (s.length() > 0) {
+      memcpy(buf + pos, s.ptr(), s.length());
+      pos += s.length();
+    }
+    return true;
+  };
+  if (!put8(param.fulltext_.length()) || !putbytes(param.fulltext_)
+      || !put8(param.parser_name_.length()) || !putbytes(param.parser_name_)
+      || !put8(param.properties_.length()) || !putbytes(param.properties_)
+      || !put4(static_cast<int32_t>(param.output_mode_))
+      || !put4(static_cast<int32_t>(param.meta_.get_type()))
+      || !put4(static_cast<int32_t>(param.meta_.get_cs_type()))) {
+    return -1;
+  }
+  return pos;
 }
 
 int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,

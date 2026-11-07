@@ -86,6 +86,10 @@ private:
                          common::ObArenaAllocator &allocator,
                          TokenizeParam &param);
 
+  // serializes the cache key of (text, parser, properties, mode, collation)
+  // into buf, returns the key length or -1 when it does not fit
+  static int64_t build_cache_key(const TokenizeParam &param, char *buf, const int64_t cap);
+
   static int parse_fulltext(const ObExpr &expr, ObEvalCtx &ctx, TokenizeParam &param);
   static int parse_parser_name(const ObExpr &expr, ObEvalCtx &ctx, TokenizeParam &param);
   static int parse_parser_properties(const ObExpr &expr,

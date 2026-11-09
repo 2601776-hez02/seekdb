@@ -20,11 +20,11 @@ int main(int argc, char **argv)
     index = seekdb_cuvs_build(vectors.data(), count, dimension);
     if (!index || seekdb_cuvs_serialize(index, argv[2]) != 0) return 3;
   } else {
-    void *invalid = seekdb_cuvs_deserialize(argv[2], count - 1, dimension);
+    void *invalid = seekdb_cuvs_deserialize(argv[2], count - 1, dimension, vectors.data());
     if (invalid) { seekdb_cuvs_free(invalid); return 6; }
-    invalid = seekdb_cuvs_deserialize(argv[2], count, dimension + 1);
+    invalid = seekdb_cuvs_deserialize(argv[2], count, dimension + 1, vectors.data());
     if (invalid) { seekdb_cuvs_free(invalid); return 7; }
-    index = seekdb_cuvs_deserialize(argv[2], count, dimension);
+    index = seekdb_cuvs_deserialize(argv[2], count, dimension, vectors.data());
     if (!index) return 4;
   }
   unsigned int ids[10];

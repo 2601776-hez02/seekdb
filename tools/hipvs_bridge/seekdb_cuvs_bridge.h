@@ -23,8 +23,9 @@ void* seekdb_cuvs_build(const float* base, long n, long dim);
 int   seekdb_cuvs_search(void* handle, const float* query, long nq, long topk,
                          unsigned int* out_ids, float* out_dist);
 void  seekdb_cuvs_free(void* handle);
+int   seekdb_cuvs_set_search(void* handle, int itopk, int swidth, int maxiter, int algo);
 int seekdb_cuvs_serialize(void* handle, const char* filename);
-void* seekdb_cuvs_deserialize(const char* filename, long n, long dim);
+void* seekdb_cuvs_deserialize(const char* filename, long n, long dim, const float* dataset);
 #ifdef __cplusplus
 }
 #endif

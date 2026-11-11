@@ -142,20 +142,60 @@ inline bool parse_i64(const std::string& s, int64_t& out) {
   return true;
 }
 
+// Parse a double from a decimal string without strtod (much faster for the
+// vector-literal hot path). Grammar: [+-]?digits[.digits][eE[+-]?digits];
+// no NaN/Inf/hex. Overflow (|v| beyond double range) is rejected; underflow
+// to zero is accepted (matching the previous strtod behavior).
+inline bool parse_f64(const char* p, size_t n, double& out) {
+  if (n == 0) return false;
+  size_t i = 0;
+  bool neg = false;
+  if (p[0] == '+' || p[0] == '-') { neg = (p[0] == '-'); i = 1; }
+  if (i >= n) return false;
+  uint64_t mant = 0;
+  int exp10 = 0;
+  int digits = 0;
+  bool any = false;
+  for (; i < n && p[i] >= '0' && p[i] <= '9'; i++) {
+    any = true;
+    if (digits < 19) { mant = mant * 10 + uint64_t(p[i] - '0'); digits++; }
+    else exp10++;                       // extra integer digits only shift
+  }
+  if (i < n && p[i] == '.') {
+    i++;
+    for (; i < n && p[i] >= '0' && p[i] <= '9'; i++) {
+      any = true;
+      if (digits < 19) { mant = mant * 10 + uint64_t(p[i] - '0'); digits++; exp10--; }
+      // digits beyond 19 do not affect the rounded value
+    }
+  }
+  if (!any) return false;
+  if (i < n && (p[i] == 'e' || p[i] == 'E')) {
+    i++;
+    bool eneg = false;
+    if (i < n && (p[i] == '+' || p[i] == '-')) { eneg = (p[i] == '-'); i++; }
+    if (i >= n || p[i] < '0' || p[i] > '9') return false;
+    int ev = 0;
+    for (; i < n && p[i] >= '0' && p[i] <= '9'; i++) {
+      if (ev < 100000) ev = ev * 10 + (p[i] - '0');
+    }
+    exp10 += eneg ? -ev : ev;
+  }
+  if (i != n) return false;
+  if (mant == 0) { out = neg ? -0.0 : 0.0; return true; }
+  if (exp10 > 308) return false;             // overflows double -> reject
+  if (exp10 < -400) { out = neg ? -0.0 : 0.0; return true; }  // underflow to 0
+  double v = double(mant);
+  double scale = std::pow(10.0, double(exp10 < 0 ? -exp10 : exp10));
+  v = exp10 >= 0 ? v * scale : v / scale;
+  if (!std::isfinite(v)) return false;
+  out = neg ? -v : v;
+  return true;
+}
+
 // Parse a double; strict-ish: rejects empty, NaN, Inf; returns false on failure.
 inline bool parse_f64(const std::string& s, double& out) {
-  if (s.empty()) return false;
-  for (char c : s) {
-    if (c == '+' || c == '-' || c == '.' || c == 'e' || c == 'E') continue;
-    if (c < '0' || c > '9') return false;
-  }
-  // strtod handles overflow to inf; we reject inf/nan afterwards.
-  char* end = nullptr;
-  double v = std::strtod(s.c_str(), &end);
-  if (end == s.c_str() || *end != '\0') return false;
-  if (!std::isfinite(v)) return false;
-  out = v;
-  return true;
+  return parse_f64(s.data(), s.size(), out);
 }
 
 // Count unicode codepoints in a UTF-8 string (tolerant: invalid bytes count as 1).
@@ -394,38 +434,29 @@ inline Err decode_payload_masked(const TableSchema& sch, const char* data, size_
 // Vector literal: '[1, 2, -3.5]' -> floats; NaN/Inf rejected; bad syntax rejected.
 inline Err parse_vec_literal(const std::string& text, std::vector<float>& out) {
   out.clear();
-  std::string s = text;
-  // trim
-  size_t b = s.find_first_not_of(" \t\r\n");
-  size_t e = s.find_last_not_of(" \t\r\n");
-  if (b == std::string::npos) return Err::InvalidVector;
-  s = s.substr(b, e - b + 1);
-  if (s.size() < 2 || s.front() != '[' || s.back() != ']') return Err::InvalidVector;
-  std::string inner = s.substr(1, s.size() - 2);
-  size_t i = 0;
+  // pointer-based scan: no per-element substrings/allocations
+  const char* p = text.data();
+  size_t n = text.size();
+  while (n && (p[0] == ' ' || p[0] == '\t' || p[0] == '\r' || p[0] == '\n')) { p++; n--; }
+  while (n && (p[n - 1] == ' ' || p[n - 1] == '\t' || p[n - 1] == '\r' || p[n - 1] == '\n')) n--;
+  if (n < 2 || p[0] != '[' || p[n - 1] != ']') return Err::InvalidVector;
+  const char* q = p + 1;
+  const char* end = p + n - 1;   // points at ']'
+  out.reserve(16);
   while (true) {
-    while (i < inner.size() && (inner[i] == ' ' || inner[i] == '\t' || inner[i] == ',')) i++;
-    if (i >= inner.size()) break;
-    size_t j = i;
-    while (j < inner.size() && inner[j] != ',') j++;
-    std::string tok = inner.substr(i, j - i);
-    // trim token
-    size_t tb = tok.find_first_not_of(" \t");
-    size_t te = tok.find_last_not_of(" \t");
-    if (tb == std::string::npos) return Err::InvalidVector;
-    tok = tok.substr(tb, te - tb + 1);
+    while (q < end && (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n' || *q == ',')) q++;
+    if (q >= end) break;
+    const char* s = q;
+    while (q < end && *q != ',') q++;
+    const char* te = q;
+    while (te > s && (te[-1] == ' ' || te[-1] == '\t' || te[-1] == '\r' || te[-1] == '\n')) te--;
+    if (te == s) return Err::InvalidVector;
     double d = 0;
-    if (!parse_f64(tok, d)) return Err::InvalidVector;
+    if (!parse_f64(s, size_t(te - s), d)) return Err::InvalidVector;
     if (d > double(std::numeric_limits<float>::max()) ||
         d < -double(std::numeric_limits<float>::max())) return Err::InvalidVector;
     out.push_back(float(d));
-    i = j;
-    if (i < inner.size() && inner[i] == ',') i++;
-    else break;
   }
-  // tolerate trailing comma
-  std::string rest = inner.substr(i);
-  for (char c : rest) if (c != ' ' && c != '\t' && c != ',') return Err::InvalidVector;
   return Err::OK;
 }
 

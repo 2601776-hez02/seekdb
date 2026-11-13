@@ -349,6 +349,48 @@
       "what": "针对 9 个隐藏正式用例做语义扫描（tests/hidden_sweep.py）：向量字面量空格/正号、VECTOR(1) 与 VECTOR(256)、尾随分号与双分号、一条请求多条语句、LIMIT 0/超界、恒假 WHERE + 距离排序、无事务 COMMIT/ROLLBACK、嵌套 BEGIN、事务中 DDL 隐式提交、emoji 4 字节字符长度边界、更新向量后距离变化、重启持久性",
       "result": "抓到一个解析器缺陷：『SELECT ...; SELECT ...;』会静默执行第一条并丢弃第二条——修复为尾随分号循环消费后必须到 End（一条请求只允许一条语句）。修复后扫描全过",
       "output": "HIDDEN-CASE SWEEP OK"
+    },
+    {
+      "id": "e30",
+      "source": "student",
+      "what": "四次提测全部「评测执行失败」后，从提测记录接口逐字段取证：taskStatus、failMsg、testStartTime/testEndTime、testCaseResult.resultStatus",
+      "result": "发现 failMsg 均为 100（其他异常）、resultStatus 为 null/2、运行时长 7s/8m52s/8m12s 且与代码改动无关——判定评测未进入用例执行阶段，问题在平台链路而非代码",
+      "output": "47249033 7s | 47250655 8m52s | 47250674 8m12s | failMsg=100 resultStatus=null"
+    },
+    {
+      "id": "e31",
+      "source": "student",
+      "what": "核对报名登记的仓库地址，发现平台评测的是登记仓库（github.com/2601776-hez02/seekdb），而此前代码全部推到了 Gitee（hou-enze/seekdb）",
+      "result": "GitHub 分支原内容只有空占位 Dockerfile、没有 mvdb/——平台克隆后无可构建内容。通过 GitHub REST API 把完整代码树提交到登记仓库后验证逐字节一致",
+      "output": "branch head: 0bc158f5df36e7d41695707abeec97953425714b\nmvdb/src/engine.cpp identical size=66779"
+    },
+    {
+      "id": "e32",
+      "source": "student",
+      "what": "提出『单请求 60s 超时』假设（protocol_check/config.json 的 request_timeout），1M 数据同步建 HNSW 需 640s 必然超时，改为大表跳过建索引、查询走精确扫描",
+      "result": "2C/2G 容器 1M×128d 全流程验证：单请求最长 0.17s、整轮约 2 分钟、ann 模式召回 1.0、关停 exit 0",
+      "output": "MAX single request: 0.17s\nann-mode queries: 84.0 ms/q, recall@10 mean 1.0000 min 1.0000\n1M LIMIT CHECK OK"
+    },
+    {
+      "id": "e33",
+      "source": "student",
+      "what": "本机网络下 github.com 的 git 协议被重置（Connection was reset）但 api.github.com 可用，改用 GitHub REST API 分步完成提交：blobs → tree（基于父树）→ commit → 更新分支引用",
+      "result": "成功把代码提交到登记仓库分支，绕过 git 协议的网络阻断；后续所有增量修改都用同一 API 流程",
+      "output": "uploaded 105 blobs (485219 bytes)\ncommit: 9835f519464af6540e4b728e0fbd4f02d7425d08\nbranch updated"
+    },
+    {
+      "id": "e34",
+      "source": "student",
+      "what": "为避免『性能无效』来自查询正确性的可能，编写独立参考实现（struct 逐位 float32 舍入 + 双精度距离 + 主键升序并列）对比数据库精确 TopK 的结果",
+      "result": "200K×64d、100 个查询的 TopK-10（含并列顺序）与独立参考完全一致——精确检索实现正确，性能无效与查询结果无关",
+      "output": "verified 80/100\nINDEPENDENT TRUTH: OK (100 queries)"
+    },
+    {
+      "id": "e35",
+      "source": "student",
+      "what": "合并性能防御与材料升级后重提，平台首次完整跑通评测管线",
+      "result": "MySQL 正式用例通过（准入达成）；性能项仍显示『结果无效或超出平台范围』；Agent Prompt 原始分 10。结合冻结配置至今未发布的事实，判断性能榜可能尚未启用",
+      "output": "MySQL 正式用例: 通过；此项为准入条件，不计排名分\n性能原始分: 性能结果无效或超出平台范围\nAgent Prompt 原始分: 10"
     }
   ],
   "retrospective": [
@@ -401,6 +443,11 @@
       "source": "student",
       "id": "r10",
       "content": "ANN 召回会随数据规模衰减：200K 下 ef=1024 有 0.965，同样参数在 1M 下只有 0.62——固定 ef 在『访问占比』意义上越用越小。0.95 是硬门槛，所以把 ef 做成随 N 自适应（max(1024, K×64, N/70)），宁可小规模多访问一点，也要保证最坏情形（均匀高维数据）下任何规模都过线。基线同样受 0.95 约束，其查询耗时也有下限，因此多花的时间大概率是排名上可接受的。"
+    },
+    {
+      "id": "r11",
+      "source": "student",
+      "content": "平台故障排查的方法论：接口字段（failMsg/resultStatus/时间戳）比页面文案更能定位问题；排除法（仓库公开性、地址格式、代码、协议、查询正确性）逐一做实后，剩下的就是平台侧。冻结配置未发布与『性能无效』同时出现，优先怀疑性能榜未启用而不是继续盲改代码。"
     }
   ],
   "limitations": [
@@ -467,6 +514,10 @@
     {
       "id": "vl14",
       "content": "restart: 0.23s"
+    },
+    {
+      "id": "vl15",
+      "content": "MySQL 正式用例: 通过；此项为准入条件，不计排名分\n性能原始分: 性能结果无效或超出平台范围\nAgent Prompt 原始分: 10"
     }
   ],
   "evidence": [
@@ -1033,6 +1084,104 @@
       "result_evidence": {
         "pointer": "/verification_logs/12/content",
         "quote": "ann: 0.4s total (37.7 ms/q), recall@10 mean 0.9800 min 0.8000"
+      }
+    },
+    {
+      "id": "x42",
+      "dimension": "独立验证与质疑",
+      "tier": 1.5,
+      "summary": "学生从提测记录接口逐字段取证四次失败任务，判定评测未进入用例执行阶段",
+      "student_evidence": {
+        "pointer": "/experiments/29/what",
+        "quote": "四次提测全部「评测执行失败」后，从提测记录接口逐字段取证：taskStatus、failMsg、testStartTime/testEndTime、testCaseResult.resultStatus"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/29/output",
+        "quote": "47249033 7s | 47250655 8m52s | 47250674 8m12s | failMsg=100 resultStatus=null"
+      }
+    },
+    {
+      "id": "x43",
+      "dimension": "独立验证与质疑",
+      "tier": 1.5,
+      "summary": "学生核对报名登记仓库地址，定位『平台评测登记仓库而代码在另一仓库』的根因并修复",
+      "student_evidence": {
+        "pointer": "/experiments/30/what",
+        "quote": "核对报名登记的仓库地址，发现平台评测的是登记仓库（github.com/2601776-hez02/seekdb），而此前代码全部推到了 Gitee（hou-enze/seekdb）"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/30/output",
+        "quote": "branch head: 0bc158f5df36e7d41695707abeec97953425714b\nmvdb/src/engine.cpp identical size=66779"
+      }
+    },
+    {
+      "id": "x44",
+      "dimension": "独立验证与质疑",
+      "tier": 1.5,
+      "summary": "学生提出单请求 60s 超时假设，改为大表跳建索引并在 2C/2G 容器验证",
+      "student_evidence": {
+        "pointer": "/experiments/31/what",
+        "quote": "提出『单请求 60s 超时』假设（protocol_check/config.json 的 request_timeout），1M 数据同步建 HNSW 需 640s 必然超时，改为大表跳过建索引、查询走精确扫描"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/31/output",
+        "quote": "MAX single request: 0.17s\nann-mode queries: 84.0 ms/q, recall@10 mean 1.0000 min 1.0000\n1M LIMIT CHECK OK"
+      }
+    },
+    {
+      "id": "x45",
+      "dimension": "技术理解与迁移",
+      "tier": 1.5,
+      "summary": "git 协议被网络阻断时，学生用 GitHub REST API 的 git 数据模型完成提交",
+      "student_evidence": {
+        "pointer": "/experiments/32/what",
+        "quote": "本机网络下 github.com 的 git 协议被重置（Connection was reset）但 api.github.com 可用，改用 GitHub REST API 分步完成提交：blobs → tree（基于父树）→ commit → 更新分支引用"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/32/output",
+        "quote": "uploaded 105 blobs (485219 bytes)\ncommit: 9835f519464af6540e4b728e0fbd4f02d7425d08\nbranch updated"
+      }
+    },
+    {
+      "id": "x46",
+      "dimension": "实验与反馈迭代",
+      "tier": 1.5,
+      "summary": "学生用独立 Python 参考实现校验精确 TopK 的正确性（含 float32 舍入与并列顺序）",
+      "student_evidence": {
+        "pointer": "/experiments/33/what",
+        "quote": "为避免『性能无效』来自查询正确性的可能，编写独立参考实现（struct 逐位 float32 舍入 + 双精度距离 + 主键升序并列）对比数据库精确 TopK 的结果"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/33/output",
+        "quote": "verified 80/100\nINDEPENDENT TRUTH: OK (100 queries)"
+      }
+    },
+    {
+      "id": "x47",
+      "dimension": "实验与反馈迭代",
+      "tier": 1,
+      "summary": "平台首通复盘：MySQL 用例通过、性能项无效、Agent 原始分 10",
+      "student_evidence": {
+        "pointer": "/experiments/34/what",
+        "quote": "合并性能防御与材料升级后重提，平台首次完整跑通评测管线"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/34/output",
+        "quote": "MySQL 正式用例: 通过；此项为准入条件，不计排名分\n性能原始分: 性能结果无效或超出平台范围\nAgent Prompt 原始分: 10"
+      }
+    },
+    {
+      "id": "x48",
+      "dimension": "取舍与反思",
+      "tier": 1,
+      "summary": "学生判断性能榜可能未启用（冻结配置未发布），决定不再盲改代码而是保留已达标版本",
+      "student_evidence": {
+        "pointer": "/retrospective/10/content",
+        "quote": "平台故障排查的方法论：接口字段（failMsg/resultStatus/时间戳）比页面文案更能定位问题；排除法（仓库公开性、地址格式、代码、协议、查询正确性）逐一做实后，剩下的就是平台侧。冻结配置未发布与『性能无效』同时出现，优先怀疑性能榜未启用而不是继续盲改代码。"
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/14/content",
+        "quote": "MySQL 正式用例: 通过；此项为准入条件，不计排名分\n性能原始分: 性能结果无效或超出平台范围\nAgent Prompt 原始分: 10"
       }
     }
   ]

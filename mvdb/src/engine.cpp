@@ -1,9 +1,11 @@
 // MiniVectorDB - engine implementation: storage, WAL, transactions, executor.
 #include "engine.h"
 
+#include <array>
 #include <cassert>
-#include <cstring>
 #include <cmath>
+#include <cstring>
+#include <thread>
 
 namespace mvdb {
 
@@ -959,6 +961,65 @@ static const float* payload_vec_ptr(const TableSchema& sch, const char* data, si
   if (pos + need > n) return nullptr;
   return (const float*)(p + pos);
 }
+
+// fixed-size worst-first TopK collector (no allocation): used by the parallel
+// exact scan workers; each worker keeps its own, merged on the main thread
+struct TkAcc {
+  static constexpr int64_t MAX = 64;
+  std::pair<float, int64_t> arr[MAX];
+  int64_t n = 0;
+  int64_t k = 0;
+  void init(int64_t kk) { k = kk; n = 0; }
+  void add(float d, int64_t pk) {
+    if (k <= 0) return;
+    if (n < k) {
+      int64_t i = n++;
+      while (i > 0) {
+        auto& p = arr[i - 1];
+        if (p.first > d || (p.first == d && p.second > pk)) break;
+        arr[i] = p;
+        i--;
+      }
+      arr[i] = {d, pk};
+    } else {
+      auto& worst = arr[0];
+      if (d < worst.first || (d == worst.first && pk < worst.second)) {
+        int64_t i = 0;
+        while (i + 1 < k) {
+          auto& nx = arr[i + 1];
+          if (nx.first > d || (nx.first == d && nx.second > pk)) {
+            arr[i] = nx;
+            i++;
+          } else {
+            break;
+          }
+        }
+        arr[i] = {d, pk};
+      }
+    }
+  }
+};
+
+// tight scan of one run: distance straight from the mmap'd payload
+static void scanRunTopK(const Run& r, const TableSchema& sch, int vc, size_t d,
+                        const float* q, TkAcc& acc) {
+  uint64_t off = 8;
+  uint64_t idx = 0;
+  while (idx < r.count && off + 13 <= r.fileSize) {
+    int64_t pk = 0;
+    uint8_t flags = 0;
+    uint32_t l = 0;
+    std::memcpy(&pk, r.map + off, 8);
+    flags = r.map[off + 8];
+    std::memcpy(&l, r.map + off + 9, 4);
+    if (!(flags & 1)) {
+      const float* vp = payload_vec_ptr(sch, (const char*)(r.map + off + 13), l, vc);
+      if (vp) acc.add(l2sq_simd(vp, q, d), pk);
+    }
+    off += 13 + l;
+    idx++;
+  }
+}
 }  // namespace
 
 struct ScanCtx {
@@ -1568,40 +1629,110 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
         }
       }
     }
-    ScanCtx sc;
-    sc.Init(this, &t);
-    int64_t pk;
-    const char* data;
-    size_t len;
-    bool tomb;
-    std::vector<Value> vals;
-    size_t scanned = 0, decfail = 0, notvec = 0;
-    size_t rowIdx = 0;
-    while (sc.Next(pk, data, len, tomb)) {
-      scanned++;
-      bool match = true;
-      if (where) {
-        // bit per row in scan order: computed on first use, reused afterwards
-        if (rowIdx < fc->pass.size()) {
-          match = fc->pass[rowIdx] != 0;
-        } else {
-          vals.clear();
-          match = decode_payload_masked(sch, data, len, vals, pk, mask) == Err::OK &&
-                  EvalPred(where, sch, vals);
-          fc->pass.push_back(match ? 1 : 0);
-        }
-        rowIdx++;
-        if (!match) continue;
-      }
-      // distance straight from the payload bytes (no per-row vector copy)
-      const float* vp = payload_vec_ptr(sch, data, len, vc);
-      if (!vp) { decfail++; continue; }
-      float distSq = l2sq_simd(vp, qvec.data(), d);
-      pushTop(distSq, pk);
+    // parallel exact scan over the immutable runs: no predicate, no open
+    // transaction, small K (flat collector), and enough rows to amortize the
+    // two thread spawns. Workers keep private TopK accumulators merged here.
+    int64_t pTotalRows = 0;
+    size_t pNonEmptyRuns = 0;
+    for (const Run& r : t.runs) {
+      if (r.count > 0) pNonEmptyRuns++;
+      pTotalRows += int64_t(r.count);
     }
-    if (getenv("MVDB_TRACE")) {
-      fprintf(stderr, "TRACE topk exact: scanned=%zu decfail=%zu notvec=%zu topk=%zu\n",
-              scanned, decfail, notvec, useFlat ? flat.size() : heap.size());
+    bool parallel = !where && !inTxn_ && useFlat && pNonEmptyRuns >= 2 &&
+                    pTotalRows + int64_t(t.mem.map_.size()) >= 65536;
+    if (parallel) {
+      std::vector<std::pair<int64_t, uint32_t>> memSorted;
+      if (!t.mem.empty()) {
+        memSorted.reserve(t.mem.map_.size());
+        for (auto& kv : t.mem.map_) memSorted.push_back(kv);
+        std::sort(memSorted.begin(), memSorted.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+      }
+      // greedy balanced partition of the runs across the two workers
+      std::array<std::vector<size_t>, 2> groups;
+      std::array<int64_t, 2> load = {int64_t(memSorted.size()), 0};
+      for (size_t i = 0; i < t.runs.size(); i++) {
+        if (t.runs[i].count == 0) continue;
+        int g = load[0] <= load[1] ? 0 : 1;
+        groups[size_t(g)].push_back(i);
+        load[size_t(g)] += int64_t(t.runs[i].count);
+      }
+      auto scanMem = [&](TkAcc& acc) {
+        for (auto& e : memSorted) {
+          if (e.second == MemTable::TOMB) continue;
+          const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
+          uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
+                       (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
+          const float* vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
+          if (vp) acc.add(l2sq_simd(vp, qvec.data(), d), e.first);
+        }
+      };
+      TkAcc accs[2];
+      accs[0].init(k);
+      accs[1].init(k);
+      std::thread th0([&] {
+        scanMem(accs[0]);
+        for (size_t ri : groups[0]) scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[0]);
+      });
+      for (size_t ri : groups[1]) scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[1]);
+      th0.join();
+      // merge both accumulators: best-first sorted, then store worst-first
+      std::vector<std::pair<float, int64_t>> merged;
+      merged.reserve(size_t(accs[0].n + accs[1].n));
+      for (int a = 0; a < 2; a++) {
+        for (int64_t i = 0; i < accs[a].n; i++) merged.push_back(accs[a].arr[i]);
+      }
+      std::sort(merged.begin(), merged.end(),
+                [](const auto& x, const auto& y) {
+                  if (x.first != y.first) return x.first < y.first;
+                  return x.second < y.second;
+                });
+      if (int64_t(merged.size()) > k) merged.resize(size_t(k));
+      flat.clear();
+      flat.reserve(merged.size());
+      for (size_t i = merged.size(); i-- > 0;) {
+        flat.push_back({merged[i].first, merged[i].second});
+      }
+      if (getenv("MVDB_TRACE")) {
+        fprintf(stderr, "TRACE topk parallel: runs=%zu rows=%lld topk=%zu\n",
+                pNonEmptyRuns, (long long)pTotalRows, flat.size());
+      }
+    } else {
+      ScanCtx sc;
+      sc.Init(this, &t);
+      int64_t pk;
+      const char* data;
+      size_t len;
+      bool tomb;
+      std::vector<Value> vals;
+      size_t scanned = 0, decfail = 0, notvec = 0;
+      size_t rowIdx = 0;
+      while (sc.Next(pk, data, len, tomb)) {
+        scanned++;
+        bool match = true;
+        if (where) {
+          // bit per row in scan order: computed on first use, reused afterwards
+          if (rowIdx < fc->pass.size()) {
+            match = fc->pass[rowIdx] != 0;
+          } else {
+            vals.clear();
+            match = decode_payload_masked(sch, data, len, vals, pk, mask) == Err::OK &&
+                    EvalPred(where, sch, vals);
+            fc->pass.push_back(match ? 1 : 0);
+          }
+          rowIdx++;
+          if (!match) continue;
+        }
+        // distance straight from the payload bytes (no per-row vector copy)
+        const float* vp = payload_vec_ptr(sch, data, len, vc);
+        if (!vp) { decfail++; continue; }
+        float distSq = l2sq_simd(vp, qvec.data(), d);
+        pushTop(distSq, pk);
+      }
+      if (getenv("MVDB_TRACE")) {
+        fprintf(stderr, "TRACE topk exact: scanned=%zu decfail=%zu notvec=%zu topk=%zu\n",
+                scanned, decfail, notvec, useFlat ? flat.size() : heap.size());
+      }
     }
   }
   if (useFlat) {

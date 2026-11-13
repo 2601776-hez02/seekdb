@@ -468,6 +468,13 @@
       "what": "修复 CRC 后重跑 1M×128d 校准（index.bin 真正加载），扫描 MVDB_EFS 1500..20000 的 recall@10 与耗时曲线",
       "result": "均匀 128d 数据下 ann 无利可图：召回≥0.95 需要 ef≈14000+，耗时 37.5-47.4 ms/q，慢于优化后的精确扫描 23.0 ms/q（ef=1500 只有 5.9ms 但召回 0.71）。推翻『选 ann』旧建议，决定提交精确模式；异步建图保留为 60s 超时安全网并把建图线程降到 1（2C 判题机给查询让核）",
       "output": "EFS=1500: 5.9 ms/q recall 0.71 | EFS=10000: 28.1 ms/q recall 0.93\nDEFAULT(14286): 37.5 ms/q recall 0.953 | exact: 23.0 ms/q\n-> submit EXACT mode"
+    },
+    {
+      "id": "e47",
+      "source": "student",
+      "what": "exact 模式确定后，把无谓词的精确扫描并行化：run 按行数贪心均分到 2 个 worker（各持无分配的扁平 TopK 收集器），memtable 快照并入 worker 0，主线程合并两份 top-k；门控=无谓词+无事务+小 K+行数≥65536，小表/过滤查询保持单线程（位图缓存依赖全局扫描序）",
+      "result": "1M×128d exact 22.6→13.3 ms/q（−41%，4C 机器用 2 线程；2C 判题机同构获益）、ann 兜底同样提速；recall@10 恒 1.0，truth_check 200K×64d 100/100 与独立参考一致，20 公开用例/robust/隐藏用例/异步场景全绿",
+      "output": "exact query time: 1.33s total, 13.3 ms/query\nann query time: 1.31s total, 13.1 ms/query\nINDEPENDENT TRUTH: OK (100 queries)"
     }
   ],
   "retrospective": [
@@ -545,6 +552,11 @@
       "id": "r15",
       "source": "student",
       "content": "两个教训：① 纯函数替换（CRC slicing）不能只靠『写读同函数』的自洽测试——WAL 自洽全绿但跨格式校验（SerializeTo 链式 vs Deserialize 单次）和旧格式兼容会坏，必须与逐字节参考做等价性测试（单次+任意分块链式）；② 性能校准要防『假象』：固定等待 420s 时建图未完成，所有测量都落到精确兜底、recall 恒 1.0，看似完美实则没测到 ann——要轮询可观测的状态标记（claim trace）再测量。"
+    },
+    {
+      "id": "r16",
+      "source": "student",
+      "content": "并行化的边界要跟已有正确性机制对齐：过滤查询的谓词位图缓存依赖全局扫描序，所以并行只用在无谓词路径；worker 用无分配的扁平 TopK 各自收集再在主线程合并，线程间只共享不可变 run 的 mmap，正确性由独立参考对照兜底。"
     }
   ],
   "limitations": [
@@ -631,6 +643,10 @@
     {
       "id": "vl19",
       "content": "async index: CREATE 0.13s / queries-during-build identical / shutdown-during-build 0.06s exit 0\ncrc equivalence: 2000 random lengths single+chained OK\ncalibration: default ef N/70 at 1M = 37.5 ms/q recall 0.947 (<0.95) -> retune"
+    },
+    {
+      "id": "vl20",
+      "content": "parallel exact scan: 1Mx128d exact 13.3 ms/q, ann 13.1 ms/q, recall@10 mean 1.0000\ncumulative: 70.9 -> 13.3 ms/q (5.3x)"
     }
   ],
   "evidence": [
@@ -1505,6 +1521,34 @@
       "result_evidence": {
         "pointer": "/verification_logs/18/content",
         "quote": "async index: CREATE 0.13s / queries-during-build identical / shutdown-during-build 0.06s exit 0\ncrc equivalence: 2000 random lengths single+chained OK\ncalibration: default ef N/70 at 1M = 37.5 ms/q re"
+      }
+    },
+    {
+      "id": "x64",
+      "dimension": "技术理解与迁移",
+      "tier": 1.5,
+      "summary": "学生把精确扫描按 run 贪心分片到 2 个 worker、各持无分配 TopK 再合并，1M 查询再降 41%",
+      "student_evidence": {
+        "pointer": "/experiments/46/what",
+        "quote": "exact 模式确定后，把无谓词的精确扫描并行化：run 按行数贪心均分到 2 个 worker（各持无分配的扁平 TopK 收集器），memtable 快照并入 worker 0，主线程合并两份 top-k；门控=无谓词+无事务+小 K+行数≥65536，小表/过滤查询保持单线程（位图缓存依赖全局扫描序）"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/46/output",
+        "quote": "exact query time: 1.33s total, 13.3 ms/query\nann query time: 1.31s total, 13.1 ms/query\nINDEPENDENT TRUTH: OK (100 queries)"
+      }
+    },
+    {
+      "id": "x65",
+      "dimension": "取舍与反思",
+      "tier": 1,
+      "summary": "学生复盘并行化边界：过滤位图缓存依赖全局扫描序故保持单线程，worker 共享不可变 mmap、主线程合并",
+      "student_evidence": {
+        "pointer": "/retrospective/15/content",
+        "quote": "并行化的边界要跟已有正确性机制对齐：过滤查询的谓词位图缓存依赖全局扫描序，所以并行只用在无谓词路径；worker 用无分配的扁平 TopK 各自收集再在主线程合并，线程间只共享不可变 run 的 mmap，正确性由独立参考对照兜底。"
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/19/content",
+        "quote": "parallel exact scan: 1Mx128d exact 13.3 ms/q, ann 13.1 ms/q, recall@10 mean 1.0000\ncumulative: 70.9 -> 13.3 ms/q (5.3x)"
       }
     }
   ]

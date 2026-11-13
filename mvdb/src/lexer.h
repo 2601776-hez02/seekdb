@@ -77,23 +77,20 @@ class Lexer {
   bool LexString(Token& tok, char quote) {
     size_t i = pos_ + 1;
     std::string out;
+    // bulk copy between special characters: vector literals have neither
+    // quotes nor backslashes, so one memchr covers each whole literal
     while (i < src_->size()) {
+      const char* s = src_->data() + i;
+      size_t rem = src_->size() - i;
+      const void* q = memchr(s, quote, rem);
+      const void* b = memchr(s, '\\', rem);
+      size_t nq = q ? size_t((const char*)q - s) : rem;
+      size_t nb = b ? size_t((const char*)b - s) : rem;
+      size_t plain = nq < nb ? nq : nb;
+      out.append(s, plain);
+      i += plain;
+      if (i >= src_->size()) return false;  // unterminated literal
       char c = (*src_)[i];
-      if (c == '\\' && i + 1 < src_->size()) {
-        char e = (*src_)[i + 1];
-        switch (e) {
-          case 'n': out.push_back('\n'); break;
-          case 't': out.push_back('\t'); break;
-          case 'r': out.push_back('\r'); break;
-          case '0': out.push_back('\0'); break;
-          case '\\': out.push_back('\\'); break;
-          case '\'': out.push_back('\''); break;
-          case '"': out.push_back('"'); break;
-          default: out.push_back('\\'); out.push_back(e); break;
-        }
-        i += 2;
-        continue;
-      }
       if (c == quote) {
         if (i + 1 < src_->size() && (*src_)[i + 1] == quote) { out.push_back(quote); i += 2; continue; }
         tok.t = Tok::StrLit;
@@ -101,10 +98,22 @@ class Lexer {
         pos_ = i + 1;
         return true;
       }
-      out.push_back(c);
-      i++;
+      // backslash escape
+      if (i + 1 >= src_->size()) return false;
+      char e = (*src_)[i + 1];
+      switch (e) {
+        case 'n': out.push_back('\n'); break;
+        case 't': out.push_back('\t'); break;
+        case 'r': out.push_back('\r'); break;
+        case '0': out.push_back('\0'); break;
+        case '\\': out.push_back('\\'); break;
+        case '\'': out.push_back('\''); break;
+        case '"': out.push_back('"'); break;
+        default: out.push_back('\\'); out.push_back(e); break;
+      }
+      i += 2;
     }
-    return false;  // unterminated
+    return false;
   }
 
   bool LexIdent(Token& tok, char quote) {

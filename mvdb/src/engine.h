@@ -172,6 +172,15 @@ class Engine {
     std::vector<uint8_t> pass;
   };
   std::vector<FilterCache> filterCache_;
+  // exact-scan filter cache: bit per row position (scan order), so repeated
+  // WHERE predicates skip the per-row varchar decode + predicate evaluation
+  struct ExactFilterCache {
+    uint64_t epoch = 0;
+    int64_t tableId = -1;
+    std::string key;
+    std::vector<uint8_t> pass;
+  };
+  std::vector<ExactFilterCache> exactFilterCache_;
 
   // thresholds (overridable via env for testing / tuning)
   uint64_t memtableFlushBytes_ = MEMTABLE_FLUSH_BYTES;

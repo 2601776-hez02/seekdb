@@ -391,6 +391,41 @@
       "what": "合并性能防御与材料升级后重提，平台首次完整跑通评测管线",
       "result": "MySQL 正式用例通过（准入达成）；性能项仍显示『结果无效或超出平台范围』；Agent Prompt 原始分 10。结合冻结配置至今未发布的事实，判断性能榜可能尚未启用",
       "output": "MySQL 正式用例: 通过；此项为准入条件，不计排名分\n性能原始分: 性能结果无效或超出平台范围\nAgent Prompt 原始分: 10"
+    },
+    {
+      "id": "e36",
+      "source": "student",
+      "what": "在冻结配置未发布、性能项显示无效期间，对写与查询两条热路径做 perf 采样（1M×128d），逐符号定位瓶颈",
+      "result": "写入 62.5s 中约 32% 耗在 std::getline 的 stdio 同步逐字节读（_IO_getc/_IO_ungetc）；精确查询 71ms/q 中 std::priority_queue 每行 push/pop 占 27%、按行解码+memmove 占 22%、k 路归并占 14%",
+      "output": "write1m perf: _IO_getc 12.73% + std::getline 10.93% + _IO_ungetc 8.66%\nquery1m perf: __push_heap 17.09% + __adjust_heap 9.63% + decode_payload_masked 13.43% + __memmove 8.53%"
+    },
+    {
+      "id": "e37",
+      "source": "student",
+      "what": "把精确扫描改为零拷贝：距离直接在 run 的 mmap 载荷上计算（payload_vec_ptr，不再逐行拷贝 512B 向量）、memtable/overlay 为空且 run 主键区间互斥时走单游标顺序扫描（k 路归并跳过）",
+      "result": "官方 20 用例、健壮性、隐藏用例扫描、1500 条解析器模糊、崩溃模糊、恢复 kill 全绿；与独立 Python 参考实现对照 200K×64d、100 查询逐条一致，证明零拷贝与快速扫描语义等价",
+      "output": "20 passed, 0 failed\nINDEPENDENT TRUTH: OK (100 queries)\nexact query time: 4.15s total, 41.5 ms/query"
+    },
+    {
+      "id": "e38",
+      "source": "student",
+      "what": "小 K 场景（LIMIT 10）用扁平最差优先数组替代 priority_queue：每行 1 次与当前最差比较，只有进入 TopK 的行才做插入移位；并修掉自己第一版里『替换最差却比较了最优』的边界错误",
+      "result": "1M×128d 精确查询 41.5→29.9 ms/q（bench 驱动口径）、快速驱动口径 31.3→22.0 ms/q；LIMIT 0 提前返回；并列（同距离取主键小者）顺序与独立参考一致",
+      "output": "exact query time: 2.99s total, 29.9 ms/query\n80 exact queries @1M: 1.76s (22.0 ms/q)"
+    },
+    {
+      "id": "e39",
+      "source": "student",
+      "what": "过滤查询（WHERE c='c3'）此前每行都要解码 VARCHAR（1M 次堆分配）+ 字符串比较（95ms/q）；改为按扫描行序的谓词位图缓存（epoch 失效 + 首个查询顺带构建），后续查询只查位",
+      "result": "过滤组 92.9→39.7 ms/q（−57%），Recall@10 仍恒 1.0；缓存跨查询复用且任何 DML 触发 epoch 失效重建",
+      "output": "filtered ann: 3.97s (39.7 ms/q), exact filtered: 3.89s, recall@10 mean 1.0000 min 1.0000"
+    },
+    {
+      "id": "e40",
+      "source": "student",
+      "what": "验证「写入 15.9K 行/s 是 Python 驱动生成 770KB 请求行的瓶颈而非 DB」：预生成 1000 条请求后再计时（管道+DB 单独计量），并做 WAL 阈值 64/256MiB 的 A/B",
+      "result": "DB 侧真实写入能力约 45K 行/s（预生成口径）；WAL 检查点阈值 A/B 写入吞吐无差异（16058 vs 16100 行/s），64MiB 检查点保留",
+      "output": "pipe+DB write 1Mx128d: 22.12s (45199 rows/s)\n64MiB  write 31.14s (16058 rows/s)\n256MiB write 31.06s (16100 rows/s)"
     }
   ],
   "retrospective": [
@@ -448,6 +483,11 @@
       "id": "r11",
       "source": "student",
       "content": "平台故障排查的方法论：接口字段（failMsg/resultStatus/时间戳）比页面文案更能定位问题；排除法（仓库公开性、地址格式、代码、协议、查询正确性）逐一做实后，剩下的就是平台侧。冻结配置未发布与『性能无效』同时出现，优先怀疑性能榜未启用而不是继续盲改代码。"
+    },
+    {
+      "id": "r12",
+      "source": "student",
+      "content": "性能优化的方法论：先 perf 采样逐符号定位（write 32% 在读行、query 27% 在堆操作），再对最热的三个点做针对性改造（stdio 去同步、零拷贝距离、扁平 TopK、谓词位图缓存），每次改动都回跑官方用例 + 独立参考对照证明语义不变；bench.py 的写入口径被驱动生成拖慢，测量 DB 能力要用预生成请求。"
     }
   ],
   "limitations": [
@@ -518,6 +558,10 @@
     {
       "id": "vl15",
       "content": "MySQL 正式用例: 通过；此项为准入条件，不计排名分\n性能原始分: 性能结果无效或超出平台范围\nAgent Prompt 原始分: 10"
+    },
+    {
+      "id": "vl16",
+      "content": "1Mx128d optimized: exact 30.7 ms/q, ann 30.6 ms/q, filtered 39.7 ms/q, recall@10 mean 1.0000\nDB-side write (pre-generated): 45199 rows/s"
     }
   ],
   "evidence": [
@@ -1182,6 +1226,90 @@
       "result_evidence": {
         "pointer": "/verification_logs/14/content",
         "quote": "MySQL 正式用例: 通过；此项为准入条件，不计排名分\n性能原始分: 性能结果无效或超出平台范围\nAgent Prompt 原始分: 10"
+      }
+    },
+    {
+      "id": "x49",
+      "dimension": "独立验证与质疑",
+      "tier": 1.5,
+      "summary": "学生用 perf 逐符号定位写/查热路径（getline 32%、堆操作 27%、解码拷贝 22%）",
+      "student_evidence": {
+        "pointer": "/experiments/35/what",
+        "quote": "在冻结配置未发布、性能项显示无效期间，对写与查询两条热路径做 perf 采样（1M×128d），逐符号定位瓶颈"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/35/output",
+        "quote": "write1m perf: _IO_getc 12.73% + std::getline 10.93% + _IO_ungetc 8.66%\nquery1m perf: __push_heap 17.09% + __adjust_heap 9.63% + decode_payload_masked 13.43% + __memmove 8.53%"
+      }
+    },
+    {
+      "id": "x50",
+      "dimension": "技术理解与迁移",
+      "tier": 2,
+      "summary": "学生把精确扫描改为 run mmap 上零拷贝距离计算，并用独立参考实现证明语义等价",
+      "student_evidence": {
+        "pointer": "/experiments/36/what",
+        "quote": "把精确扫描改为零拷贝：距离直接在 run 的 mmap 载荷上计算（payload_vec_ptr，不再逐行拷贝 512B 向量）、memtable/overlay 为空且 run 主键区间互斥时走单游标顺序扫描（k 路归并跳过）"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/36/output",
+        "quote": "20 passed, 0 failed\nINDEPENDENT TRUTH: OK (100 queries)\nexact query time: 4.15s total, 41.5 ms/query"
+      }
+    },
+    {
+      "id": "x51",
+      "dimension": "实验与反馈迭代",
+      "tier": 1.5,
+      "summary": "学生用扁平 TopK 替代 priority_queue，并修掉替换路径比较对象的边界错误",
+      "student_evidence": {
+        "pointer": "/experiments/37/what",
+        "quote": "小 K 场景（LIMIT 10）用扁平最差优先数组替代 priority_queue：每行 1 次与当前最差比较，只有进入 TopK 的行才做插入移位；并修掉自己第一版里『替换最差却比较了最优』的边界错误"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/37/output",
+        "quote": "exact query time: 2.99s total, 29.9 ms/query\n80 exact queries @1M: 1.76s (22.0 ms/q)"
+      }
+    },
+    {
+      "id": "x52",
+      "dimension": "技术理解与迁移",
+      "tier": 1.5,
+      "summary": "学生为过滤查询设计按行序谓词位图缓存（epoch 失效 + 首查构建），过滤组 −57%",
+      "student_evidence": {
+        "pointer": "/experiments/38/what",
+        "quote": "过滤查询（WHERE c='c3'）此前每行都要解码 VARCHAR（1M 次堆分配）+ 字符串比较（95ms/q）；改为按扫描行序的谓词位图缓存（epoch 失效 + 首个查询顺带构建），后续查询只查位"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/38/output",
+        "quote": "filtered ann: 3.97s (39.7 ms/q), exact filtered: 3.89s, recall@10 mean 1.0000 min 1.0000"
+      }
+    },
+    {
+      "id": "x53",
+      "dimension": "实验与反馈迭代",
+      "tier": 1,
+      "summary": "学生区分驱动瓶颈与 DB 瓶颈（预生成请求口径 45K 行/s）并做 WAL 阈值 A/B",
+      "student_evidence": {
+        "pointer": "/experiments/39/what",
+        "quote": "验证「写入 15.9K 行/s 是 Python 驱动生成 770KB 请求行的瓶颈而非 DB」：预生成 1000 条请求后再计时（管道+DB 单独计量），并做 WAL 阈值 64/256MiB 的 A/B"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/39/output",
+        "quote": "pipe+DB write 1Mx128d: 22.12s (45199 rows/s)\n64MiB  write 31.14s (16058 rows/s)\n256MiB write 31.06s (16100 rows/s)"
+      }
+    },
+    {
+      "id": "x54",
+      "dimension": "取舍与反思",
+      "tier": 1,
+      "summary": "学生复盘性能优化方法论：先画像再针对热点改造，每次改动都回跑正确性证明",
+      "student_evidence": {
+        "pointer": "/retrospective/11/content",
+        "quote": "性能优化的方法论：先 perf 采样逐符号定位（write 32% 在读行、query 27% 在堆操作），再对最热的三个点做针对性改造（stdio 去同步、零拷贝距离、扁平 TopK、谓词位图缓存），每次改动都回跑官方用例 + 独立参考对照证明语义不变；bench.py 的写入口径被驱动生成拖慢，测量 DB 能力要用预生成请求。"
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/15/content",
+        "quote": "1Mx128d optimized: exact 30.7 ms/q, ann 30.6 ms/q, filtered 39.7 ms/q, recall@10 mean 1.0000\nDB-side write (pre-generated): 45199 rows/s"
       }
     }
   ]

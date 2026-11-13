@@ -828,6 +828,37 @@ struct RunCursor {
     Advance();
   }
 };
+
+// Walk the payload columns BEFORE the vector column (schema order, pk
+// skipped) and return a pointer to the vector column's float32 data.
+// No Value materialization, no per-row allocation; null on malformed payload.
+static const float* payload_vec_ptr(const TableSchema& sch, const char* data, size_t len,
+                                    int vc) {
+  const uint8_t* p = (const uint8_t*)data;
+  size_t pos = 0;
+  size_t n = len;
+  for (size_t ci = 0; ci < size_t(vc); ci++) {
+    if (int64_t(ci) == sch.pk_col) continue;
+    switch (sch.cols[ci].type) {
+      case ColType::BigInt:
+        pos += 8;
+        break;
+      case ColType::VarChar: {
+        if (pos + 4 > n) return nullptr;
+        uint32_t l = uint32_t(p[pos]) | (uint32_t(p[pos + 1]) << 8) |
+                     (uint32_t(p[pos + 2]) << 16) | (uint32_t(p[pos + 3]) << 24);
+        pos += 4 + l;
+        break;
+      }
+      default:
+        return nullptr;
+    }
+    if (pos > n) return nullptr;
+  }
+  size_t need = size_t(sch.cols[size_t(vc)].n) * 4;
+  if (pos + need > n) return nullptr;
+  return (const float*)(p + pos);
+}
 }  // namespace
 
 struct ScanCtx {
@@ -839,10 +870,16 @@ struct ScanCtx {
   std::vector<std::pair<int64_t, uint32_t>> memSorted;
   size_t memIdx = 0;
   std::vector<RunCursor> rcs;
+  // fast path: memtable + overlay empty and every run's pk range lies strictly
+  // after the previous run's -> sequential single-cursor scan, no k-way merge
+  bool fastSeq_ = false;
+  size_t fsRun_ = 0;
 
   void Init(Engine* e, TableState* tstate) {
     t = tstate;
     tid = tstate->sch.id;
+    fastSeq_ = false;
+    fsRun_ = 0;
     if (e->InTxn()) {
       auto it = e->Overlays().find(tid);
       if (it != e->Overlays().end()) {
@@ -860,6 +897,33 @@ struct ScanCtx {
     }
     rcs.resize(t->runs.size());
     for (size_t i = 0; i < t->runs.size(); i++) rcs[i].Reset(&t->runs[i]);
+    if (!ov && t->mem.empty() && !t->runs.empty()) {
+      bool disjoint = true;
+      int64_t prevMax = INT64_MIN;
+      for (size_t i = 0; i < t->runs.size(); i++) {
+        const Run& r = t->runs[i];
+        if (r.count == 0) continue;
+        if (r.fileSize < 21) { disjoint = false; break; }
+        int64_t first = 0, last = 0;
+        std::memcpy(&first, r.map + 8, 8);
+        uint64_t off = 8;
+        uint64_t idx = 0;
+        if (!r.sparse.empty()) {
+          off = r.sparse.back().second;
+          idx = (r.sparse.size() - 1) * 64;
+        }
+        while (idx < r.count && off + 13 <= r.fileSize) {
+          std::memcpy(&last, r.map + off, 8);
+          uint32_t l = 0;
+          std::memcpy(&l, r.map + off + 9, 4);
+          off += 13 + l;
+          idx++;
+        }
+        if (first <= prevMax) { disjoint = false; break; }
+        prevMax = last;
+      }
+      fastSeq_ = disjoint;
+    }
   }
 
   void AdvanceRunsPast(int64_t pk) {
@@ -869,6 +933,20 @@ struct ScanCtx {
 
   // returns false at end; otherwise pk/data/len/tomb describe the row payload
   bool Next(int64_t& pk, const char*& data, size_t& len, bool& tomb) {
+    if (fastSeq_) {
+      while (fsRun_ < rcs.size()) {
+        RunCursor& c = rcs[fsRun_];
+        if (!c.ok) { fsRun_++; continue; }
+        pk = c.pk;
+        if (c.flags & 1) { c.Skip(); continue; }  // tombstone within the run
+        data = c.data;
+        len = c.len;
+        tomb = false;
+        c.Skip();
+        return true;
+      }
+      return false;
+    }
     while (true) {
       int64_t best = INT64_MAX;
       bool bestIsOv = false;
@@ -1257,17 +1335,64 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
   int vc = sch.vec_col;
   if (vc < 0) return Err::NotVectorColumn;
   size_t d = size_t(sch.cols[size_t(vc)].n);
+  if (k <= 0) return Err::OK;  // LIMIT 0: nothing to collect
   bool useAnn = annMode && t.index && !(inTxn_ && overlay_.count(t.sch.id) != 0) &&
                 !where;  // filtered TopK runs exact (guaranteed recall)
-  auto heapCmp = [](const std::pair<float, int64_t>& a, const std::pair<float, int64_t>& b) {
-    if (a.first != b.first) return a.first < b.first;
-    return a.second < b.second;
+
+  // Top-K collector. The benchmark K is small (typically 10); a per-row
+  // std::priority_queue push/pop measured ~27% of an exact query at 1M rows,
+  // so small K keeps a flat worst-first array instead (1 compare per row).
+  static constexpr int64_t FLAT_K = 64;
+  struct Tk {
+    float d;
+    int64_t pk;
+  };
+  std::vector<Tk> flat;                      // worst-first when used
+  flat.reserve(size_t(std::min<int64_t>(k, FLAT_K) + 1));
+  struct HeapCmp {
+    bool operator()(const std::pair<float, int64_t>& a, const std::pair<float, int64_t>& b) const {
+      if (a.first != b.first) return a.first < b.first;
+      return a.second < b.second;
+    }
   };
   std::priority_queue<std::pair<float, int64_t>,
-                      std::vector<std::pair<float, int64_t>>, decltype(heapCmp)> heap(heapCmp);
-  auto pushHeap = [&](float distSq, int64_t pk) {
-    heap.emplace(distSq, pk);
-    if (int64_t(heap.size()) > k) heap.pop();
+                      std::vector<std::pair<float, int64_t>>, HeapCmp> heap;  // fallback for large K
+  bool useFlat = (k <= FLAT_K);
+  auto pushTop = [&](float distSq, int64_t pk) {
+    if (useFlat) {
+      size_t n = flat.size();
+      if (n < size_t(k)) {
+        size_t i = n;
+        flat.push_back({distSq, pk});
+        while (i > 0) {
+          Tk& prev = flat[i - 1];
+          if (prev.d > distSq || (prev.d == distSq && prev.pk > pk)) break;
+          flat[i] = prev;
+          i--;
+        }
+        flat[i] = {distSq, pk};
+      } else {
+        // full: only enter when better than the current worst (flat[0]);
+        // drop the worst and shift left until the new element's slot
+        Tk& worst = flat[0];
+        if (distSq < worst.d || (distSq == worst.d && pk < worst.pk)) {
+          size_t i = 0;
+          while (i + 1 < size_t(k)) {
+            Tk& nxt = flat[i + 1];
+            if (nxt.d > distSq || (nxt.d == distSq && nxt.pk > pk)) {
+              flat[i] = nxt;
+              i++;
+            } else {
+              break;
+            }
+          }
+          flat[i] = {distSq, pk};
+        }
+      }
+    } else {
+      heap.emplace(distSq, pk);
+      if (int64_t(heap.size()) > k) heap.pop();
+    }
   };
 
   if (useAnn) {
@@ -1328,16 +1453,36 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
     } else {
       for (auto& c : cands) {
         int64_t pk = t.index->Pk(c.second);
-        pushHeap(c.first, pk);
+        pushTop(c.first, pk);
       }
     }
   }
   if (!useAnn) {
-    std::vector<uint8_t> mask(sch.cols.size(), 0);
+    std::vector<uint8_t> mask;
+    ExactFilterCache* fc = nullptr;
     if (where) {
+      mask.assign(sch.cols.size(), 0);
       CollectPredCols(where, mask, [&](const std::string& n) { return FindCol(sch, n); });
+      std::string key = SerializePred(where);
+      for (auto& c : exactFilterCache_) {
+        if (c.tableId == t.sch.id && c.key == key) { fc = &c; break; }
+      }
+      if (!fc || fc->epoch != dataEpoch_) {
+        if (fc) {
+          // stale: rebuild in place
+          fc->epoch = dataEpoch_;
+          fc->pass.clear();
+        } else {
+          if (exactFilterCache_.size() >= 2) exactFilterCache_.erase(exactFilterCache_.begin());
+          ExactFilterCache nc;
+          nc.epoch = dataEpoch_;
+          nc.tableId = t.sch.id;
+          nc.key = key;
+          exactFilterCache_.push_back(std::move(nc));
+          fc = &exactFilterCache_.back();
+        }
+      }
     }
-    mask[size_t(vc)] = 1;
     ScanCtx sc;
     sc.Init(this, &t);
     int64_t pk;
@@ -1346,24 +1491,44 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
     bool tomb;
     std::vector<Value> vals;
     size_t scanned = 0, decfail = 0, notvec = 0;
+    size_t rowIdx = 0;
     while (sc.Next(pk, data, len, tomb)) {
       scanned++;
-      if (decode_payload_masked(sch, data, len, vals, pk, mask) != Err::OK) { decfail++; continue; }
-      if (where && !EvalPred(where, sch, vals)) continue;
-      const Value& v = vals[size_t(vc)];
-      if (v.t != Value::T::Vec) { notvec++; continue; }
-      float distSq = l2sq_simd(v.v.data(), qvec.data(), d);
-      pushHeap(distSq, pk);
+      bool match = true;
+      if (where) {
+        // bit per row in scan order: computed on first use, reused afterwards
+        if (rowIdx < fc->pass.size()) {
+          match = fc->pass[rowIdx] != 0;
+        } else {
+          vals.clear();
+          match = decode_payload_masked(sch, data, len, vals, pk, mask) == Err::OK &&
+                  EvalPred(where, sch, vals);
+          fc->pass.push_back(match ? 1 : 0);
+        }
+        rowIdx++;
+        if (!match) continue;
+      }
+      // distance straight from the payload bytes (no per-row vector copy)
+      const float* vp = payload_vec_ptr(sch, data, len, vc);
+      if (!vp) { decfail++; continue; }
+      float distSq = l2sq_simd(vp, qvec.data(), d);
+      pushTop(distSq, pk);
     }
     if (getenv("MVDB_TRACE")) {
-      fprintf(stderr, "TRACE topk exact: scanned=%zu decfail=%zu notvec=%zu heap=%zu\n",
-              scanned, decfail, notvec, heap.size());
+      fprintf(stderr, "TRACE topk exact: scanned=%zu decfail=%zu notvec=%zu topk=%zu\n",
+              scanned, decfail, notvec, useFlat ? flat.size() : heap.size());
     }
   }
-  out.reserve(heap.size());
-  while (!heap.empty()) { out.push_back(heap.top()); heap.pop(); }
-  // heap pops descending (dist, pk); reverse to ascending
-  std::reverse(out.begin(), out.end());
+  if (useFlat) {
+    // flat is worst-first; emit ascending (best-first)
+    out.reserve(flat.size());
+    for (size_t i = flat.size(); i-- > 0;) out.emplace_back(flat[i].d, flat[i].pk);
+  } else {
+    out.reserve(heap.size());
+    while (!heap.empty()) { out.push_back(heap.top()); heap.pop(); }
+    // heap pops descending (dist, pk); reverse to ascending
+    std::reverse(out.begin(), out.end());
+  }
   return Err::OK;
 }
 

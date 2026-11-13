@@ -72,6 +72,9 @@ static bool parseString(const char*& p, const char* e, std::string& out) {
   if (p >= e || *p != '"') return false;
   p++;
   out.clear();
+  // one upfront allocation for the common case (big SQL strings); growing
+  // via doubling would copy ~2x the bytes across reallocations
+  out.reserve(size_t(e - p));
   while (true) {
     if (p >= e) return false;
     unsigned char c = (unsigned char)*p;
@@ -379,6 +382,12 @@ static void respondError(const std::string& idText, bool idIsNum, Err e) {
 }
 
 int main(int argc, char** argv) {
+  // The driver speaks through pipes; std::cin synced with stdio reads stdin
+  // one byte at a time through _IO_getc/_IO_ungetc (measured ~30% of the
+  // write path at 1M rows). Untie and desync: stdout/stderr stay on stdio,
+  // stdin moves to the iostream streambuf's buffered reads.
+  std::ios::sync_with_stdio(false);
+  std::cin.tie(nullptr);
   std::string dataDir = "/data";
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];

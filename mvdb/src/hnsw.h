@@ -103,8 +103,11 @@ class HNSWIndex {
   size_t dim() const { return dim_; }
   size_t size() const { return vecs_.size() / dim_; }
 
-  // bulk build: feed all vectors (row-major, n*d floats) + pks
-  void Build(const float* data, const int64_t* pks, size_t n, int threads = 0) {
+  // bulk build: feed all vectors (row-major, n*d floats) + pks.
+  // `stop` (optional) aborts the build between nodes: used by the async
+  // background builds so shutdown stays fast; the partial graph is discarded.
+  void Build(const float* data, const int64_t* pks, size_t n, int threads = 0,
+             const std::atomic<bool>* stop = nullptr) {
     Clear();
     if (n == 0) return;
     vecs_.assign(data, data + n * dim_);
@@ -118,9 +121,9 @@ class HNSWIndex {
       if (threads > 8) threads = 8;
     }
     if (n < 4096 || threads <= 1) {
-      HNSWBuildSeq();
+      HNSWBuildSeq(stop);
     } else {
-      HNSWBuildParallel(threads);
+      HNSWBuildParallel(threads, stop);
     }
   }
 
@@ -255,7 +258,7 @@ class HNSWIndex {
     Err err = Err::OK;
     char buf[1 << 16];
     size_t n = 0;
-    uint32_t crc = 0xFFFFFFFFu;
+    uint32_t crc = 0u;
     auto flush = [&]() -> bool {
       if (n == 0) return true;
       if (!writeAllFd(fd, buf, n)) { err = Err::IOError; return false; }
@@ -457,11 +460,12 @@ class HNSWIndex {
     }
   }
 
-  void HNSWBuildSeq() {
+  void HNSWBuildSeq(const std::atomic<bool>* stop = nullptr) {
     entry_ = -1;
     for (auto& lv : lvlAdj_) lv.assign(lv.size(), std::vector<uint32_t>());
     Scratch sc;
     for (size_t i = 0; i < size(); i++) {
+      if (stop && stop->load(std::memory_order_relaxed)) return;
       PrepareScratch(sc);
       int lvl = SampleLevel(sc);
       levels_[i] = lvl;
@@ -473,7 +477,7 @@ class HNSWIndex {
     }
   }
 
-  void HNSWBuildParallel(int threads) {
+  void HNSWBuildParallel(int threads, const std::atomic<bool>* stop = nullptr) {
     entry_ = -1;
     for (auto& lv : lvlAdj_) lv.assign(lv.size(), std::vector<uint32_t>());
     size_t n = size();
@@ -490,6 +494,7 @@ class HNSWIndex {
     size_t batch = std::max<size_t>(512, size_t(threads) * 256);
     size_t done = 1;
     while (done < n) {
+      if (stop && stop->load(std::memory_order_relaxed)) return;
       size_t from = done;
       size_t to = std::min(n, done + batch);
       size_t count = to - from;
@@ -505,6 +510,7 @@ class HNSWIndex {
           Scratch sc;
           sc.rng.seed(0x9E3779B97F4A7C15ull ^ uint64_t(t + 1) * 0x9E3779B97F4A7C15ull);
           while (true) {
+            if (stop && stop->load(std::memory_order_relaxed)) return;
             size_t i = next.fetch_add(1);
             if (i >= count) break;
             uint32_t node = uint32_t(from + i);
@@ -516,6 +522,7 @@ class HNSWIndex {
         });
       }
       for (auto& th : pool) th.join();
+      if (stop && stop->load(std::memory_order_relaxed)) return;
       // serialized apply phase
       for (size_t i = 0; i < count; i++) {
         uint32_t node = uint32_t(from + i);

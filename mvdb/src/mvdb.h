@@ -95,10 +95,10 @@ struct TableSchema {
 // ---------------------------------------------------------------------------
 // Small utilities
 // ---------------------------------------------------------------------------
-inline uint32_t crc32c_hw(const uint8_t* p, size_t n, uint32_t crc = 0xFFFFFFFFu);
-// CRC-32 (IEEE) slicing-by-8 implementation, init 0xFFFFFFFF. Bit-identical
-// output to the byte-at-a-time version, ~8x faster on the WAL hot path.
-inline uint32_t crc32_soft(const uint8_t* p, size_t n, uint32_t crc = 0xFFFFFFFFu) {
+// CRC-32 (IEEE) slicing-by-8 implementation (zlib convention: seed 0,
+// internal register = ~seed, final XOR). Bit-identical output to the
+// byte-at-a-time version; the check value crc32("123456789") = 0xCBF43926.
+inline uint32_t crc32_soft(const uint8_t* p, size_t n, uint32_t crc = 0u) {
   static uint32_t table[8][256];
   static bool init = false;
   if (!init) {
@@ -121,12 +121,15 @@ inline uint32_t crc32_soft(const uint8_t* p, size_t n, uint32_t crc = 0xFFFFFFFF
     uint32_t lo, hi;
     std::memcpy(&lo, p, 4);
     std::memcpy(&hi, p + 4, 4);
+    // derived from the reflected byte step S(c,b)=(c>>8)^T[(c^b)&0xFF]:
+    // 4 steps = C3[x0]^C2[x1]^C1[x2]^C0[x3], x_i = byte i of (crc ^ input),
+    // Ck[i] = fold^k(T[i]); two 4-byte groups in sequence compose to 8 steps.
     crc ^= lo;
     crc = table[3][crc & 0xFF] ^ table[2][(crc >> 8) & 0xFF] ^
           table[1][(crc >> 16) & 0xFF] ^ table[0][crc >> 24];
     crc ^= hi;
-    crc = table[7][crc & 0xFF] ^ table[6][(crc >> 8) & 0xFF] ^
-          table[5][(crc >> 16) & 0xFF] ^ table[4][crc >> 24];
+    crc = table[3][crc & 0xFF] ^ table[2][(crc >> 8) & 0xFF] ^
+          table[1][(crc >> 16) & 0xFF] ^ table[0][crc >> 24];
     p += 8;
     n -= 8;
   }

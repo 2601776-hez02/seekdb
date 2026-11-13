@@ -9,7 +9,9 @@
 #include <sys/types.h>
 #include <dirent.h>
 
+#include <atomic>
 #include <cerrno>
+#include <thread>
 
 #include "ast.h"
 #include "hnsw.h"
@@ -103,6 +105,19 @@ struct TableState {
   // pk bounds across all non-empty runs (for the PointGet shortcut)
   int64_t runMinPk = INT64_MAX;
   int64_t runMaxPk = INT64_MIN;
+  // index availability. Sync builds (small tables) stay valid across DML via
+  // incremental maintenance; async builds (large tables) are gated on the
+  // data epoch captured when the build started.
+  bool indexReady = false;
+  bool indexAsync = false;
+  uint64_t indexEpoch = 0;
+  // async build handoff: the worker writes pendingIndex before buildDone
+  // (release); the query thread claims it after buildDone (acquire)
+  std::unique_ptr<HNSWIndex> pendingIndex;
+  uint64_t pendingEpoch = 0;
+  std::atomic<bool> buildDone{false};
+  std::atomic<bool> buildStop{false};
+  std::thread buildThread;
 };
 
 static constexpr uint64_t MEMTABLE_FLUSH_BYTES = 64ull << 20;    // 64 MiB
@@ -253,6 +268,8 @@ class Engine {
 
   // (re)build the HNSW index of a table from its committed rows
   Err BuildIndex(TableState& t);
+  // claim a finished async build (called on the query path)
+  void MaybeClaimPendingIndex(TableState& t);
   // approximate number of live rows (memtable + run counts; runs may include
   // superseded entries, so this is an upper bound - fine for a size gate)
   int64_t RowCountEstimate(TableState& t);

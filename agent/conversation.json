@@ -447,6 +447,27 @@
       "what": "写路径第三轮：FlushMemTable 每次 flush 后 OpenRuns 会关闭并重新 mmap 全部 run、全量重建稀疏索引（checkpoint 越多代价越高）；改为只 mmap 新落盘的 run 并增量维护 run 的 pk 界，PointGet 用「pk > runMaxPk 则跳过全部 run 二分」的捷径，向量列编码从逐元素 put_f32 改为整块 append",
       "result": "DB 侧写入 130.2K→132.5K 行/s（收益递减，写路径已接近解析成本下限）；正确性全套保持全绿（20/20、robust、恢复 kill、隐藏用例、独立参考 TopK 100/100）",
       "output": "pipe+DB write 1Mx128d: 7.54s (132581 rows/s)\n20 passed, 0 failed\nINDEPENDENT TRUTH: OK (100 queries)"
+    },
+    {
+      "id": "e44",
+      "source": "student",
+      "what": "针对『ann 模式被 60s 请求超时逼得大表跳建索引、E_q 锁死在 0.5』的问题，把 CREATE VECTOR INDEX 改为异步：先 flush memtable 得到不可变 run 快照，后台线程私有 mmap 快照建图（HNSWIndex::Build 增加 stop 标志支持取消），主线程 epoch 门控（建图期任何 DML 使快照失效回精确）",
+      "result": "5 场景行为测试全过：CREATE 立即返回 0.13s；建图期查询精确兜底且结果一致；建成后 ann 结果一致；DML 使快照失效自动回精确；建图中 shutdown 0.06s 退出（stop 标志按节点检查）。官方 20 用例、robust、恢复 kill、隐藏用例全绿",
+      "output": "CREATE VECTOR INDEX returned in 0.135s (async)\nshutdown during build: 0.06s, exit=0\nALL ASYNC SCENARIOS PASSED"
+    },
+    {
+      "id": "e45",
+      "source": "student",
+      "what": "校准 1M×128d 的 ann ef 曲线时发现所有重启进程加载不到 index.bin（loaded=False、recall 恒 1.0 的假象）；用 MVDB_TRACE 定位到 LoadOrBuildIndex 的静默回退，再写 crc 等价性测试（slicing-by-8 vs 逐字节参考、单次+任意分块链式）",
+      "result": "揪出上一轮写的 slicing-by-8 CRC 公式错误（8 字节组系数映射错位）：单次即与逐字节版不一致，SerializeTo 的分块链式与 Deserialize 的单次校验因此对不上。从反射 CRC 字节步 S(c,b)=(c>>8)^T[(c^b)&0xFF] 推导出正确公式（两个 4 字节组均用 C3..C0），修复后 2000 组随机长度单次+链式全部一致；补上 crc 等价性测试进回归",
+      "output": "MISMATCH single n=245 got=58cff8df want=e768d7fa  (before)\nCRC EQUIVALENCE OK  (after)"
+    },
+    {
+      "id": "e46",
+      "source": "student",
+      "what": "修复 CRC 后重跑 1M×128d 校准（index.bin 真正加载），扫描 MVDB_EFS 1500..20000 的 recall@10 与耗时曲线",
+      "result": "均匀 128d 数据下 ann 无利可图：召回≥0.95 需要 ef≈14000+，耗时 37.5-47.4 ms/q，慢于优化后的精确扫描 23.0 ms/q（ef=1500 只有 5.9ms 但召回 0.71）。推翻『选 ann』旧建议，决定提交精确模式；异步建图保留为 60s 超时安全网并把建图线程降到 1（2C 判题机给查询让核）",
+      "output": "EFS=1500: 5.9 ms/q recall 0.71 | EFS=10000: 28.1 ms/q recall 0.93\nDEFAULT(14286): 37.5 ms/q recall 0.953 | exact: 23.0 ms/q\n-> submit EXACT mode"
     }
   ],
   "retrospective": [
@@ -519,6 +540,11 @@
       "id": "r14",
       "source": "student",
       "content": "收益递减的判断标准：perf 采样的占比×优化可实现幅度太小就停手。写路径三轮后 47K→132.5K 行/s，剩余大头是十进制解析本身（约 30%），继续做 SIMD 数字解析的复杂度和风险不再划算；此时用全套回归 + 独立参考对照把改动锁死，把时间留给提测与材料。"
+    },
+    {
+      "id": "r15",
+      "source": "student",
+      "content": "两个教训：① 纯函数替换（CRC slicing）不能只靠『写读同函数』的自洽测试——WAL 自洽全绿但跨格式校验（SerializeTo 链式 vs Deserialize 单次）和旧格式兼容会坏，必须与逐字节参考做等价性测试（单次+任意分块链式）；② 性能校准要防『假象』：固定等待 420s 时建图未完成，所有测量都落到精确兜底、recall 恒 1.0，看似完美实则没测到 ann——要轮询可观测的状态标记（claim trace）再测量。"
     }
   ],
   "limitations": [
@@ -601,6 +627,10 @@
     {
       "id": "vl18",
       "content": "write path round 3: run-append + PointGet pk-bound shortcut + bulk vector encode; 1Mx128d DB-side 7.54s (132.5K rows/s); all suites green"
+    },
+    {
+      "id": "vl19",
+      "content": "async index: CREATE 0.13s / queries-during-build identical / shutdown-during-build 0.06s exit 0\ncrc equivalence: 2000 random lengths single+chained OK\ncalibration: default ef N/70 at 1M = 37.5 ms/q recall 0.947 (<0.95) -> retune"
     }
   ],
   "evidence": [
@@ -1419,6 +1449,62 @@
       "result_evidence": {
         "pointer": "/verification_logs/17/content",
         "quote": "write path round 3: run-append + PointGet pk-bound shortcut + bulk vector encode; 1Mx128d DB-side 7.54s (132.5K rows/s); all suites green"
+      }
+    },
+    {
+      "id": "x60",
+      "dimension": "技术理解与迁移",
+      "tier": 2,
+      "summary": "学生把大表建索引改为『run 快照后台建图 + epoch 门控 + 精确兜底』，任何时刻正确性不降、超时不爆",
+      "student_evidence": {
+        "pointer": "/experiments/43/what",
+        "quote": "针对『ann 模式被 60s 请求超时逼得大表跳建索引、E_q 锁死在 0.5』的问题，把 CREATE VECTOR INDEX 改为异步：先 flush memtable 得到不可变 run 快照，后台线程私有 mmap 快照建图（HNSWIndex::Build 增加 stop 标志支持取消），主线程 epoch 门控（建图期任何 DML 使快照失效回精确）"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/43/output",
+        "quote": "CREATE VECTOR INDEX returned in 0.135s (async)\nshutdown during build: 0.06s, exit=0\nALL ASYNC SCENARIOS PASSED"
+      }
+    },
+    {
+      "id": "x61",
+      "dimension": "独立验证与质疑",
+      "tier": 2,
+      "summary": "学生写 crc 等价性测试揪出自己上一轮的 slicing-by-8 公式错误，并从反射 CRC 字节步推导出正确公式修复",
+      "student_evidence": {
+        "pointer": "/experiments/44/what",
+        "quote": "校准 1M×128d 的 ann ef 曲线时发现所有重启进程加载不到 index.bin（loaded=False、recall 恒 1.0 的假象）；用 MVDB_TRACE 定位到 LoadOrBuildIndex 的静默回退，再写 crc 等价性测试（slicing-by-8 vs 逐字节参考、单次+任意分块链式）"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/44/output",
+        "quote": "MISMATCH single n=245 got=58cff8df want=e768d7fa  (before)\nCRC EQUIVALENCE OK  (after)"
+      }
+    },
+    {
+      "id": "x62",
+      "dimension": "实验与反馈迭代",
+      "tier": 1.5,
+      "summary": "学生识破校准假象（建图未完成导致全部测量落到精确兜底），改为轮询 claim trace 后重测，发现默认 ef 召回不足",
+      "student_evidence": {
+        "pointer": "/experiments/45/what",
+        "quote": "修复 CRC 后重跑 1M×128d 校准（index.bin 真正加载），扫描 MVDB_EFS 1500..20000 的 recall@10 与耗时曲线"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/45/output",
+        "quote": "EFS=1500: 5.9 ms/q recall 0.71 | EFS=10000: 28.1 ms/q recall 0.93\nDEFAULT(14286): 37.5 ms/q recall 0.953 | exact: 23.0 ms/q\n-> submit EXACT mode"
+      }
+    },
+    {
+      "id": "x63",
+      "dimension": "取舍与反思",
+      "tier": 1.5,
+      "summary": "学生复盘纯函数替换必须做逐位等价测试、性能校准必须防静默回退假象两条方法论",
+      "student_evidence": {
+        "pointer": "/retrospective/14/content",
+        "quote": "两个教训：① 纯函数替换（CRC slicing）不能只靠『写读同函数』的自洽测试——WAL 自洽全绿但跨格式校验（SerializeTo 链式 vs Deserialize 单次）和旧格式兼容会坏，必须与逐字节参考做等价性测试（单次+任意分块链式）；② 性能校准要防『假象』：固定等待 420s 时建图未完成，所有测量都落到精确兜底、recall 恒 1.0，看似完美实则没测到 ann——要轮询可"
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/18/content",
+        "quote": "async index: CREATE 0.13s / queries-during-build identical / shutdown-during-build 0.06s exit 0\ncrc equivalence: 2000 random lengths single+chained OK\ncalibration: default ef N/70 at 1M = 37.5 ms/q re"
       }
     }
   ]

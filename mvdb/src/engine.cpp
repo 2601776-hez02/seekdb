@@ -563,12 +563,74 @@ Err Engine::FlushMemTable(TableState& t) {
   FsyncDir(dir);
   t.runSeq++;
   t.mem.Clear();
-  return OpenRuns(t);
+  // append the freshly written run instead of re-opening every run
+  Run r;
+  e = LoadRunFile(path, r);
+  if (e != Err::OK) return e;
+  if (r.count > 0) {
+    if (r.firstPk < t.runMinPk) t.runMinPk = r.firstPk;
+    if (r.lastPk > t.runMaxPk) t.runMaxPk = r.lastPk;
+  }
+  t.runs.push_back(std::move(r));
+  return Err::OK;
+}
+
+// Open one run file, mmap it and build its sparse index + pk bounds.
+Err Engine::LoadRunFile(const std::string& path, Run& r) {
+  r.path = path;
+  r.fd = ::open(path.c_str(), O_RDONLY);
+  if (r.fd < 0) return Err::IOError;
+  struct stat st;
+  if (::fstat(r.fd, &st) != 0) { r.Close(); return Err::IOError; }
+  r.fileSize = uint64_t(st.st_size);
+  r.map = (const uint8_t*)::mmap(nullptr, size_t(r.fileSize), PROT_READ, MAP_SHARED, r.fd, 0);
+  if (r.map == MAP_FAILED) { r.map = nullptr; r.Close(); return Err::IOError; }
+  if (r.fileSize < 8) { r.Close(); return Err::IOError; }
+  uint64_t count = 0;
+  std::memcpy(&count, r.map, 8);
+  r.count = count;
+  // sparse index: sample pk every 64 entries
+  uint64_t off = 8;
+  uint64_t n = 0;
+  while (n < count) {
+    if (off + 13 > r.fileSize) break;
+    int64_t pk = 0;
+    std::memcpy(&pk, r.map + off, 8);
+    if (n == 0) r.firstPk = pk;
+    r.lastPk = pk;
+    r.sparse.emplace_back(pk, off);
+    uint64_t step = 0;
+    while (step < 64 && n + step < count) {
+      uint32_t l = 0;
+      if (off + 13 > r.fileSize) break;
+      std::memcpy(&l, r.map + off + 9, 4);
+      off += 13 + l;
+      step++;
+      if (off > r.fileSize) { step = 64; break; }
+    }
+    n += step;
+    if (step == 0) break;
+  }
+  // exact last entry pk (the sampled walk may stop short)
+  if (count > 0 && !r.sparse.empty()) {
+    uint64_t loff = r.sparse.back().second;
+    uint64_t lIdx = (r.sparse.size() - 1) * 64;
+    while (lIdx < count && loff + 13 <= r.fileSize) {
+      std::memcpy(&r.lastPk, r.map + loff, 8);
+      uint32_t l = 0;
+      std::memcpy(&l, r.map + loff + 9, 4);
+      loff += 13 + l;
+      lIdx++;
+    }
+  }
+  return Err::OK;
 }
 
 Err Engine::OpenRuns(TableState& t) {
   for (Run& r : t.runs) r.Close();
   t.runs.clear();
+  t.runMinPk = INT64_MAX;
+  t.runMaxPk = INT64_MIN;
   std::string dir = dir_ + "/tables/" + std::to_string(t.sch.id);
   DIR* d = ::opendir(dir.c_str());
   if (!d) {
@@ -587,37 +649,11 @@ Err Engine::OpenRuns(TableState& t) {
   std::sort(seqs.begin(), seqs.end());
   for (uint64_t seq : seqs) {
     Run r;
-    r.path = dir + "/run." + std::to_string(seq) + ".dat";
-    r.fd = ::open(r.path.c_str(), O_RDONLY);
-    if (r.fd < 0) return Err::IOError;
-    struct stat st;
-    if (::fstat(r.fd, &st) != 0) { r.Close(); return Err::IOError; }
-    r.fileSize = uint64_t(st.st_size);
-    r.map = (const uint8_t*)::mmap(nullptr, size_t(r.fileSize), PROT_READ, MAP_SHARED, r.fd, 0);
-    if (r.map == MAP_FAILED) { r.map = nullptr; r.Close(); return Err::IOError; }
-    if (r.fileSize < 8) { r.Close(); return Err::IOError; }
-    uint64_t count = 0;
-    std::memcpy(&count, r.map, 8);
-    r.count = count;
-    // sparse index: sample pk every 64 entries
-    uint64_t off = 8;
-    uint64_t n = 0;
-    while (n < count) {
-      if (off + 13 > r.fileSize) break;
-      int64_t pk = 0;
-      std::memcpy(&pk, r.map + off, 8);
-      r.sparse.emplace_back(pk, off);
-      uint64_t step = 0;
-      while (step < 64 && n + step < count) {
-        uint32_t l = 0;
-        if (off + 13 > r.fileSize) break;
-        std::memcpy(&l, r.map + off + 9, 4);
-        off += 13 + l;
-        step++;
-        if (off > r.fileSize) { step = 64; break; }
-      }
-      n += step;
-      if (step == 0) break;
+    Err e = LoadRunFile(dir + "/run." + std::to_string(seq) + ".dat", r);
+    if (e != Err::OK) return e;
+    if (r.count > 0) {
+      if (r.firstPk < t.runMinPk) t.runMinPk = r.firstPk;
+      if (r.lastPk > t.runMaxPk) t.runMaxPk = r.lastPk;
     }
     t.runs.push_back(std::move(r));
     if (seq + 1 > t.runSeq) t.runSeq = seq + 1;
@@ -730,7 +766,14 @@ Err Engine::CompactRuns(TableState& t) {
   t.runs.clear();
   for (auto& o : olds) ::unlink(o.c_str());
   t.runSeq++;
-  return OpenRuns(t);
+  // load only the freshly compacted run (the old ones are unlinked)
+  Run nr;
+  Err le = LoadRunFile(path, nr);
+  if (le != Err::OK) return le;
+  t.runMinPk = nr.count > 0 ? nr.firstPk : INT64_MAX;
+  t.runMaxPk = nr.count > 0 ? nr.lastPk : INT64_MIN;
+  t.runs.push_back(std::move(nr));
+  return Err::OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +795,8 @@ bool Engine::PointGet(int64_t tableId, int64_t pk, const char*& data, size_t& le
   TableState* t = FindTableById(tableId);
   if (!t) return false;
   if (t->mem.Get(pk, data, len, tomb)) return true;
+  // shortcut: pks beyond every run's max cannot be in any run
+  if (t->runs.empty() || pk > t->runMaxPk) return false;
   for (size_t i = t->runs.size(); i-- > 0;) {
     const Run& r = t->runs[i];
     if (r.count == 0) continue;

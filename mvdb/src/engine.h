@@ -64,6 +64,9 @@ struct Run {
   const uint8_t* map = nullptr;              // mmap of whole file
   // sparse index: (pk, entry offset) sampled every 64 entries
   std::vector<std::pair<int64_t, uint64_t>> sparse;
+  // pk bounds of the entries in this run (INT64_MIN/MAX when empty)
+  int64_t firstPk = INT64_MAX;
+  int64_t lastPk = INT64_MIN;
 
   Run() = default;
   Run(Run&& o) noexcept {
@@ -76,6 +79,8 @@ struct Run {
     fd = o.fd;
     map = o.map;
     sparse = std::move(o.sparse);
+    firstPk = o.firstPk;
+    lastPk = o.lastPk;
     o.fd = -1;
     o.map = nullptr;
     return *this;
@@ -95,6 +100,9 @@ struct TableState {
   std::vector<Run> runs;                     // oldest first
   std::unique_ptr<HNSWIndex> index;          // null unless built
   uint64_t runSeq = 0;
+  // pk bounds across all non-empty runs (for the PointGet shortcut)
+  int64_t runMinPk = INT64_MAX;
+  int64_t runMaxPk = INT64_MIN;
 };
 
 static constexpr uint64_t MEMTABLE_FLUSH_BYTES = 64ull << 20;    // 64 MiB
@@ -206,6 +214,7 @@ class Engine {
 
   // ---- storage ----
   Err FlushMemTable(TableState& t);
+  Err LoadRunFile(const std::string& path, Run& r);
   Err OpenRuns(TableState& t);
   Err CompactRuns(TableState& t);
   bool PointGet(int64_t tableId, int64_t pk, const char*& data, size_t& len, bool& tomb);

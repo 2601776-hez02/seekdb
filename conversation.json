@@ -440,6 +440,13 @@
       "what": "继续削写路径：parse_f64 的 pow(10,k) 换成静态 10 的幂表（结果与 pow 逐位一致，float32 舍入不变）；WAL CRC 换 slicing-by-8（输出与逐字节版逐位一致）；ApplyMutations 直接应用已落盘写入的变更流，去掉每行一次 pread 重读 WAL 的第二个遍历；JSON 解析普通段块拷贝",
       "result": "DB 侧写入 86.8K→130.2K 行/s（1M×128d 7.68s）；20 公开用例、健壮性、恢复 kill、崩溃模糊、隐藏用例扫描、独立参考 TopK 100/100 全部通过，证明 WAL/CRC/apply 语义不变",
       "output": "pipe+DB write 1Mx128d: 7.68s (130212 rows/s)\nKILL-DURING-RECOVERY OK\nINDEPENDENT TRUTH: OK (100 queries)"
+    },
+    {
+      "id": "e43",
+      "source": "student",
+      "what": "写路径第三轮：FlushMemTable 每次 flush 后 OpenRuns 会关闭并重新 mmap 全部 run、全量重建稀疏索引（checkpoint 越多代价越高）；改为只 mmap 新落盘的 run 并增量维护 run 的 pk 界，PointGet 用「pk > runMaxPk 则跳过全部 run 二分」的捷径，向量列编码从逐元素 put_f32 改为整块 append",
+      "result": "DB 侧写入 130.2K→132.5K 行/s（收益递减，写路径已接近解析成本下限）；正确性全套保持全绿（20/20、robust、恢复 kill、隐藏用例、独立参考 TopK 100/100）",
+      "output": "pipe+DB write 1Mx128d: 7.54s (132581 rows/s)\n20 passed, 0 failed\nINDEPENDENT TRUTH: OK (100 queries)"
     }
   ],
   "retrospective": [
@@ -507,6 +514,11 @@
       "id": "r13",
       "source": "student",
       "content": "两次写路径优化的教训：perf 里孤立符号高占比（memchr 49%）要先找调用方再动手；字符串扫描类优化必须把搜索上界收紧到结构边界（引号），否则会把 O(n) 写成 O(n^2)；CRC/pow 等纯函数替换要保证输出逐位一致（CRC 用同多项式 slicing、pow 用启动期 pow 建表），并用恢复类测试证明语义等价。"
+    },
+    {
+      "id": "r14",
+      "source": "student",
+      "content": "收益递减的判断标准：perf 采样的占比×优化可实现幅度太小就停手。写路径三轮后 47K→132.5K 行/s，剩余大头是十进制解析本身（约 30%），继续做 SIMD 数字解析的复杂度和风险不再划算；此时用全套回归 + 独立参考对照把改动锁死，把时间留给提测与材料。"
     }
   ],
   "limitations": [
@@ -585,6 +597,10 @@
     {
       "id": "vl17",
       "content": "write path round 2: DB-side 1Mx128d 21.26s (47.0K rows/s) -> 7.68s (130.2K rows/s), pre-generated driver\nall suites green + INDEPENDENT TRUTH OK"
+    },
+    {
+      "id": "vl18",
+      "content": "write path round 3: run-append + PointGet pk-bound shortcut + bulk vector encode; 1Mx128d DB-side 7.54s (132.5K rows/s); all suites green"
     }
   ],
   "evidence": [
@@ -1375,6 +1391,34 @@
       "result_evidence": {
         "pointer": "/verification_logs/16/content",
         "quote": "write path round 2: DB-side 1Mx128d 21.26s (47.0K rows/s) -> 7.68s (130.2K rows/s), pre-generated driver\nall suites green + INDEPENDENT TRUTH OK"
+      }
+    },
+    {
+      "id": "x58",
+      "dimension": "实验与反馈迭代",
+      "tier": 1.5,
+      "summary": "学生把 flush 后的全量重开 run 改为增量 mmap 新 run，并用 pk 界捷径省掉 PointGet 的逐 run 二分",
+      "student_evidence": {
+        "pointer": "/experiments/42/what",
+        "quote": "写路径第三轮：FlushMemTable 每次 flush 后 OpenRuns 会关闭并重新 mmap 全部 run、全量重建稀疏索引（checkpoint 越多代价越高）；改为只 mmap 新落盘的 run 并增量维护 run 的 pk 界，PointGet 用「pk > runMaxPk 则跳过全部 run 二分」的捷径，向量列编码从逐元素 put_f32 改为整块 append"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/42/output",
+        "quote": "pipe+DB write 1Mx128d: 7.54s (132581 rows/s)\n20 passed, 0 failed\nINDEPENDENT TRUTH: OK (100 queries)"
+      }
+    },
+    {
+      "id": "x59",
+      "dimension": "取舍与反思",
+      "tier": 1,
+      "summary": "学生用「占比×可实现幅度」判断收益递减并停手，把时间转向验证与提测",
+      "student_evidence": {
+        "pointer": "/retrospective/13/content",
+        "quote": "收益递减的判断标准：perf 采样的占比×优化可实现幅度太小就停手。写路径三轮后 47K→132.5K 行/s，剩余大头是十进制解析本身（约 30%），继续做 SIMD 数字解析的复杂度和风险不再划算；此时用全套回归 + 独立参考对照把改动锁死，把时间留给提测与材料。"
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/17/content",
+        "quote": "write path round 3: run-append + PointGet pk-bound shortcut + bulk vector encode; 1Mx128d DB-side 7.54s (132.5K rows/s); all suites green"
       }
     }
   ]

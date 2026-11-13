@@ -375,7 +375,9 @@ inline Err encode_payload(const TableSchema& sch, const std::vector<Value>& vals
       case ColType::Vector: {
         if (v.t != Value::T::Vec) return Err::InternalError;
         if (int64_t(v.v.size()) != c.n) return Err::DimensionMismatch;
-        for (float f : v.v) put_f32(out, f);
+        // one bulk append instead of one put_f32 per element (little-endian
+        // host order == the byte-wise put_f32 encoding)
+        out.append(reinterpret_cast<const char*>(v.v.data()), v.v.size() * sizeof(float));
         break;
       }
       default: return Err::InternalError;

@@ -531,6 +531,8 @@ Err Engine::WalRecover() {
       if (t) {
         if (flags & 1) t->mem.Del(pk);
         else t->mem.Put(pk, head.substr(26));
+        if (pk < t->memMinPk) t->memMinPk = pk;
+        if (pk > t->memMaxPk) t->memMaxPk = pk;
         if (t->mem.bytes() >= memtableFlushBytes_) {
           Err e = FlushMemTable(*t);
           if (e != Err::OK) return e;
@@ -620,6 +622,8 @@ Err Engine::FlushMemTable(TableState& t) {
   FsyncDir(dir);
   t.runSeq++;
   t.mem.Clear();
+  t.memMinPk = INT64_MAX;
+  t.memMaxPk = INT64_MIN;
   // append the freshly written run instead of re-opening every run
   Run r;
   e = LoadRunFile(path, r);
@@ -962,6 +966,94 @@ static const float* payload_vec_ptr(const TableSchema& sch, const char* data, si
   return (const float*)(p + pos);
 }
 
+// Walk the payload columns BEFORE the varchar column at `ci` (schema order,
+// pk skipped) and return a view of its bytes. No allocation.
+static bool payload_str_view(const TableSchema& sch, const char* data, size_t len, int ci,
+                             const char*& s, uint32_t& slen) {
+  const uint8_t* p = (const uint8_t*)data;
+  size_t pos = 0;
+  size_t n = len;
+  for (size_t c = 0; c < size_t(ci); c++) {
+    if (int64_t(c) == sch.pk_col) continue;
+    switch (sch.cols[c].type) {
+      case ColType::BigInt:
+        pos += 8;
+        break;
+      case ColType::VarChar: {
+        if (pos + 4 > n) return false;
+        uint32_t l = uint32_t(p[pos]) | (uint32_t(p[pos + 1]) << 8) |
+                     (uint32_t(p[pos + 2]) << 16) | (uint32_t(p[pos + 3]) << 24);
+        pos += 4 + l;
+        break;
+      }
+      default:
+        return false;
+    }
+    if (pos > n) return false;
+  }
+  if (pos + 4 > n) return false;
+  uint32_t l = uint32_t(p[pos]) | (uint32_t(p[pos + 1]) << 8) |
+               (uint32_t(p[pos + 2]) << 16) | (uint32_t(p[pos + 3]) << 24);
+  if (pos + 4 + l > n) return false;
+  s = (const char*)(p + pos + 4);
+  slen = l;
+  return true;
+}
+
+// Fused single walk: varchar view at `predCol` AND vector pointer at `vc`
+// (requires predCol < vc). One pass instead of two for the filtered hot path.
+static bool payload_str_and_vec(const TableSchema& sch, const char* data, size_t len,
+                                int predCol, int vc,
+                                const char*& s, uint32_t& slen, const float*& vp) {
+  const uint8_t* p = (const uint8_t*)data;
+  size_t pos = 0;
+  size_t n = len;
+  s = nullptr;
+  slen = 0;
+  vp = nullptr;
+  // fast shape: the predicate column is the first payload column and the
+  // vector column immediately follows it ([u32 len][bytes][floats...])
+  if (predCol == (sch.pk_col == 0 ? 1 : 0) && vc == predCol + 1) {
+    if (n < 4) return false;
+    uint32_t l = uint32_t(p[0]) | (uint32_t(p[1]) << 8) |
+                 (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+    size_t need = 4 + l + size_t(sch.cols[size_t(vc)].n) * 4;
+    if (need > n) return false;
+    s = (const char*)(p + 4);
+    slen = l;
+    vp = (const float*)(p + 4 + l);
+    return true;
+  }
+  for (size_t c = 0; c < size_t(vc); c++) {
+    if (int64_t(c) == sch.pk_col) continue;
+    switch (sch.cols[c].type) {
+      case ColType::BigInt:
+        pos += 8;
+        break;
+      case ColType::VarChar: {
+        if (pos + 4 > n) return false;
+        uint32_t l = uint32_t(p[pos]) | (uint32_t(p[pos + 1]) << 8) |
+                     (uint32_t(p[pos + 2]) << 16) | (uint32_t(p[pos + 3]) << 24);
+        pos += 4;
+        if (int64_t(c) == predCol) {
+          if (pos + l > n) return false;
+          s = (const char*)(p + pos);
+          slen = l;
+        }
+        pos += l;
+        break;
+      }
+      default:
+        return false;
+    }
+    if (pos > n) return false;
+  }
+  size_t need = size_t(sch.cols[size_t(vc)].n) * 4;
+  if (pos + need > n) return false;
+  vp = (const float*)(p + pos);
+  return true;
+}
+
 // fixed-size worst-first TopK collector (no allocation): used by the parallel
 // exact scan workers; each worker keeps its own, merged on the main thread
 struct TkAcc {
@@ -1000,9 +1092,15 @@ struct TkAcc {
   }
 };
 
-// tight scan of one run: distance straight from the mmap'd payload
+// tight scan of one run: distance straight from the mmap'd payload. Modes:
+// - lit == nullptr: unfiltered scan
+// - bitsBuild != nullptr: evaluate the VARCHAR equality predicate per row,
+//   append the result bit (building the per-run cache)
+// - bits != nullptr: consult the cached bit only
+// No allocation.
 static void scanRunTopK(const Run& r, const TableSchema& sch, int vc, size_t d,
-                        const float* q, TkAcc& acc) {
+                        const float* q, TkAcc& acc, int predCol, const std::string* lit,
+                        const std::vector<uint8_t>* bits, std::vector<uint8_t>* bitsBuild) {
   uint64_t off = 8;
   uint64_t idx = 0;
   while (idx < r.count && off + 13 <= r.fileSize) {
@@ -1012,9 +1110,28 @@ static void scanRunTopK(const Run& r, const TableSchema& sch, int vc, size_t d,
     std::memcpy(&pk, r.map + off, 8);
     flags = r.map[off + 8];
     std::memcpy(&l, r.map + off + 9, 4);
-    if (!(flags & 1)) {
-      const float* vp = payload_vec_ptr(sch, (const char*)(r.map + off + 13), l, vc);
-      if (vp) acc.add(l2sq_simd(vp, q, d), pk);
+    if (flags & 1) {
+      // tombstone: keep the bitmap position aligned in build mode
+      if (bitsBuild) bitsBuild->push_back(0);
+    } else {
+      const char* payload = (const char*)(r.map + off + 13);
+      if (lit == nullptr) {
+        const float* vp = payload_vec_ptr(sch, payload, l, vc);
+        if (vp) acc.add(l2sq_simd(vp, q, d), pk);
+      } else if (bitsBuild) {
+        const char* s = nullptr;
+        uint32_t slen = 0;
+        const float* vp = nullptr;
+        bool match = payload_str_and_vec(sch, payload, l, predCol, vc, s, slen, vp) &&
+                     slen == lit->size() && std::memcmp(s, lit->data(), slen) == 0;
+        bitsBuild->push_back(match ? 1 : 0);
+        if (match) acc.add(l2sq_simd(vp, q, d), pk);
+      } else {
+        if ((*bits)[idx]) {
+          const float* vp = payload_vec_ptr(sch, payload, l, vc);
+          if (vp) acc.add(l2sq_simd(vp, q, d), pk);
+        }
+      }
     }
     off += 13 + l;
     idx++;
@@ -1292,6 +1409,8 @@ Err Engine::CommitTxn() {
           }
         }
       }
+      if (ent.first < t->memMinPk) t->memMinPk = ent.first;
+      if (ent.first > t->memMaxPk) t->memMaxPk = ent.first;
     }
     Err fe = Err::OK;
     if (t->mem.bytes() >= memtableFlushBytes_) fe = FlushMemTable(*t);
@@ -1385,6 +1504,8 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
         }
       }
     }
+    if (m.pk < t->memMinPk) t->memMinPk = m.pk;
+    if (m.pk > t->memMaxPk) t->memMaxPk = m.pk;
     if (t->mem.bytes() >= memtableFlushBytes_) {
       Err fe = FlushMemTable(*t);
       if (fe != Err::OK) return fe;
@@ -1638,9 +1759,70 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
       if (r.count > 0) pNonEmptyRuns++;
       pTotalRows += int64_t(r.count);
     }
-    bool parallel = !where && !inTxn_ && useFlat && pNonEmptyRuns >= 2 &&
+    // Correctness gates for the parallel path: no pk may appear in two
+    // sources at once (pure-insert tables keep strictly disjoint ranges),
+    // plus the scale/collector predicate.
+    bool runsDisjoint = true;
+    int64_t prevMax = INT64_MIN;
+    for (const Run& r : t.runs) {
+      if (r.count == 0) continue;
+      if (r.firstPk <= prevMax) { runsDisjoint = false; break; }
+      prevMax = r.lastPk;
+    }
+    bool memDisjoint = t.mem.empty() ||
+                       t.memMinPk > t.runMaxPk || t.memMaxPk < t.runMinPk;
+    // inline fast path: single VARCHAR equality predicate (no allocation,
+    // memcmp on the payload bytes - identical semantics to EvalPred); the
+    // fused walk requires the predicate column to precede the vector column
+    bool inlinePred = false;
+    int predCol = -1;
+    const std::string* predLit = nullptr;
+    if (where && where->kind == Expr::Kind::ColCmp && where->op == Op::Eq) {
+      int ci = FindCol(sch, where->col);
+      if (ci >= 0 && ci < vc && sch.cols[size_t(ci)].type == ColType::VarChar &&
+          where->lit.t == Value::T::Str) {
+        inlinePred = true;
+        predCol = ci;
+        predLit = &where->lit.s;
+      }
+    }
+    bool parallel = (!where || inlinePred) && !inTxn_ && useFlat &&
+                    pNonEmptyRuns >= 2 && runsDisjoint && memDisjoint &&
                     pTotalRows + int64_t(t.mem.map_.size()) >= 65536;
     if (parallel) {
+      // per-run bitmap cache for the inline predicate: the first query
+      // evaluates every row (building), later queries consult the bits
+      RunFilterCache* rfc = nullptr;
+      bool building = false;
+      if (inlinePred) {
+        std::string key = SerializePred(where);
+        for (auto& c : runFilterCache_) {
+          if (c.tableId == t.sch.id && c.key == key && c.epoch == dataEpoch_) {
+            rfc = &c;
+            break;
+          }
+        }
+        if (!rfc) {
+          if (runFilterCache_.size() >= 2) runFilterCache_.erase(runFilterCache_.begin());
+          RunFilterCache nc;
+          nc.epoch = dataEpoch_;
+          nc.tableId = t.sch.id;
+          nc.key = key;
+          runFilterCache_.push_back(std::move(nc));
+          rfc = &runFilterCache_.back();
+        }
+        if (!rfc->complete) {
+          building = true;
+          rfc->runPass.clear();
+          rfc->runPass.resize(t.runs.size());
+          for (size_t i = 0; i < t.runs.size(); i++) {
+            rfc->runPass[i].clear();
+            rfc->runPass[i].reserve(size_t(t.runs[i].count));
+          }
+          rfc->memPass.clear();
+          if (!t.mem.empty()) rfc->memPass.reserve(t.mem.map_.size());
+        }
+      }
       std::vector<std::pair<int64_t, uint32_t>> memSorted;
       if (!t.mem.empty()) {
         memSorted.reserve(t.mem.map_.size());
@@ -1658,13 +1840,47 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
         load[size_t(g)] += int64_t(t.runs[i].count);
       }
       auto scanMem = [&](TkAcc& acc) {
+        size_t mi = 0;
         for (auto& e : memSorted) {
-          if (e.second == MemTable::TOMB) continue;
-          const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
-          uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
-                       (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
-          const float* vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
-          if (vp) acc.add(l2sq_simd(vp, qvec.data(), d), e.first);
+          bool match = true;
+          const float* vp = nullptr;
+          if (inlinePred) {
+            if (building) {
+              if (e.second == MemTable::TOMB) {
+                match = false;
+              } else {
+                const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
+                uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
+                             (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
+                const char* s = nullptr;
+                uint32_t slen = 0;
+                match = payload_str_and_vec(sch, (const char*)(base + 12), l, predCol,
+                                            vc, s, slen, vp) &&
+                        slen == predLit->size() &&
+                        std::memcmp(s, predLit->data(), slen) == 0;
+              }
+              rfc->memPass.push_back(match ? 1 : 0);
+            } else {
+              match = mi < rfc->memPass.size() && rfc->memPass[mi] != 0;
+            }
+            mi++;
+            if (!match) continue;
+            if (e.second == MemTable::TOMB) continue;
+            if (!vp) {
+              const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
+              uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
+                           (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
+              vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
+            }
+            if (vp) acc.add(l2sq_simd(vp, qvec.data(), d), e.first);
+          } else {
+            if (e.second == MemTable::TOMB) continue;
+            const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
+            uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
+                         (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
+            vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
+            if (vp) acc.add(l2sq_simd(vp, qvec.data(), d), e.first);
+          }
         }
       };
       TkAcc accs[2];
@@ -1672,10 +1888,21 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
       accs[1].init(k);
       std::thread th0([&] {
         scanMem(accs[0]);
-        for (size_t ri : groups[0]) scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[0]);
+        for (size_t ri : groups[0]) {
+          scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[0], predCol,
+                      inlinePred ? predLit : nullptr,
+                      (!inlinePred || building) ? nullptr : &rfc->runPass[ri],
+                      (inlinePred && building) ? &rfc->runPass[ri] : nullptr);
+        }
       });
-      for (size_t ri : groups[1]) scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[1]);
+      for (size_t ri : groups[1]) {
+        scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[1], predCol,
+                    inlinePred ? predLit : nullptr,
+                    (!inlinePred || building) ? nullptr : &rfc->runPass[ri],
+                    (inlinePred && building) ? &rfc->runPass[ri] : nullptr);
+      }
       th0.join();
+      if (inlinePred && building) rfc->complete = true;
       // merge both accumulators: best-first sorted, then store worst-first
       std::vector<std::pair<float, int64_t>> merged;
       merged.reserve(size_t(accs[0].n + accs[1].n));
@@ -1710,7 +1937,13 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
       while (sc.Next(pk, data, len, tomb)) {
         scanned++;
         bool match = true;
-        if (where) {
+        if (where && inlinePred) {
+          const char* s = nullptr;
+          uint32_t slen = 0;
+          match = payload_str_view(sch, data, len, predCol, s, slen) &&
+                  slen == predLit->size() &&
+                  std::memcmp(s, predLit->data(), slen) == 0;
+        } else if (where) {
           // bit per row in scan order: computed on first use, reused afterwards
           if (rowIdx < fc->pass.size()) {
             match = fc->pass[rowIdx] != 0;
@@ -1721,8 +1954,8 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
             fc->pass.push_back(match ? 1 : 0);
           }
           rowIdx++;
-          if (!match) continue;
         }
+        if (!match) continue;
         // distance straight from the payload bytes (no per-row vector copy)
         const float* vp = payload_vec_ptr(sch, data, len, vc);
         if (!vp) { decfail++; continue; }
@@ -1838,6 +2071,23 @@ Err Engine::ExecCreateVecIndex(const Stmt& s, ExecResult& out) {
     // flush first: the snapshot is then purely immutable run files
     Err fe = FlushMemTable(*t);
     if (fe != Err::OK) { t->sch.vec_index_name.clear(); return fe; }
+    // the async snapshot scan iterates runs without cross-run dedup, which is
+    // only correct when no pk appears in two runs (pure-insert history); with
+    // update/delete history the runs overlap, so skip the build and keep the
+    // exact scan (recall 1.0) instead of indexing duplicate row versions
+    bool disjoint = true;
+    int64_t prevMax = INT64_MIN;
+    for (const Run& r : t->runs) {
+      if (r.count == 0) continue;
+      if (r.firstPk <= prevMax) { disjoint = false; break; }
+      prevMax = r.lastPk;
+    }
+    if (!disjoint) {
+      if (getenv("MVDB_TRACE")) {
+        fprintf(stderr, "TRACE create index: overlapping runs -> exact scan only\n");
+      }
+      return DdlCommit();
+    }
     Err de = DdlCommit();   // persists the index name; bumps dataEpoch_
     if (de != Err::OK) { t->sch.vec_index_name.clear(); return de; }
     std::vector<std::string> paths;

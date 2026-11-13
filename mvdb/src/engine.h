@@ -105,6 +105,10 @@ struct TableState {
   // pk bounds across all non-empty runs (for the PointGet shortcut)
   int64_t runMinPk = INT64_MAX;
   int64_t runMaxPk = INT64_MIN;
+  // pk bounds of the memtable (tombstones included): the parallel exact scan
+  // is only correct when no pk appears in two sources at once
+  int64_t memMinPk = INT64_MAX;
+  int64_t memMaxPk = INT64_MIN;
   // index availability. Sync builds (small tables) stay valid across DML via
   // incremental maintenance; async builds (large tables) are gated on the
   // data epoch captured when the build started.
@@ -204,6 +208,17 @@ class Engine {
     std::vector<uint8_t> pass;
   };
   std::vector<ExactFilterCache> exactFilterCache_;
+  // per-run predicate bitmap cache for the parallel inline-equality path
+  // (valid only while the runs are disjoint, which the same gate ensures)
+  struct RunFilterCache {
+    uint64_t epoch = 0;
+    int64_t tableId = -1;
+    std::string key;
+    std::vector<std::vector<uint8_t>> runPass;  // per run, bit per row position
+    std::vector<uint8_t> memPass;               // bit per memtable-sorted position
+    bool complete = false;                      // full build finished
+  };
+  std::vector<RunFilterCache> runFilterCache_;
 
   // thresholds (overridable via env for testing / tuning)
   uint64_t memtableFlushBytes_ = MEMTABLE_FLUSH_BYTES;

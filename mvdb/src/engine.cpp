@@ -1174,6 +1174,7 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
   uint64_t start = walSize_;
   txnId_++;
   int64_t txn = txnId_;
+  std::vector<Mut> batch;   // collected here; applied after the durable commit
   {
     Mut m;
     bool done = false;
@@ -1188,64 +1189,45 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
       if (!m.tomb) body.append(m.payload);
       e = WalAppend(2, txn, body);
       if (e != Err::OK) { WalTruncateTo(start); return e; }
+      batch.push_back(std::move(m));
     }
   }
   Err e = WalAppend(3, txn, "");
   if (e != Err::OK) { WalTruncateTo(start); return e; }
   e = WalSync();
   if (e != Err::OK) { WalTruncateTo(start); return e; }
-  // pass 2: apply by re-reading the WAL segment we just durably wrote
-  uint64_t off = start;
-  while (off < walSize_) {
-    char h[12];
-    ssize_t got = ::pread(walFd_, h, 12, off);
-    if (got < 12) break;
-    uint32_t magic, len, crc;
-    std::memcpy(&magic, h, 4);
-    std::memcpy(&len, h + 4, 4);
-    std::memcpy(&crc, h + 8, 4);
-    if (magic != 0x4D57414Cu || len > (1u << 30)) break;
-    std::string head(size_t(len), '\0');
-    got = ::pread(walFd_, &head[0], len, off + 12);
-    if (got < ssize_t(len)) break;
-    if (crc32(head.data(), head.size()) != crc) break;
-    if (head.size() >= 1 && head[0] == 2 && head.size() >= 26) {
-      ByteReader b2(head.data() + 9, head.size() - 9);
-      int64_t tid = b2.i64();
-      uint8_t flags = b2.u8();
-      int64_t pk = b2.i64();
-      if (b2.ok()) {
-        TableState* t = FindTableById(tid);
-        if (t) {
-          if (flags & 1) {
-            t->mem.Del(pk);
-            if (t->index) {
-              uint32_t node = t->index->NodeOf(pk);
-              if (node != UINT32_MAX) t->index->MarkDead(node);
-            }
-          } else {
-            t->mem.Put(pk, head.substr(26));
-            if (t->index) {
-              uint32_t oldNode = t->index->NodeOf(pk);
-              if (oldNode != UINT32_MAX) t->index->MarkDead(oldNode);
-              const TableSchema& sch = t->sch;
-              std::vector<Value> vals;
-              Err de = decode_payload(sch, head.data() + 26, head.size() - 26, vals, pk);
-              if (de == Err::OK && sch.vec_col >= 0 &&
-                  size_t(sch.vec_col) < vals.size() &&
-                  vals[size_t(sch.vec_col)].t == Value::T::Vec) {
-                t->index->Append(vals[size_t(sch.vec_col)].v.data(), pk);
-              }
-            }
-          }
-          if (t->mem.bytes() >= memtableFlushBytes_) {
-            Err fe = FlushMemTable(*t);
-            if (fe != Err::OK) return fe;
-          }
+  // Apply the just-durably-written stream straight from the collected
+  // mutations: the payloads are byte-identical to the WAL records, so this
+  // is equivalent to the previous re-read pass without 1M pread syscalls
+  // and record copies per statement.
+  for (const Mut& m : batch) {
+    TableState* t = FindTableById(m.tableId);
+    if (!t) continue;
+    if (m.tomb) {
+      t->mem.Del(m.pk);
+      if (t->index) {
+        uint32_t node = t->index->NodeOf(m.pk);
+        if (node != UINT32_MAX) t->index->MarkDead(node);
+      }
+    } else {
+      t->mem.Put(m.pk, m.payload);
+      if (t->index) {
+        uint32_t oldNode = t->index->NodeOf(m.pk);
+        if (oldNode != UINT32_MAX) t->index->MarkDead(oldNode);
+        const TableSchema& sch = t->sch;
+        std::vector<Value> vals;
+        Err de = decode_payload(sch, m.payload.data(), m.payload.size(), vals, m.pk);
+        if (de == Err::OK && sch.vec_col >= 0 &&
+            size_t(sch.vec_col) < vals.size() &&
+            vals[size_t(sch.vec_col)].t == Value::T::Vec) {
+          t->index->Append(vals[size_t(sch.vec_col)].v.data(), m.pk);
         }
       }
     }
-    off += 12 + len;
+    if (t->mem.bytes() >= memtableFlushBytes_) {
+      Err fe = FlushMemTable(*t);
+      if (fe != Err::OK) return fe;
+    }
   }
   if (walSize_ >= walCheckpointBytes_) return Checkpoint();
   dataEpoch_++;

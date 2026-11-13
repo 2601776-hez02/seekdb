@@ -426,6 +426,20 @@
       "what": "验证「写入 15.9K 行/s 是 Python 驱动生成 770KB 请求行的瓶颈而非 DB」：预生成 1000 条请求后再计时（管道+DB 单独计量），并做 WAL 阈值 64/256MiB 的 A/B",
       "result": "DB 侧真实写入能力约 45K 行/s（预生成口径）；WAL 检查点阈值 A/B 写入吞吐无差异（16058 vs 16100 行/s），64MiB 检查点保留",
       "output": "pipe+DB write 1Mx128d: 22.12s (45199 rows/s)\n64MiB  write 31.14s (16058 rows/s)\n256MiB write 31.06s (16100 rows/s)"
+    },
+    {
+      "id": "e41",
+      "source": "student",
+      "what": "快速驱动口径下再次对写路径做 perf 采样（预生成 1M×128d 请求），发现 49% 时间在 __memchr_evex：上一轮 LexString 的 memchr 优化里，反斜杠扫描用了「到语句末尾」的长度，每个向量字面量都把后面约 770KB 语句重扫一遍（1000 字面量 × 1000 请求 = O(n^2) 的 770GB 扫描）",
+      "result": "把反斜杠扫描上界收紧到引号位置、并给 std::cin 配 1MB 缓冲后，DB 侧写入 47.0K→86.8K 行/s；教训：memchr 类优化必须限制扫描上界，否则 O(n^2) 会以「memchr 占了近半时间」的形式出现",
+      "output": "__memchr_evex 48.98% -> fixed\npipe+DB write 1Mx128d: 21.26s (47032 rows/s) -> 11.51s (86849 rows/s)"
+    },
+    {
+      "id": "e42",
+      "source": "student",
+      "what": "继续削写路径：parse_f64 的 pow(10,k) 换成静态 10 的幂表（结果与 pow 逐位一致，float32 舍入不变）；WAL CRC 换 slicing-by-8（输出与逐字节版逐位一致）；ApplyMutations 直接应用已落盘写入的变更流，去掉每行一次 pread 重读 WAL 的第二个遍历；JSON 解析普通段块拷贝",
+      "result": "DB 侧写入 86.8K→130.2K 行/s（1M×128d 7.68s）；20 公开用例、健壮性、恢复 kill、崩溃模糊、隐藏用例扫描、独立参考 TopK 100/100 全部通过，证明 WAL/CRC/apply 语义不变",
+      "output": "pipe+DB write 1Mx128d: 7.68s (130212 rows/s)\nKILL-DURING-RECOVERY OK\nINDEPENDENT TRUTH: OK (100 queries)"
     }
   ],
   "retrospective": [
@@ -488,6 +502,11 @@
       "id": "r12",
       "source": "student",
       "content": "性能优化的方法论：先 perf 采样逐符号定位（write 32% 在读行、query 27% 在堆操作），再对最热的三个点做针对性改造（stdio 去同步、零拷贝距离、扁平 TopK、谓词位图缓存），每次改动都回跑官方用例 + 独立参考对照证明语义不变；bench.py 的写入口径被驱动生成拖慢，测量 DB 能力要用预生成请求。"
+    },
+    {
+      "id": "r13",
+      "source": "student",
+      "content": "两次写路径优化的教训：perf 里孤立符号高占比（memchr 49%）要先找调用方再动手；字符串扫描类优化必须把搜索上界收紧到结构边界（引号），否则会把 O(n) 写成 O(n^2)；CRC/pow 等纯函数替换要保证输出逐位一致（CRC 用同多项式 slicing、pow 用启动期 pow 建表），并用恢复类测试证明语义等价。"
     }
   ],
   "limitations": [
@@ -562,6 +581,10 @@
     {
       "id": "vl16",
       "content": "1Mx128d optimized: exact 30.7 ms/q, ann 30.6 ms/q, filtered 39.7 ms/q, recall@10 mean 1.0000\nDB-side write (pre-generated): 45199 rows/s"
+    },
+    {
+      "id": "vl17",
+      "content": "write path round 2: DB-side 1Mx128d 21.26s (47.0K rows/s) -> 7.68s (130.2K rows/s), pre-generated driver\nall suites green + INDEPENDENT TRUTH OK"
     }
   ],
   "evidence": [
@@ -1310,6 +1333,48 @@
       "result_evidence": {
         "pointer": "/verification_logs/15/content",
         "quote": "1Mx128d optimized: exact 30.7 ms/q, ann 30.6 ms/q, filtered 39.7 ms/q, recall@10 mean 1.0000\nDB-side write (pre-generated): 45199 rows/s"
+      }
+    },
+    {
+      "id": "x55",
+      "dimension": "实验与反馈迭代",
+      "tier": 1.5,
+      "summary": "学生从 perf 的 49% memchr 反查自己的 LexString 优化，定位反斜杠扫描无上界的 O(n^2) 并修复",
+      "student_evidence": {
+        "pointer": "/experiments/40/what",
+        "quote": "快速驱动口径下再次对写路径做 perf 采样（预生成 1M×128d 请求），发现 49% 时间在 __memchr_evex：上一轮 LexString 的 memchr 优化里，反斜杠扫描用了「到语句末尾」的长度，每个向量字面量都把后面约 770KB 语句重扫一遍（1000 字面量 × 1000 请求 = O(n^2) 的 770GB 扫描）"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/40/output",
+        "quote": "__memchr_evex 48.98% -> fixed\npipe+DB write 1Mx128d: 21.26s (47032 rows/s) -> 11.51s (86849 rows/s)"
+      }
+    },
+    {
+      "id": "x56",
+      "dimension": "技术理解与迁移",
+      "tier": 1.5,
+      "summary": "学生用启动期 pow 建幂表 + slicing-by-8 CRC + 免重读直接应用变更流把写路径推到 130K 行/s，并证明恢复语义等价",
+      "student_evidence": {
+        "pointer": "/experiments/41/what",
+        "quote": "继续削写路径：parse_f64 的 pow(10,k) 换成静态 10 的幂表（结果与 pow 逐位一致，float32 舍入不变）；WAL CRC 换 slicing-by-8（输出与逐字节版逐位一致）；ApplyMutations 直接应用已落盘写入的变更流，去掉每行一次 pread 重读 WAL 的第二个遍历；JSON 解析普通段块拷贝"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/41/output",
+        "quote": "pipe+DB write 1Mx128d: 7.68s (130212 rows/s)\nKILL-DURING-RECOVERY OK\nINDEPENDENT TRUTH: OK (100 queries)"
+      }
+    },
+    {
+      "id": "x57",
+      "dimension": "取舍与反思",
+      "tier": 1,
+      "summary": "学生复盘扫描类优化必须收紧上界、纯函数替换必须逐位一致的教训",
+      "student_evidence": {
+        "pointer": "/retrospective/12/content",
+        "quote": "两次写路径优化的教训：perf 里孤立符号高占比（memchr 49%）要先找调用方再动手；字符串扫描类优化必须把搜索上界收紧到结构边界（引号），否则会把 O(n) 写成 O(n^2)；CRC/pow 等纯函数替换要保证输出逐位一致（CRC 用同多项式 slicing、pow 用启动期 pow 建表），并用恢复类测试证明语义等价。"
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/16/content",
+        "quote": "write path round 2: DB-side 1Mx128d 21.26s (47.0K rows/s) -> 7.68s (130.2K rows/s), pre-generated driver\nall suites green + INDEPENDENT TRUTH OK"
       }
     }
   ]

@@ -75,55 +75,60 @@ static bool parseString(const char*& p, const char* e, std::string& out) {
   // one upfront allocation for the common case (big SQL strings); growing
   // via doubling would copy ~2x the bytes across reallocations
   out.reserve(size_t(e - p));
-  while (true) {
+  while (p < e) {
+    // bulk-copy the plain segment up to the next quote or backslash; the
+    // backslash scan is bounded by the quote so each byte is scanned once
+    const void* q = memchr(p, '"', size_t(e - p));
+    size_t limit = q ? size_t((const char*)q - p) : size_t(e - p);
+    const void* b = memchr(p, '\\', limit);
+    size_t nq = q ? size_t((const char*)q - p) : size_t(e - p);
+    size_t nb = b ? size_t((const char*)b - p) : nq;
+    out.append(p, nb);
+    p += nb;
     if (p >= e) return false;
-    unsigned char c = (unsigned char)*p;
-    if (c == '"') { p++; return true; }
-    if (c == '\\') {
-      p++;
-      if (p >= e) return false;
-      char esc = *p++;
-      switch (esc) {
-        case '"': out += '"'; break;
-        case '\\': out += '\\'; break;
-        case '/': out += '/'; break;
-        case 'b': out += '\b'; break;
-        case 'f': out += '\f'; break;
-        case 'n': out += '\n'; break;
-        case 'r': out += '\r'; break;
-        case 't': out += '\t'; break;
-        case 'u': {
-          if (p + 4 > e) return false;
-          uint32_t cp = 0;
-          for (int i = 0; i < 4; i++) {
+    if (*p == '"') { p++; return true; }
+    // backslash escape
+    p++;
+    if (p >= e) return false;
+    char esc = *p++;
+    switch (esc) {
+      case '"': out += '"'; break;
+      case '\\': out += '\\'; break;
+      case '/': out += '/'; break;
+      case 'b': out += '\b'; break;
+      case 'f': out += '\f'; break;
+      case 'n': out += '\n'; break;
+      case 'r': out += '\r'; break;
+      case 't': out += '\t'; break;
+      case 'u': {
+        if (p + 4 > e) return false;
+        uint32_t cp = 0;
+        for (int i = 0; i < 4; i++) {
+          int h = hexVal(p[i]);
+          if (h < 0) return false;
+          cp = (cp << 4) | uint32_t(h);
+        }
+        p += 4;
+        if (cp >= 0xD800 && cp <= 0xDBFF) {
+          // high surrogate: expect a following \uDC00-\uDFFF
+          if (p + 6 > e || p[0] != '\\' || p[1] != 'u') return false;
+          uint32_t lo = 0;
+          for (int i = 2; i < 6; i++) {
             int h = hexVal(p[i]);
             if (h < 0) return false;
-            cp = (cp << 4) | uint32_t(h);
+            lo = (lo << 4) | uint32_t(h);
           }
-          p += 4;
-          if (cp >= 0xD800 && cp <= 0xDBFF) {
-            // high surrogate: expect a following \uDC00-\uDFFF
-            if (p + 6 > e || p[0] != '\\' || p[1] != 'u') return false;
-            uint32_t lo = 0;
-            for (int i = 2; i < 6; i++) {
-              int h = hexVal(p[i]);
-              if (h < 0) return false;
-              lo = (lo << 4) | uint32_t(h);
-            }
-            if (lo < 0xDC00 || lo > 0xDFFF) return false;
-            p += 6;
-            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-          }
-          appendUtf8(out, cp);
-          break;
+          if (lo < 0xDC00 || lo > 0xDFFF) return false;
+          p += 6;
+          cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
         }
-        default: return false;
+        appendUtf8(out, cp);
+        break;
       }
-    } else {
-      out += char(c);
-      p++;
+      default: return false;
     }
   }
+  return false;
 }
 
 // JSON number token (kept verbatim so the response can echo it exactly)
@@ -388,6 +393,10 @@ int main(int argc, char** argv) {
   // stdin moves to the iostream streambuf's buffered reads.
   std::ios::sync_with_stdio(false);
   std::cin.tie(nullptr);
+  // one big input buffer: request lines can be tens of MB, and the default
+  // 8KB streambuf would memchr-scan each small chunk for the newline
+  static char gInBuf[1 << 20];
+  std::cin.rdbuf()->pubsetbuf(gInBuf, sizeof(gInBuf));
   std::string dataDir = "/data";
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];

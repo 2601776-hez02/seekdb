@@ -83,9 +83,13 @@ class Lexer {
       const char* s = src_->data() + i;
       size_t rem = src_->size() - i;
       const void* q = memchr(s, quote, rem);
-      const void* b = memchr(s, '\\', rem);
+      // the backslash scan must stop at the closing quote: scanning to the
+      // statement end here would re-walk the rest of a big INSERT for every
+      // literal (O(n^2) across the 1000s of literals in one statement)
+      size_t limit = q ? size_t((const char*)q - s) : rem;
+      const void* b = memchr(s, '\\', limit);
       size_t nq = q ? size_t((const char*)q - s) : rem;
-      size_t nb = b ? size_t((const char*)b - s) : rem;
+      size_t nb = b ? size_t((const char*)b - s) : limit;
       size_t plain = nq < nb ? nq : nb;
       out.append(s, plain);
       i += plain;

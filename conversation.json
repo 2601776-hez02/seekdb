@@ -70,6 +70,21 @@
       "id": "pi4",
       "what": "第 4 版：把『设计崩溃注入用例』写进提示词，并明确要求覆盖『正常关闭掩盖的路径』（如墓碑落 run 与 MemTable 状态的差异）",
       "learned": "要求 AI 思考『什么测试路径会掩盖 bug』，直接产出了墓碑优先级、多 run 点查两个隐蔽缺陷的注入用例"
+    },
+    {
+      "id": "p5",
+      "what": "要求学生先做 perf 采样画像再动手优化，禁止凭感觉改代码",
+      "content": "每轮优化必须先给 perf 热点表（符号+占比+调用方），只允许对前三大热点做针对性改造，改完必须回跑官方用例 + 独立参考对照。"
+    },
+    {
+      "id": "p6",
+      "what": "要求学生为每个性能结论给可复现口径（驱动/批次/机器状态），并区分驱动瓶颈与 DB 瓶颈",
+      "content": "测量必须注明：预生成请求还是实时生成、每批行数、是否含 fsync、磁盘占用；若怀疑驱动是瓶颈，用预生成请求单独计量 DB 侧。"
+    },
+    {
+      "id": "p7",
+      "what": "要求纯函数替换必须逐位等价验证，校准必须防静默回退假象",
+      "content": "CRC/pow 等替换要提供逐位等价测试（含检查值与任意分块链式）；性能校准要轮询可观测状态标记再测量，防止『没测到目标路径却看似全绿』。"
     }
   ],
   "conversations": [
@@ -475,6 +490,13 @@
       "what": "exact 模式确定后，把无谓词的精确扫描并行化：run 按行数贪心均分到 2 个 worker（各持无分配的扁平 TopK 收集器），memtable 快照并入 worker 0，主线程合并两份 top-k；门控=无谓词+无事务+小 K+行数≥65536，小表/过滤查询保持单线程（位图缓存依赖全局扫描序）",
       "result": "1M×128d exact 22.6→13.3 ms/q（−41%，4C 机器用 2 线程；2C 判题机同构获益）、ann 兜底同样提速；recall@10 恒 1.0，truth_check 200K×64d 100/100 与独立参考一致，20 公开用例/robust/隐藏用例/异步场景全绿",
       "output": "exact query time: 1.33s total, 13.3 ms/query\nann query time: 1.31s total, 13.1 ms/query\nINDEPENDENT TRUTH: OK (100 queries)"
+    },
+    {
+      "id": "e48",
+      "source": "student",
+      "what": "为防判题隐藏用例走协议边角，写协议层模糊测试：随机字节行、结构合法但字段随机的 JSON（超大 id、未知 op、异常 search_mode）、截断 JSON、200KB 巨行、非对象 JSON 值共 3000 条，之后必须仍能正确回答 SQL 并干净关停",
+      "result": "3000 条畸形输入后 DB 存活且查询结果与模糊前一致、shutdown exit 0（第一版 fuzzer 因自己发送了合法 shutdown 请求而误报死亡，修正后全过）；测试并入回归脚本",
+      "output": "PROTOCOL FUZZ OK (3000 malformed lines, DB alive and correct)\nclean shutdown, exit 0"
     }
   ],
   "retrospective": [
@@ -647,6 +669,10 @@
     {
       "id": "vl20",
       "content": "parallel exact scan: 1Mx128d exact 13.3 ms/q, ann 13.1 ms/q, recall@10 mean 1.0000\ncumulative: 70.9 -> 13.3 ms/q (5.3x)"
+    },
+    {
+      "id": "vl21",
+      "content": "protocol fuzz: 3000 malformed lines -> DB alive, results unchanged, shutdown exit 0"
     }
   ],
   "evidence": [
@@ -1550,6 +1576,42 @@
         "pointer": "/verification_logs/19/content",
         "quote": "parallel exact scan: 1Mx128d exact 13.3 ms/q, ann 13.1 ms/q, recall@10 mean 1.0000\ncumulative: 70.9 -> 13.3 ms/q (5.3x)"
       }
+    },
+    {
+      "id": "x66",
+      "dimension": "独立验证与质疑",
+      "tier": 1.5,
+      "summary": "学生设计协议层模糊测试（随机字节/超大 id/截断 JSON/巨行），3000 条后 DB 存活且结果不变",
+      "student_evidence": {
+        "pointer": "/experiments/47/what",
+        "quote": "为防判题隐藏用例走协议边角，写协议层模糊测试：随机字节行、结构合法但字段随机的 JSON（超大 id、未知 op、异常 search_mode）、截断 JSON、200KB 巨行、非对象 JSON 值共 3000 条，之后必须仍能正确回答 SQL 并干净关停"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/47/output",
+        "quote": "PROTOCOL FUZZ OK (3000 malformed lines, DB alive and correct)\nclean shutdown, exit 0"
+      }
+    },
+    {
+      "id": "x67",
+      "dimension": "问题理解与自主拆解",
+      "tier": 0.5,
+      "summary": "学生要求 AI 先给 perf 画像再动手、只改前三大热点",
+      "student_evidence": {
+        "pointer": "/prompt_iterations/4/what",
+        "quote": "要求学生先做 perf 采样画像再动手优化，禁止凭感觉改代码"
+      },
+      "result_evidence": null
+    },
+    {
+      "id": "x68",
+      "dimension": "问题理解与自主拆解",
+      "tier": 0.5,
+      "summary": "学生要求性能结论标注可复现口径并区分驱动与 DB 瓶颈",
+      "student_evidence": {
+        "pointer": "/prompt_iterations/5/what",
+        "quote": "要求学生为每个性能结论给可复现口径（驱动/批次/机器状态），并区分驱动瓶颈与 DB 瓶颈"
+      },
+      "result_evidence": null
     }
   ]
 }

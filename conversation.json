@@ -497,6 +497,13 @@
       "what": "为防判题隐藏用例走协议边角，写协议层模糊测试：随机字节行、结构合法但字段随机的 JSON（超大 id、未知 op、异常 search_mode）、截断 JSON、200KB 巨行、非对象 JSON 值共 3000 条，之后必须仍能正确回答 SQL 并干净关停",
       "result": "3000 条畸形输入后 DB 存活且查询结果与模糊前一致、shutdown exit 0（第一版 fuzzer 因自己发送了合法 shutdown 请求而误报死亡，修正后全过）；测试并入回归脚本",
       "output": "PROTOCOL FUZZ OK (3000 malformed lines, DB alive and correct)\nclean shutdown, exit 0"
+    },
+    {
+      "id": "e49",
+      "source": "student",
+      "what": "在判题同构环境（docker --cpus 2 --memory 2g --pids-limit 128）里跑全流程：1M×128d 写入 → 异步 CREATE VECTOR INDEX → 建图期精确兜底查询 → 等待建图完成 → ann 查询 → 关停，并用 docker stats 观察内存",
+      "result": "写入 55.1s（18.2K 行/s @2C）；CREATE 0.031s 返回；建图期查询结果与精确参考一致；建成后 ann recall mean 0.99；shutdown exit 0；内存峰值实测约 1.44GiB（2GiB 内，异步建图的内存画像与历史同步建图一致）",
+      "output": "write 1Mx128d @2C: 55.1s (18160 rows/s)\nCREATE VECTOR INDEX: 0.031s\nann after build: recall mean 0.99 min 0.90\nshutdown exit=0\n2C/2G FULL PIPELINE OK"
     }
   ],
   "retrospective": [
@@ -673,6 +680,10 @@
     {
       "id": "vl21",
       "content": "protocol fuzz: 3000 malformed lines -> DB alive, results unchanged, shutdown exit 0"
+    },
+    {
+      "id": "vl22",
+      "content": "2C/2G container full pipeline: write 55.1s, async CREATE 0.031s, ann recall 0.99, shutdown exit 0, peak mem ~1.44GiB"
     }
   ],
   "evidence": [
@@ -1612,6 +1623,20 @@
         "quote": "要求学生为每个性能结论给可复现口径（驱动/批次/机器状态），并区分驱动瓶颈与 DB 瓶颈"
       },
       "result_evidence": null
+    },
+    {
+      "id": "x69",
+      "dimension": "实验与反馈迭代",
+      "tier": 1.5,
+      "summary": "学生在判题同构 2C/2G 容器验证全流程（含异步建图内存画像），确认 2GiB 内存内安全且退出码 0",
+      "student_evidence": {
+        "pointer": "/experiments/48/what",
+        "quote": "在判题同构环境（docker --cpus 2 --memory 2g --pids-limit 128）里跑全流程：1M×128d 写入 → 异步 CREATE VECTOR INDEX → 建图期精确兜底查询 → 等待建图完成 → ann 查询 → 关停，并用 docker stats 观察内存"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/48/output",
+        "quote": "write 1Mx128d @2C: 55.1s (18160 rows/s)\nCREATE VECTOR INDEX: 0.031s\nann after build: recall mean 0.99 min 0.90\nshutdown exit=0\n2C/2G FULL PIPELINE OK"
+      }
     }
   ]
 }

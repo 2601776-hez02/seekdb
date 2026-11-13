@@ -44,6 +44,7 @@ docker run --rm -i -v minivectordb-data:/data minivectordb:latest
 
 - DDL：`CREATE TABLE t (id BIGINT PRIMARY KEY, c VARCHAR(n), v VECTOR(d))`
   （一个 BIGINT 主键、每表至多一个向量列）；`CREATE VECTOR INDEX name ON t(v)`
+  （>50K 行的表只登记索引、不同步建图，查询走精确扫描；见 §8）
 - DML：多行 `INSERT ... VALUES`、`UPDATE ... SET ... WHERE`、`DELETE ... WHERE`
   （按主键或条件）；无 WHERE 时作用于全表
 - 查询：列投影、`SELECT *`、比较运算符 `= < <= > >=`、`AND/OR/NOT`、
@@ -145,6 +146,11 @@ ROLLBACK;
   10 万行单语句、MemTable 墓碑压过已落盘 run：全部通过
 - 崩溃模糊（`tests/fuzz_crash.py`，极小阈值 + 随机 kill，12 轮）：全部通过
 - 索引重启：干净重启加载序列化索引图 0.23s（200K×64d），崩溃后重建正确
-- 规模冒烟：200K×64d 写 64K 行/s（RSS 182MB）、建索引 33s（AVX2）、
-  精确 TopK 15.4ms、ANN Recall 0.99；1M×128d 写 21.6K 行/s、建索引 402s（4 核）、
-  自适应 ef 下 ANN Recall 0.97（39ms/查询）、过滤组 Recall 1.0（精确扫描）
+- 规模冒烟（2026-11-13，ECS 4 核裸机）：200K×64d 写 22.1K 行/s、重启 0.01s；
+  1M×128d 写 15.9K 行/s（62.9s）、超过 50K 行门限的表 CREATE VECTOR INDEX 只登记
+  不建图（判题单请求 60s 上限内 1M 同步建图不可行），查询回退精确扫描：
+  exact 70.9 ms/q、ann 70.6 ms/q、过滤组 92.9 ms/q，Recall@10 恒 1.0；
+  精确 TopK 与独立 Python 参考实现（float32 逐位舍入 + 双精度距离 + 主键并列序）
+  在 200K×64d、100 个查询上逐条一致（tests/truth_check.py）；
+  ≤50K 行表正常同步建 HNSW（AVX2 并行）；门限以上建图成本实测 33s/200K、
+  约 400s/1M@4 核，故跳过（召回由精确扫描兜底，恒 1.0）。

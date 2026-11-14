@@ -125,11 +125,29 @@ class HNSWIndex {
       threads = int(std::thread::hardware_concurrency());
       if (threads < 1) threads = 1;
       if (threads > 8) threads = 8;
+      if (std::getenv("MVDB_BUILD_1T")) threads = 1;   // debug switch
     }
     if (n < 4096 || threads <= 1) {
       HNSWBuildSeq(stop, pause);
     } else {
       HNSWBuildParallel(threads, stop, pause);
+    }
+    if (std::getenv("MVDB_GRAPH_STATS") && !lvlAdj_.empty()) {
+      size_t deg0 = 0, maxDeg = 0;
+      int maxLvl = 0;
+      for (size_t i = 0; i < lvlAdj_[0].size(); i++) {
+        size_t dd = lvlAdj_[0][i].size();
+        if (dd == 0) deg0++;
+        if (dd > maxDeg) maxDeg = dd;
+      }
+      for (size_t i = 0; i < levels_.size(); i++) {
+        if (levels_[i] > maxLvl) maxLvl = levels_[i];
+      }
+      std::fprintf(stderr,
+                   "TRACE graph stats: n=%zu entry=%d entryLvl=%d maxLvl=%d "
+                   "deg0=%zu maxDeg=%zu\n",
+                   size(), entry_, entry_ >= 0 ? levels_[size_t(entry_)] : -1,
+                   maxLvl, deg0, maxDeg);
     }
   }
 

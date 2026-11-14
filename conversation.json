@@ -606,6 +606,13 @@
       "what": "从论坛他队帖子发现题面默认性能负载=10,000 行×128 维、1000 次 TopK10，且判题测量 T/B/M 三项（ε_B=1MiB、ε_M=1MiB 容差）。用 2C/2G 容器三轮回放发现两大违例：ann 召回 0.879（10K 图搜索 ef 1024→6144 恒 0.88，低于 0.95 门——graph 统计 deg0=0 非断连，是 128d 均匀数据小规模下召回需近全图扫描）；B 因 index.bin 持久化超预算。修复：小表 ann 查询服务精确扫描（召回 1.0、快 2×）；index.bin 停止落盘（重启重建 1-3s 合规）",
       "result": "题面默认负载三轮回放：recall 1.0000×3、ann 0.44 ms/q、write 0.61s、create 1.25s、B=10.37MiB、exit 0；全量回归+protocol_check 20/20 绿",
       "output": "round1: write 0.62s create 1.24s ann 0.442 ms/q recall 1.0000 B=10872744B exit=0\nround3: recall 1.0000 B=10872744B exit=0"
+    },
+    {
+      "id": "e60",
+      "source": "student",
+      "what": "外部评审建议采纳两条：① B 双写减半——checkpoint 改为『run 未落盘且 memtable≤128MiB 时 WAL 即唯一持久副本』（跳过 flush+截断，恢复靠 WAL 重放，B 从 10.37→5.30MiB）；② 有误差界的量化安全剪枝——INT8 全局码本，三角不等式下界（保守误差界+查询越界误差），下界剪枝后对幸存者用 FP32 精确复算，召回 1.0 且扫描读 4× 更少字节",
+      "result": "10K×128d：ann 0.44→0.091 ms/q（裸机）/0.21（2C 容器），召回 1.0000；CREATE 1.25s→0.01s（量化索引替换 HNSW）；题面负载三轮回放 B=5.30MiB；修掉引导行重复入堆 bug 与剪枝浮点保守边距；全量正确性绿",
+      "output": "round1: write 0.61s create 0.01s ann 0.210 ms/q recall 1.0000 B=5562736B exit=0\nef=1024: recall 1.0000, ann 0.095 ms/q"
     }
   ],
   "retrospective": [
@@ -836,6 +843,10 @@
     {
       "id": "vl32",
       "content": "judge-default-load (10Kx128d, 1000 TopK10) 3 rounds: recall 1.0, B=10.37MiB, exit 0"
+    },
+    {
+      "id": "vl33",
+      "content": "quantized safe-pruned ann: 10K recall 1.0 @0.091 ms/q bare / 0.21 ms/q 2C; WAL-only checkpoint: B 10.37 -> 5.30 MiB"
     }
   ],
   "evidence": [
@@ -1873,6 +1884,34 @@
       "result_evidence": {
         "pointer": "/verification_logs/31/content",
         "quote": "judge-default-load (10Kx128d, 1000 TopK10) 3 rounds: recall 1.0, B=10.37MiB, exit 0"
+      }
+    },
+    {
+      "id": "x75",
+      "dimension": "技术理解与迁移",
+      "tier": 2,
+      "summary": "学生实现误差界量化剪枝（三角不等式下界+精确复算），ann 召回恒 1.0 且比精确快 4.8×",
+      "student_evidence": {
+        "pointer": "/experiments/59/what",
+        "quote": "外部评审建议采纳两条：① B 双写减半——checkpoint 改为『run 未落盘且 memtable≤128MiB 时 WAL 即唯一持久副本』（跳过 flush+截断，恢复靠 WAL 重放，B "
+      },
+      "result_evidence": {
+        "pointer": "/experiments/59/output",
+        "quote": "round1: write 0.61s create 0.01s ann 0.210 ms/q recall 1.0000 B=5562736B exit=0\nef=1024: recall 1.00"
+      }
+    },
+    {
+      "id": "x76",
+      "dimension": "实验与反馈迭代",
+      "tier": 1.5,
+      "summary": "学生用 WAL 即存储的 checkpoint 策略把 B 减半（10.37→5.30MiB），消除 WAL/run 双写",
+      "student_evidence": {
+        "pointer": "/experiments/59/result",
+        "quote": "10K×128d：ann 0.44→0.091 ms/q（裸机）/0.21（2C 容器），召回 1.0000；CREATE 1.25s→0.01s（量化索引替换 HNSW）；题面负载三轮回放 B=5."
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/32/content",
+        "quote": "quantized safe-pruned ann: 10K recall 1.0 @0.091 ms/q bare / 0.21 ms/q 2C; WAL-only checkpoint: B 10"
       }
     }
   ],

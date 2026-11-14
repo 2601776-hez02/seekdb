@@ -508,6 +508,23 @@ inline bool parse_f64_fast(const char* p, size_t n, double& out) {
   return true;
 }
 
+// Quantized scan index: a global single-step INT8 codebook plus the packed
+// codes. Ann queries use a safe distance lower bound (triangle inequality)
+// to prune, then recompute exactly on the survivors - recall is 1.0 by
+// construction while the scan reads 4x fewer bytes than the FP32 data.
+struct QuantIndex {
+  int d = 0;
+  size_t n = 0;
+  float lo = 0.f;
+  float step = 0.f;
+  std::vector<uint8_t> codes;    // n*d, row-major
+  std::vector<int64_t> pks;
+  // per-vector quantization error bound: sqrt(d) * (step/2 + eps)
+  float eBound() const {
+    return float(std::sqrt(double(d))) * (step * 0.5f + 1e-6f);
+  }
+};
+
 // Vector literal: '[1, 2, -3.5]' -> floats; NaN/Inf rejected; bad syntax rejected.
 // Fused container: elements are still comma-split with trailing-whitespace
 // trimming (identical grammar to the general parser), but the numeric

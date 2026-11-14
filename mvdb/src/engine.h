@@ -101,6 +101,7 @@ struct TableState {
   MemTable mem;
   std::vector<Run> runs;                     // oldest first
   std::unique_ptr<HNSWIndex> index;          // null unless built
+  std::unique_ptr<QuantIndex> quant;         // small tables: quantized scan index
   uint64_t runSeq = 0;
   // pk bounds across all non-empty runs (for the PointGet shortcut)
   int64_t runMinPk = INT64_MAX;
@@ -198,6 +199,9 @@ class Engine {
 
   // data epoch + cached filter bitsets (indexed by index node id)
   uint64_t dataEpoch_ = 0;
+  // true once any run file was written: the WAL-as-storage checkpoint fast
+  // path is only valid before the first flush (no duplicate rows on disk)
+  bool anyRunWritten_ = false;
   // set while a TopK query runs: background index builds pause between nodes
   // so concurrent queries keep full memory bandwidth (cooperative yielding)
   std::atomic<bool> queryActive_{false};

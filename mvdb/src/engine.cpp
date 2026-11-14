@@ -1101,10 +1101,19 @@ struct TkAcc {
 // No allocation.
 static void scanRunTopK(const Run& r, const TableSchema& sch, int vc, size_t d,
                         const float* q, TkAcc& acc, int predCol, const std::string* lit,
-                        const std::vector<uint8_t>* bits, std::vector<uint8_t>* bitsBuild) {
+                        const std::vector<uint8_t>* bits, std::vector<uint8_t>* bitsBuild,
+                        uint64_t fromIdx = 0, uint64_t toIdx = UINT64_MAX) {
   uint64_t off = 8;
   uint64_t idx = 0;
-  while (idx < r.count && off + 13 <= r.fileSize) {
+  if (toIdx > r.count) toIdx = r.count;
+  // seek to fromIdx
+  while (idx < fromIdx && off + 13 <= r.fileSize) {
+    uint32_t l0 = 0;
+    std::memcpy(&l0, r.map + off + 9, 4);
+    off += 13 + l0;
+    idx++;
+  }
+  while (idx < toIdx && off + 13 <= r.fileSize) {
     int64_t pk = 0;
     uint8_t flags = 0;
     uint32_t l = 0;
@@ -1839,19 +1848,52 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
       }
       std::vector<std::pair<int64_t, uint32_t>> memSorted;
       if (!t.mem.empty()) {
-        memSorted.reserve(t.mem.map_.size());
-        for (auto& kv : t.mem.map_) memSorted.push_back(kv);
-        std::sort(memSorted.begin(), memSorted.end(),
-                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        // cached snapshot: the memtable is immutable between DML batches
+        if (t.memSortedEpoch != dataEpoch_ || t.memSortedCount != t.mem.map_.size()) {
+          t.memSortedCache.clear();
+          t.memSortedCache.reserve(t.mem.map_.size());
+          for (auto& kv : t.mem.map_) t.memSortedCache.push_back(kv);
+          std::sort(t.memSortedCache.begin(), t.memSortedCache.end(),
+                    [](const auto& a, const auto& b) { return a.first < b.first; });
+          t.memSortedEpoch = dataEpoch_;
+          t.memSortedCount = t.mem.map_.size();
+        }
+        memSorted = t.memSortedCache;
       }
-      // greedy balanced partition of the runs across the two workers
+      // balanced partition of the runs across the two workers. With the
+      // per-run bitmap cache in build mode a run must stay on one worker
+      // (append order = row position); otherwise runs are split at a row
+      // boundary so the 1-run + big-memtable shape also balances.
       std::array<std::vector<size_t>, 2> groups;
       std::array<int64_t, 2> load = {int64_t(memSorted.size()), 0};
-      for (size_t i = 0; i < t.runs.size(); i++) {
-        if (t.runs[i].count == 0) continue;
-        int g = load[0] <= load[1] ? 0 : 1;
-        groups[size_t(g)].push_back(i);
-        load[size_t(g)] += int64_t(t.runs[i].count);
+      // run-splitting only pays off when whole-run balancing cannot work
+      // (1-2 runs + memtable); with many runs the greedy whole-run split is
+      // already balanced and splitting costs an extra header walk
+      bool canSplit = !(inlinePred && building) && pNonEmptyRuns <= 2;
+      std::vector<uint64_t> runSplit(t.runs.size(), 0);
+      if (canSplit) {
+        int64_t total = int64_t(memSorted.size());
+        for (const Run& r : t.runs) total += int64_t(r.count);
+        int64_t target = total / 2;
+        int64_t acc = int64_t(memSorted.size());
+        for (size_t i = 0; i < t.runs.size(); i++) {
+          if (t.runs[i].count == 0) continue;
+          int64_t need = target - acc;
+          if (need >= int64_t(t.runs[i].count)) {
+            runSplit[i] = t.runs[i].count;
+            acc += int64_t(t.runs[i].count);
+          } else if (need > 0) {
+            runSplit[i] = uint64_t(need);
+            acc = target;
+          }
+        }
+      } else {
+        for (size_t i = 0; i < t.runs.size(); i++) {
+          if (t.runs[i].count == 0) continue;
+          int g = load[0] <= load[1] ? 0 : 1;
+          groups[size_t(g)].push_back(i);
+          load[size_t(g)] += int64_t(t.runs[i].count);
+        }
       }
       auto scanMem = [&](TkAcc& acc) {
         size_t mi = 0;
@@ -1900,22 +1942,43 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
       TkAcc accs[2];
       accs[0].init(k);
       accs[1].init(k);
-      std::thread th0([&] {
-        scanMem(accs[0]);
-        for (size_t ri : groups[0]) {
-          scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[0], predCol,
+      if (canSplit) {
+        std::thread th0([&] {
+          scanMem(accs[0]);
+          for (size_t ri = 0; ri < t.runs.size(); ri++) {
+            if (runSplit[ri] > 0) {
+              scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[0], predCol,
+                          inlinePred ? predLit : nullptr,
+                          (inlinePred && !building) ? &rfc->runPass[ri] : nullptr,
+                          nullptr, 0, runSplit[ri]);
+            }
+          }
+        });
+        for (size_t ri = 0; ri < t.runs.size(); ri++) {
+          scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[1], predCol,
+                      inlinePred ? predLit : nullptr,
+                      (inlinePred && !building) ? &rfc->runPass[ri] : nullptr,
+                      nullptr, runSplit[ri], UINT64_MAX);
+        }
+        th0.join();
+      } else {
+        std::thread th0([&] {
+          scanMem(accs[0]);
+          for (size_t ri : groups[0]) {
+            scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[0], predCol,
+                        inlinePred ? predLit : nullptr,
+                        (!inlinePred || building) ? nullptr : &rfc->runPass[ri],
+                        (inlinePred && building) ? &rfc->runPass[ri] : nullptr);
+          }
+        });
+        for (size_t ri : groups[1]) {
+          scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[1], predCol,
                       inlinePred ? predLit : nullptr,
                       (!inlinePred || building) ? nullptr : &rfc->runPass[ri],
                       (inlinePred && building) ? &rfc->runPass[ri] : nullptr);
         }
-      });
-      for (size_t ri : groups[1]) {
-        scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[1], predCol,
-                    inlinePred ? predLit : nullptr,
-                    (!inlinePred || building) ? nullptr : &rfc->runPass[ri],
-                    (inlinePred && building) ? &rfc->runPass[ri] : nullptr);
+        th0.join();
       }
-      th0.join();
       if (inlinePred && building) rfc->complete = true;
       // merge both accumulators: best-first sorted, then store worst-first
       std::vector<std::pair<float, int64_t>> merged;

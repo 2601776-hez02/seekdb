@@ -109,6 +109,12 @@ struct TableState {
   // is only correct when no pk appears in two sources at once
   int64_t memMinPk = INT64_MAX;
   int64_t memMaxPk = INT64_MIN;
+  // sorted (pk, buf offset) snapshot of the memtable for the parallel scan;
+  // rebuilt only when the data epoch or the entry count changes (the offsets
+  // stay valid across buf_ reallocations)
+  std::vector<std::pair<int64_t, uint32_t>> memSortedCache;
+  uint64_t memSortedEpoch = 0;
+  size_t memSortedCount = 0;
   // index availability. Sync builds (small tables) stay valid across DML via
   // incremental maintenance; async builds (large tables) are gated on the
   // data epoch captured when the build started.

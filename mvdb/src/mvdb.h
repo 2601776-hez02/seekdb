@@ -470,6 +470,44 @@ inline Err decode_payload_masked(const TableSchema& sch, const char* data, size_
   return Err::OK;
 }
 
+// Fast converter for the plain decimal shape [+-]?[0-9]+[.][0-9]+ (no
+// exponent): the shape every float-formatting driver produces. Identical
+// mantissa arithmetic and pow10 table as parse_f64, so the result bits match
+// exactly. Returns false for any other shape (caller falls back).
+inline bool parse_f64_fast(const char* p, size_t n, double& out) {
+  if (n == 0 || n > 24) return false;
+  bool neg = false;
+  if (*p == '+' || *p == '-') { neg = (*p == '-'); p++; n--; if (n == 0) return false; }
+  uint64_t mant = 0;
+  int digits = 0;
+  int exp10 = 0;
+  bool dot = false;
+  for (size_t i = 0; i < n; i++) {
+    char c = p[i];
+    if (c >= '0' && c <= '9') {
+      if (digits < 19) {
+        mant = mant * 10 + uint64_t(c - '0');
+        digits++;
+        if (dot) exp10--;
+      } else if (!dot) {
+        exp10++;  // extra integer digits only shift (same as parse_f64)
+      }
+    } else if (c == '.' && !dot) {
+      dot = true;
+    } else {
+      return false;
+    }
+  }
+  if (!dot || digits == 0) return false;
+  int a = exp10 < 0 ? -exp10 : exp10;
+  if (a > 45) return false;  // beyond the fast table: fall back
+  double v = double(mant);
+  double scale = pow10s()[a];
+  v = exp10 >= 0 ? v * scale : v / scale;
+  out = neg ? -v : v;
+  return true;
+}
+
 // Vector literal: '[1, 2, -3.5]' -> floats; NaN/Inf rejected; bad syntax rejected.
 inline Err parse_vec_literal(const std::string& text, std::vector<float>& out) {
   out.clear();
@@ -491,7 +529,9 @@ inline Err parse_vec_literal(const std::string& text, std::vector<float>& out) {
     while (te > s && (te[-1] == ' ' || te[-1] == '\t' || te[-1] == '\r' || te[-1] == '\n')) te--;
     if (te == s) return Err::InvalidVector;
     double d = 0;
-    if (!parse_f64(s, size_t(te - s), d)) return Err::InvalidVector;
+    if (!parse_f64_fast(s, size_t(te - s), d) && !parse_f64(s, size_t(te - s), d)) {
+      return Err::InvalidVector;
+    }
     if (d > double(std::numeric_limits<float>::max()) ||
         d < -double(std::numeric_limits<float>::max())) return Err::InvalidVector;
     out.push_back(float(d));

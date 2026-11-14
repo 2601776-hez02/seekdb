@@ -1111,6 +1111,10 @@ static void scanRunTopK(const Run& r, const TableSchema& sch, int vc, size_t d,
     std::memcpy(&pk, r.map + off, 8);
     flags = r.map[off + 8];
     std::memcpy(&l, r.map + off + 9, 4);
+    // prefetch two rows ahead (guarded so the pointer stays inside the map)
+    if (off + 13 + l + 1056 < r.fileSize) {
+      __builtin_prefetch(r.map + off + 13 + l + 1056, 0, 3);
+    }
     if (flags & 1) {
       // tombstone: keep the bitmap position aligned in build mode
       if (bitsBuild) bitsBuild->push_back(0);
@@ -1796,7 +1800,8 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
       }
     }
     bool parallel = (!where || inlinePred) && !inTxn_ && useFlat &&
-                    pNonEmptyRuns >= 2 && runsDisjoint && memDisjoint &&
+                    (pNonEmptyRuns >= 2 || (pNonEmptyRuns >= 1 && !t.mem.empty())) &&
+                    runsDisjoint && memDisjoint &&
                     pTotalRows + int64_t(t.mem.map_.size()) >= 65536;
     if (parallel) {
       // per-run bitmap cache for the inline predicate: the first query

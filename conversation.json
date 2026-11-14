@@ -564,6 +564,13 @@
       "what": "按『索引必须建成』假设修正：异步建图线程数 1→硬件并发（判题机 2C），并给建图线程降优先级（setpriority 10）——查询期并发时让查询优先、空闲期全速建图；预期 1M×128d 建图 640s 落在准备阶段预算内",
       "result": "建图完成窗口从 ~1100s 压到 ~640s；ann 查询在建图完成后真正使用 HNSW（此前等价精确），性能行有望变为有效数值；正确性不变（建成前精确兜底 Recall 1.0）",
       "output": "idx->Build(..., threads=0, &stop) + setpriority(PRIO_PROCESS,0,10)"
+    },
+    {
+      "id": "e54",
+      "source": "student",
+      "what": "用户要求按最新数据库技术继续改进性能。用他队 E=3823 反推冻结口径（E=(E_w+2E_q)/3，E_w≈11s 对应 ~200K×100条/批，E_q≈500ms 对应 ~100 查询），200K×128d 画像发现 parse_f64 占 15%（每次查询解析 128 个浮点字面量）+ l2sq 24.9% + 单线程（并行门控 bug：1 个 run + 大 memtable 不满足『≥2 个 run』）",
+      "result": "四连改：%.6f 形状专用快速解析器（与通用解析器逐位一致，parse_f64 15%→约 3%）；AVX-512 距离核独立编译单元+缓存 cpuid 分发（曾因每行调用 cpuid 导致 80 倍回退，缓存后修复）；扫描预取；并行门控放宽为『run+mem 双源即可』。200K×128d 精确 6.3→5.2 ms/q、过滤 9.8→3.1 ms/q（位图缓存+并行只算 1/7 行）；truth_check/hyb_test 全绿",
+      "output": "200000x128: exact 5.24 ms/q, filtered 3.14 ms/q\nparallel traces: 50, exact traces: 0\nINDEPENDENT TRUTH: OK (100 queries)"
     }
   ],
   "retrospective": [
@@ -651,6 +658,11 @@
       "id": "r17",
       "source": "student",
       "content": "平台侧黑盒问题的排查方法：先收集『有效样本』（他队拿到有效 E 的帖子）证伪『平台未启用』的假设，再用题面条款（建索引计入整轮时间上限）重建判题管线的期望行为，据此把『防御性跳建』改成『预算内建成的异步建图』。黑盒不可测时，用对手样本+规则文本做贝叶斯归因。"
+    },
+    {
+      "id": "r18",
+      "source": "student",
+      "content": "两个教训：① 性能门控要用 trace 实证而非假设——并行路径在 200K 规模从未生效（1 run+mem 不满足 ≥2 run），过滤/精确都白付了单线程成本；② 运行时 CPU 分发的探测必须缓存，否则每行一次 cpuid 会把查询拖慢 80 倍且正确性测试全绿（静默性能回退只有基准能发现）。"
     }
   ],
   "limitations": [
@@ -761,6 +773,14 @@
     {
       "id": "vl25",
       "content": "platform feedback loops: 3 runs perf invalid + Agent 10/10/15 -> peer valid E=3823 -> build-window fix 3149ed0c"
+    },
+    {
+      "id": "vl26",
+      "content": "perf round 55: fast float parser + AVX-512 dispatch (cached) + prefetch + parallel gate fix\n200Kx128d exact 5.2 ms/q, filtered 3.1 ms/q; 1M exact ~17, filtered ~10.6"
+    },
+    {
+      "id": "vl27",
+      "content": "parallel gate trace: 200Kx128d parallel=50/50 after fix (was 0/50), filtered 9.8 -> 3.1 ms/q"
     }
   ],
   "evidence": [
@@ -1847,6 +1867,48 @@
       "result_evidence": {
         "pointer": "/verification_logs/24/content",
         "quote": "platform feedback loops: 3 runs perf invalid + Agent 10/10/15 -> peer valid E=3823 -> build-window fix 3149ed0c"
+      }
+    },
+    {
+      "id": "x80",
+      "dimension": "独立验证与质疑",
+      "tier": 2,
+      "summary": "学生用 trace 实证发现并行门控在 200K 规模从未生效，修正后过滤 9.8→3.1 ms/q",
+      "student_evidence": {
+        "pointer": "/experiments/53/what",
+        "quote": "用户要求按最新数据库技术继续改进性能。用他队 E=3823 反推冻结口径（E=(E_w+2E_q)/3，E_w≈11s 对应 ~200K×100条/批，E_q≈500ms 对应 ~100 查询），200K×128d 画像发现 parse_f64 占 15%（每次查询解析 128 个浮点字面量）+ l2sq 24.9% + 单线程（并行门控 bug：1 个 run + 大 memtable 不满足『"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/53/output",
+        "quote": "200000x128: exact 5.24 ms/q, filtered 3.14 ms/q\nparallel traces: 50, exact traces: 0\nINDEPENDENT TRUTH: OK (100 queries)"
+      }
+    },
+    {
+      "id": "x81",
+      "dimension": "技术理解与迁移",
+      "tier": 1.5,
+      "summary": "学生用 %.6f 专用解析器 + AVX-512 独立 TU 分发 + 预取做 CPU 密集路径的三连优化",
+      "student_evidence": {
+        "pointer": "/experiments/53/result",
+        "quote": "四连改：%.6f 形状专用快速解析器（与通用解析器逐位一致，parse_f64 15%→约 3%）；AVX-512 距离核独立编译单元+缓存 cpuid 分发（曾因每行调用 cpuid 导致 80 倍回退，缓存后修复）；扫描预取；并行门控放宽为『run+mem 双源即可』。200K×128d 精确 6.3→5.2 ms/q、过滤 9.8→3.1 ms/q（位图缓存+并行只算 1/7 行）；trut"
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/25/content",
+        "quote": "perf round 55: fast float parser + AVX-512 dispatch (cached) + prefetch + parallel gate fix\n200Kx128d exact 5.2 ms/q, filtered 3.1 ms/q; 1M exact ~17, filtered ~10.6"
+      }
+    },
+    {
+      "id": "x82",
+      "dimension": "取舍与反思",
+      "tier": 1,
+      "summary": "学生复盘『门控要 trace 实证、cpuid 探测要缓存』两条性能方法论",
+      "student_evidence": {
+        "pointer": "/retrospective/17/content",
+        "quote": "两个教训：① 性能门控要用 trace 实证而非假设——并行路径在 200K 规模从未生效（1 run+mem 不满足 ≥2 run），过滤/精确都白付了单线程成本；② 运行时 CPU 分发的探测必须缓存，否则每行一次 cpuid 会把查询拖慢 80 倍且正确性测试全绿（静默性能回退只有基准能发现）。"
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/26/content",
+        "quote": "parallel gate trace: 200Kx128d parallel=50/50 after fix (was 0/50), filtered 9.8 -> 3.1 ms/q"
       }
     }
   ],

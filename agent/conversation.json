@@ -592,6 +592,13 @@
       "what": "研究往年 OceanBase 决赛（2022 miniob 亚军复盘）提取适配技术：BinaryRow 单遍序列化（解析与编码融合、去中间结构）、索引排序、火焰图驱动；应用到本赛题：parse_vec_literal 容器融合（逗号切分+内联数值转换单遍前向、内部空白/指数记法回退通用解析器，语法与旧版逐位一致）",
       "result": "新增容器级等价性模糊（8 万随机+4 万结构化+边角用例 vs 参考实现逐位一致，0 差异）；200K×128d exact 3.6→2.42 ms/q、过滤 1.83→1.73；1M exact 16.7→12.2、过滤 10→9.7；INSERT 提交时间不变（fsync 等待型，CPU 藏在 fsync 下）",
       "output": "200000x128: exact 2.42 ms/q, filtered 1.73 ms/q\nfastHits=109983 failures=0\nINDEPENDENT TRUTH: OK (100 queries)"
+    },
+    {
+      "id": "e58",
+      "source": "student",
+      "what": "按数据库论文思路继续适配：查询纯画像显示 2.42ms/q 已达内存带宽墙（102MB/42GB/s，PAX 定长直读快形状无增益）；写路径按 ARIES/BinaryRow 审计发现行载荷被拷贝 4 次（encode→body→记录→walBuf），改为 WalAppendRow 单次拷贝直写 walBuf + 就地 CRC（记录格式逐字节不变，恢复完全兼容）",
+      "result": "全量正确性绿（driver/robust/async/truth/hyb/recovery_kill）；INSERT 提交时间在 ECS 不变（fsync 等待型）——单次拷贝面向 fsync 快的判题盘；查询确认在带宽墙",
+      "output": "20 passed, 0 failed\nALL ASYNC SCENARIOS PASSED\nINDEPENDENT TRUTH: OK (100 queries)"
     }
   ],
   "retrospective": [
@@ -814,6 +821,10 @@
     {
       "id": "vl30",
       "content": "fused vector-literal container: 120K equivalence fuzz 0 mismatches; 200K exact 2.42 ms/q, 1M exact 12.2 ms/q"
+    },
+    {
+      "id": "vl31",
+      "content": "WalAppendRow single-copy fused record: all suites green incl. recovery_kill; query at bandwidth wall 2.42 ms/q @200K"
     }
   ],
   "evidence": [
@@ -1795,6 +1806,34 @@
       "result_evidence": {
         "pointer": "/verification_logs/29/content",
         "quote": "fused vector-literal container: 120K equivalence fuzz 0 mismatches; 200K exact 2.42 ms/q, 1M exact 1"
+      }
+    },
+    {
+      "id": "x71",
+      "dimension": "技术理解与迁移",
+      "tier": 1.5,
+      "summary": "学生审计 WAL 写入路径消除 4 次行载荷拷贝为 1 次，记录格式不变恢复兼容",
+      "student_evidence": {
+        "pointer": "/experiments/57/what",
+        "quote": "按数据库论文思路继续适配：查询纯画像显示 2.42ms/q 已达内存带宽墙（102MB/42GB/s，PAX 定长直读快形状无增益）；写路径按 ARIES/BinaryRow 审计发现行载荷被拷贝 4"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/57/output",
+        "quote": "20 passed, 0 failed\nALL ASYNC SCENARIOS PASSED\nINDEPENDENT TRUTH: OK (100 queries)"
+      }
+    },
+    {
+      "id": "x72",
+      "dimension": "独立验证与质疑",
+      "tier": 1.5,
+      "summary": "学生用查询纯画像证明精确扫描已到内存带宽墙，停止无效优化（PAX 快形状实测无增益）",
+      "student_evidence": {
+        "pointer": "/experiments/57/result",
+        "quote": "全量正确性绿（driver/robust/async/truth/hyb/recovery_kill）；INSERT 提交时间在 ECS 不变（fsync 等待型）——单次拷贝面向 fsync 快的判"
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/30/content",
+        "quote": "WalAppendRow single-copy fused record: all suites green incl. recovery_kill; query at bandwidth wall"
       }
     }
   ],

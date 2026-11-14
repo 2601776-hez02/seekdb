@@ -283,6 +283,7 @@ class Engine {
     bool tomb = false;
     std::string payload;   // for puts
   };
+  Err WalAppendRow(const Mut& m);   // single-copy fused row record (same format)
   Err ApplyMutations(const std::function<Err(Mut&, bool&)>& gen);
 
   // top-k scan for vector queries

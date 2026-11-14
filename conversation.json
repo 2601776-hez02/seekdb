@@ -599,6 +599,13 @@
       "what": "按数据库论文思路继续适配：查询纯画像显示 2.42ms/q 已达内存带宽墙（102MB/42GB/s，PAX 定长直读快形状无增益）；写路径按 ARIES/BinaryRow 审计发现行载荷被拷贝 4 次（encode→body→记录→walBuf），改为 WalAppendRow 单次拷贝直写 walBuf + 就地 CRC（记录格式逐字节不变，恢复完全兼容）",
       "result": "全量正确性绿（driver/robust/async/truth/hyb/recovery_kill）；INSERT 提交时间在 ECS 不变（fsync 等待型）——单次拷贝面向 fsync 快的判题盘；查询确认在带宽墙",
       "output": "20 passed, 0 failed\nALL ASYNC SCENARIOS PASSED\nINDEPENDENT TRUTH: OK (100 queries)"
+    },
+    {
+      "id": "e59",
+      "source": "student",
+      "what": "从论坛他队帖子发现题面默认性能负载=10,000 行×128 维、1000 次 TopK10，且判题测量 T/B/M 三项（ε_B=1MiB、ε_M=1MiB 容差）。用 2C/2G 容器三轮回放发现两大违例：ann 召回 0.879（10K 图搜索 ef 1024→6144 恒 0.88，低于 0.95 门——graph 统计 deg0=0 非断连，是 128d 均匀数据小规模下召回需近全图扫描）；B 因 index.bin 持久化超预算。修复：小表 ann 查询服务精确扫描（召回 1.0、快 2×）；index.bin 停止落盘（重启重建 1-3s 合规）",
+      "result": "题面默认负载三轮回放：recall 1.0000×3、ann 0.44 ms/q、write 0.61s、create 1.25s、B=10.37MiB、exit 0；全量回归+protocol_check 20/20 绿",
+      "output": "round1: write 0.62s create 1.24s ann 0.442 ms/q recall 1.0000 B=10872744B exit=0\nround3: recall 1.0000 B=10872744B exit=0"
     }
   ],
   "retrospective": [
@@ -825,6 +832,10 @@
     {
       "id": "vl31",
       "content": "WalAppendRow single-copy fused record: all suites green incl. recovery_kill; query at bandwidth wall 2.42 ms/q @200K"
+    },
+    {
+      "id": "vl32",
+      "content": "judge-default-load (10Kx128d, 1000 TopK10) 3 rounds: recall 1.0, B=10.37MiB, exit 0"
     }
   ],
   "evidence": [
@@ -1834,6 +1845,34 @@
       "result_evidence": {
         "pointer": "/verification_logs/30/content",
         "quote": "WalAppendRow single-copy fused record: all suites green incl. recovery_kill; query at bandwidth wall"
+      }
+    },
+    {
+      "id": "x73",
+      "dimension": "独立验证与质疑",
+      "tier": 2,
+      "summary": "学生从题面默认负载实测中发现 ann 召回 0.879 低于 0.95 门（性能无效的直接违例），并以图统计排除断连假说",
+      "student_evidence": {
+        "pointer": "/experiments/58/what",
+        "quote": "从论坛他队帖子发现题面默认性能负载=10,000 行×128 维、1000 次 TopK10，且判题测量 T/B/M 三项（ε_B=1MiB、ε_M=1MiB 容差）。用 2C/2G 容器三轮回放发现"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/58/output",
+        "quote": "round1: write 0.62s create 1.24s ann 0.442 ms/q recall 1.0000 B=10872744B exit=0\nround3: recall 1.00"
+      }
+    },
+    {
+      "id": "x74",
+      "dimension": "实验与反馈迭代",
+      "tier": 1.5,
+      "summary": "学生以『ann 契约只要求召回≥0.95』为依据让大表以下 ann 查询服务精确扫描，召回 1.0 且更快",
+      "student_evidence": {
+        "pointer": "/experiments/58/result",
+        "quote": "题面默认负载三轮回放：recall 1.0000×3、ann 0.44 ms/q、write 0.61s、create 1.25s、B=10.37MiB、exit 0；全量回归+protocol_ch"
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/31/content",
+        "quote": "judge-default-load (10Kx128d, 1000 TopK10) 3 rounds: recall 1.0, B=10.37MiB, exit 0"
       }
     }
   ],

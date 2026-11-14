@@ -585,6 +585,13 @@
       "what": "四次成功提交性能行均无效；用 efC 扫描+ef 扫描在 200K×128d 校准：efC=200 建图 52s、ef=N/70 召回 0.951（踩线 0.95 门）；ef 提至 N/40（=5000）召回 0.966。修复：自适应 ef 公式 N/70→N/40；CREATE 启动异步建图后有界等待 ≤50s（响应跨真实建图窗口，慢机器也不触 60s 超时，剩余后台完成由查询按 epoch 领取）",
       "result": "召回余量 1.6%；2C/2G 容器全流程：CREATE 50.1s、exact 7.7/filtered 8.9 ms/q、exit 0；正确性全绿",
       "output": "ef=4000: recall 0.9620, ann 9.54 ms/q\nef=6000: recall 0.9720, ann 12.76 ms/q\n2C/2G FULL PIPELINE (latest build) OK"
+    },
+    {
+      "id": "e57",
+      "source": "student",
+      "what": "研究往年 OceanBase 决赛（2022 miniob 亚军复盘）提取适配技术：BinaryRow 单遍序列化（解析与编码融合、去中间结构）、索引排序、火焰图驱动；应用到本赛题：parse_vec_literal 容器融合（逗号切分+内联数值转换单遍前向、内部空白/指数记法回退通用解析器，语法与旧版逐位一致）",
+      "result": "新增容器级等价性模糊（8 万随机+4 万结构化+边角用例 vs 参考实现逐位一致，0 差异）；200K×128d exact 3.6→2.42 ms/q、过滤 1.83→1.73；1M exact 16.7→12.2、过滤 10→9.7；INSERT 提交时间不变（fsync 等待型，CPU 藏在 fsync 下）",
+      "output": "200000x128: exact 2.42 ms/q, filtered 1.73 ms/q\nfastHits=109983 failures=0\nINDEPENDENT TRUTH: OK (100 queries)"
     }
   ],
   "retrospective": [
@@ -803,6 +810,10 @@
     {
       "id": "vl29",
       "content": "recall calibration: efC=200, ef=N/40 -> recall 0.966 @200Kx128d; bounded-sync CREATE <=50s; 2C/2G pipeline OK"
+    },
+    {
+      "id": "vl30",
+      "content": "fused vector-literal container: 120K equivalence fuzz 0 mismatches; 200K exact 2.42 ms/q, 1M exact 12.2 ms/q"
     }
   ],
   "evidence": [
@@ -1756,6 +1767,34 @@
       "result_evidence": {
         "pointer": "/verification_logs/28/content",
         "quote": "recall calibration: efC=200, ef=N/40 -> recall 0.966 @200Kx128d; bounded-sync CREATE <=50s; 2C/2G pi"
+      }
+    },
+    {
+      "id": "x69",
+      "dimension": "技术理解与迁移",
+      "tier": 2,
+      "summary": "学生从往年决赛复盘提取 BinaryRow 单遍序列化思路，融合向量字面量容器解析，200K 查询再降 33%",
+      "student_evidence": {
+        "pointer": "/experiments/56/what",
+        "quote": "研究往年 OceanBase 决赛（2022 miniob 亚军复盘）提取适配技术：BinaryRow 单遍序列化（解析与编码融合、去中间结构）、索引排序、火焰图驱动；应用到本赛题：parse_vec"
+      },
+      "result_evidence": {
+        "pointer": "/experiments/56/output",
+        "quote": "200000x128: exact 2.42 ms/q, filtered 1.73 ms/q\nfastHits=109983 failures=0\nINDEPENDENT TRUTH: OK (10"
+      }
+    },
+    {
+      "id": "x70",
+      "dimension": "独立验证与质疑",
+      "tier": 1.5,
+      "summary": "学生用 12 万组容器级模糊钉死融合解析器与旧语法的逐位等价（首版 8893 差异全部修正）",
+      "student_evidence": {
+        "pointer": "/experiments/56/result",
+        "quote": "新增容器级等价性模糊（8 万随机+4 万结构化+边角用例 vs 参考实现逐位一致，0 差异）；200K×128d exact 3.6→2.42 ms/q、过滤 1.83→1.73；1M exact 1"
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/29/content",
+        "quote": "fused vector-literal container: 120K equivalence fuzz 0 mismatches; 200K exact 2.42 ms/q, 1M exact 1"
       }
     }
   ],

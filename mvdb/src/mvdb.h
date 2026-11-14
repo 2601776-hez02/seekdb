@@ -509,9 +509,12 @@ inline bool parse_f64_fast(const char* p, size_t n, double& out) {
 }
 
 // Vector literal: '[1, 2, -3.5]' -> floats; NaN/Inf rejected; bad syntax rejected.
+// Fused container: elements are still comma-split with trailing-whitespace
+// trimming (identical grammar to the general parser), but the numeric
+// conversion runs inline in the same forward pass; anything that is not a
+// plain decimal with an optional sign falls back to the general parser.
 inline Err parse_vec_literal(const std::string& text, std::vector<float>& out) {
   out.clear();
-  // pointer-based scan: no per-element substrings/allocations
   const char* p = text.data();
   size_t n = text.size();
   while (n && (p[0] == ' ' || p[0] == '\t' || p[0] == '\r' || p[0] == '\n')) { p++; n--; }
@@ -520,20 +523,64 @@ inline Err parse_vec_literal(const std::string& text, std::vector<float>& out) {
   const char* q = p + 1;
   const char* end = p + n - 1;   // points at ']'
   out.reserve(16);
-  while (true) {
-    while (q < end && (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n' || *q == ',')) q++;
-    if (q >= end) break;
+  const double fltMax = double(std::numeric_limits<float>::max());
+  auto isWs = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+  while (q < end) {
+    if (*q == ',' || isWs(*q)) { q++; continue; }
     const char* s = q;
-    while (q < end && *q != ',') q++;
-    const char* te = q;
-    while (te > s && (te[-1] == ' ' || te[-1] == '\t' || te[-1] == '\r' || te[-1] == '\n')) te--;
-    if (te == s) return Err::InvalidVector;
-    double d = 0;
-    if (!parse_f64_fast(s, size_t(te - s), d) && !parse_f64(s, size_t(te - s), d)) {
-      return Err::InvalidVector;
+    bool neg = false;
+    if (*q == '+' || *q == '-') {
+      neg = (*q == '-');
+      q++;
+      if (q >= end) return Err::InvalidVector;
     }
-    if (d > double(std::numeric_limits<float>::max()) ||
-        d < -double(std::numeric_limits<float>::max())) return Err::InvalidVector;
+    uint64_t mant = 0;
+    int digits = 0;
+    int exp10 = 0;
+    bool dot = false;
+    bool seenWs = false;
+    bool needGeneral = false;
+    for (; q < end && *q != ','; q++) {
+      char c = *q;
+      if (c >= '0' && c <= '9') {
+        if (seenWs) { needGeneral = true; break; }   // internal whitespace
+        if (digits < 19) {
+          mant = mant * 10 + uint64_t(c - '0');
+          digits++;
+          if (dot) exp10--;
+        } else if (!dot) {
+          exp10++;
+        }
+      } else if (c == '.' && !dot) {
+        if (seenWs) { needGeneral = true; break; }
+        dot = true;
+      } else if (isWs(c)) {
+        seenWs = true;
+      } else {
+        needGeneral = true;   // exponent notation / garbage
+        break;
+      }
+    }
+    if (needGeneral) {
+      // consume the whole element and let the general parser decide
+      while (q < end && *q != ',') q++;
+      const char* te = q;
+      while (te > s && isWs(te[-1])) te--;
+      if (te == s) return Err::InvalidVector;
+      double d = 0;
+      if (!parse_f64(s, size_t(te - s), d)) return Err::InvalidVector;
+      if (d > fltMax || d < -fltMax) return Err::InvalidVector;
+      out.push_back(float(d));
+      continue;
+    }
+    if (digits == 0) return Err::InvalidVector;   // e.g. "+" or "." alone
+    int a = exp10 < 0 ? -exp10 : exp10;
+    if (a > 45) return Err::InvalidVector;
+    double d = double(mant);
+    double scale = pow10s()[a];
+    d = exp10 >= 0 ? d * scale : d / scale;
+    if (neg) d = -d;
+    if (d > fltMax || d < -fltMax) return Err::InvalidVector;
     out.push_back(float(d));
   }
   return Err::OK;

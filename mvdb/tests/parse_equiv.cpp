@@ -25,6 +25,52 @@ static void check(const std::string& tok) {
   }
 }
 
+// reference container: the previous (pre-fusion) parse_vec_literal
+static mvdb::Err parse_vec_ref(const std::string& text, std::vector<float>& out) {
+  out.clear();
+  const char* p = text.data();
+  size_t n = text.size();
+  while (n && (p[0] == ' ' || p[0] == '\t' || p[0] == '\r' || p[0] == '\n')) { p++; n--; }
+  while (n && (p[n - 1] == ' ' || p[n - 1] == '\t' || p[n - 1] == '\r' || p[n - 1] == '\n')) n--;
+  if (n < 2 || p[0] != '[' || p[n - 1] != ']') return mvdb::Err::InvalidVector;
+  const char* q = p + 1;
+  const char* end = p + n - 1;
+  out.reserve(16);
+  while (true) {
+    while (q < end && (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n' || *q == ',')) q++;
+    if (q >= end) break;
+    const char* s = q;
+    while (q < end && *q != ',') q++;
+    const char* te = q;
+    while (te > s && (te[-1] == ' ' || te[-1] == '\t' || te[-1] == '\r' || te[-1] == '\n')) te--;
+    if (te == s) return mvdb::Err::InvalidVector;
+    double d = 0;
+    if (!mvdb::parse_f64_fast(s, size_t(te - s), d) && !mvdb::parse_f64(s, size_t(te - s), d)) {
+      return mvdb::Err::InvalidVector;
+    }
+    if (d > double(std::numeric_limits<float>::max()) ||
+        d < -double(std::numeric_limits<float>::max())) return mvdb::Err::InvalidVector;
+    out.push_back(float(d));
+  }
+  return mvdb::Err::OK;
+}
+
+static void checkVec(const std::string& text) {
+  std::vector<float> v1, v2;
+  mvdb::Err n = mvdb::parse_vec_literal(text, v1);
+  mvdb::Err r = parse_vec_ref(text, v2);
+  if (n != r ||
+      (n == mvdb::Err::OK &&
+       (v1.size() != v2.size() ||
+        (v1.size() && std::memcmp(v1.data(), v2.data(), v1.size() * 4) != 0)))) {
+    failures++;
+    if (failures <= 20) {
+      std::printf("VEC MISMATCH '%s' new=%d(%zu) ref=%d(%zu)\n", text.c_str(),
+                  int(n), v1.size(), int(r), v2.size());
+    }
+  }
+}
+
 int main() {
   // fixed edge set
   const char* edges[] = {
@@ -65,6 +111,42 @@ int main() {
     for (int j = 0; j < len; j++) tok += garbage[rng() % std::strlen(garbage)];
     check(tok);
   }
+  // container-level fuzz: new fused parse_vec_literal vs the reference
+  const char* vc = "0123456789.eE+-x,[] \t";
+  for (int i = 0; i < 80000; i++) {
+    std::string text = "[";
+    int len = 0 + int(rng() % 60);
+    for (int j = 0; j < len; j++) text += vc[rng() % std::strlen(vc)];
+    text += "]";
+    checkVec(text);
+  }
+  // structured valid vectors
+  for (int i = 0; i < 40000; i++) {
+    std::string text = "[";
+    int cnt = 1 + int(rng() % 8);
+    for (int j = 0; j < cnt; j++) {
+      if (j) text += rng() % 3 ? "," : " ,";
+      if (rng() % 5 == 0) text += rng() % 2 ? "-" : "+";
+      int id = 1 + int(rng() % 6);
+      for (int k = 0; k < id; k++) text += char('0' + rng() % 10);
+      if (rng() % 5 != 0) {
+        text += ".";
+        int fd2 = 1 + int(rng() % 6);
+        for (int k = 0; k < fd2; k++) text += char('0' + rng() % 10);
+      }
+      if (rng() % 20 == 0) text += rng() % 2 ? "e3" : "E-3";
+      if (rng() % 4 == 0) text += " ";
+    }
+    text += "]";
+    checkVec(text);
+  }
+  const char* vecEdges[] = {"[]", "[1]", "[-1]", "[1,2,3]", "[ 1 , 2 ]",
+                            "[1.5e3,2]", "[1e]", "[,]", "[.]", "[..]",
+                            "[1.2.3]", "[1,,2]", "[1.5 ]", "[ 1.5]", "[nan]",
+                            "[inf]", "[3.4028235e38]", "[3.5e38]", "[-3.5e38]",
+                            "[1e400]", "[1,2", "[1,2]x", "x[1]", "[ ]",
+                            "[0.1, -0.1, +.5, 5., 1.5e-3, 9007199254740993.0]"};
+  for (const char* e : vecEdges) checkVec(e);
   std::printf("fastHits=%d failures=%d\n", fastHits, failures);
   return failures == 0 ? 0 : 1;
 }

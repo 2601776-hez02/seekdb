@@ -22,6 +22,22 @@
     {
       "id": "p4",
       "content": "过滤条件下的向量检索召回达不到 0.95 门槛，如何取舍？"
+    },
+    {
+      "id": "p5",
+      "content": "提测多次「评测执行失败」，逐字段取证提测记录接口（failMsg/resultStatus/时间戳），定位并修复阻塞条件"
+    },
+    {
+      "id": "p6",
+      "content": "每天只有两次提测机会：调整要节省机会，同时取得更好结果；考虑混合索引方案"
+    },
+    {
+      "id": "p7",
+      "content": "平台结果显示性能原始分「无效或超出平台范围」而 Agent Prompt 只有 15/100：优化到性能原始分可见为止，同时提高 Agent Prompt 分"
+    },
+    {
+      "id": "p8",
+      "content": "确认具体提测信息后提交；收到平台三行原始分后按结果决定下一枚额度"
     }
   ],
   "learning_plan": [
@@ -741,6 +757,10 @@
     {
       "id": "vl24",
       "content": "perf-validity fix: async build threads=auto + nice(10); build window 1100s -> ~640s @2C\nAgent Prompt 10 -> 15 (material evidence upgrade); range 0-100 confirmed by peer post"
+    },
+    {
+      "id": "vl25",
+      "content": "platform feedback loops: 3 runs perf invalid + Agent 10/10/15 -> peer valid E=3823 -> build-window fix 3149ed0c"
     }
   ],
   "evidence": [
@@ -1791,6 +1811,42 @@
       "result_evidence": {
         "pointer": "/verification_logs/23/content",
         "quote": "perf-validity fix: async build threads=auto + nice(10); build window 1100s -> ~640s @2C\nAgent Prompt 10 -> 15 (material evidence upgrade); range 0-100 confirmed by peer post"
+      }
+    },
+    {
+      "id": "x77",
+      "dimension": "问题理解与自主拆解",
+      "tier": 0.5,
+      "summary": "学生提出「节省提测机会 + 混合索引」的约束并据此设计一次到位的提交策略",
+      "student_evidence": {
+        "pointer": "/user_prompts/5/content",
+        "quote": "每天只有两次提测机会：调整要节省机会，同时取得更好结果；考虑混合索引方案"
+      },
+      "result_evidence": null
+    },
+    {
+      "id": "x78",
+      "dimension": "问题理解与自主拆解",
+      "tier": 0.5,
+      "summary": "学生以「性能原始分可见 + Agent Prompt 提高」为目标指令，驱动根因定位与材料升级",
+      "student_evidence": {
+        "pointer": "/user_prompts/6/content",
+        "quote": "平台结果显示性能原始分「无效或超出平台范围」而 Agent Prompt 只有 15/100：优化到性能原始分可见为止，同时提高 Agent Prompt 分"
+      },
+      "result_evidence": null
+    },
+    {
+      "id": "x79",
+      "dimension": "实验与反馈迭代",
+      "tier": 1.5,
+      "summary": "学生依据平台三行原始分与他队有效样本做贝叶斯归因，修正异步建图窗口",
+      "student_evidence": {
+        "pointer": "/experiments/51/result",
+        "quote": "排除平台未启用假设；结合题面『建索引在索引准备阶段、计入整轮时间上限』推断：判题性能管线期望索引在准备阶段内建成并用于 ann 查询，我们此前跳建/单线程异步建图（2C 约 1100s）在判题窗口内从未建成，ann 查询一直等价精确扫描，触发『超出平台范围』"
+      },
+      "result_evidence": {
+        "pointer": "/verification_logs/24/content",
+        "quote": "platform feedback loops: 3 runs perf invalid + Agent 10/10/15 -> peer valid E=3823 -> build-window fix 3149ed0c"
       }
     }
   ],

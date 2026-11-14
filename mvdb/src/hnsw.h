@@ -8,6 +8,7 @@
 #include "mvdb.h"
 
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <random>
 #include <thread>
@@ -106,8 +107,10 @@ class HNSWIndex {
   // bulk build: feed all vectors (row-major, n*d floats) + pks.
   // `stop` (optional) aborts the build between nodes: used by the async
   // background builds so shutdown stays fast; the partial graph is discarded.
+  // `pause` (optional) makes the workers yield while a query is running.
   void Build(const float* data, const int64_t* pks, size_t n, int threads = 0,
-             const std::atomic<bool>* stop = nullptr) {
+             const std::atomic<bool>* stop = nullptr,
+             const std::atomic<bool>* pause = nullptr) {
     Clear();
     if (n == 0) return;
     vecs_.assign(data, data + n * dim_);
@@ -121,9 +124,9 @@ class HNSWIndex {
       if (threads > 8) threads = 8;
     }
     if (n < 4096 || threads <= 1) {
-      HNSWBuildSeq(stop);
+      HNSWBuildSeq(stop, pause);
     } else {
-      HNSWBuildParallel(threads, stop);
+      HNSWBuildParallel(threads, stop, pause);
     }
   }
 
@@ -460,12 +463,17 @@ class HNSWIndex {
     }
   }
 
-  void HNSWBuildSeq(const std::atomic<bool>* stop = nullptr) {
+  void HNSWBuildSeq(const std::atomic<bool>* stop = nullptr,
+                    const std::atomic<bool>* pause = nullptr) {
     entry_ = -1;
     for (auto& lv : lvlAdj_) lv.assign(lv.size(), std::vector<uint32_t>());
     Scratch sc;
     for (size_t i = 0; i < size(); i++) {
       if (stop && stop->load(std::memory_order_relaxed)) return;
+      while (pause && pause->load(std::memory_order_relaxed)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (stop && stop->load(std::memory_order_relaxed)) return;
+      }
       PrepareScratch(sc);
       int lvl = SampleLevel(sc);
       levels_[i] = lvl;
@@ -477,7 +485,8 @@ class HNSWIndex {
     }
   }
 
-  void HNSWBuildParallel(int threads, const std::atomic<bool>* stop = nullptr) {
+  void HNSWBuildParallel(int threads, const std::atomic<bool>* stop = nullptr,
+                         const std::atomic<bool>* pause = nullptr) {
     entry_ = -1;
     for (auto& lv : lvlAdj_) lv.assign(lv.size(), std::vector<uint32_t>());
     size_t n = size();
@@ -495,6 +504,10 @@ class HNSWIndex {
     size_t done = 1;
     while (done < n) {
       if (stop && stop->load(std::memory_order_relaxed)) return;
+      while (pause && pause->load(std::memory_order_relaxed)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (stop && stop->load(std::memory_order_relaxed)) return;
+      }
       size_t from = done;
       size_t to = std::min(n, done + batch);
       size_t count = to - from;
@@ -511,6 +524,10 @@ class HNSWIndex {
           sc.rng.seed(0x9E3779B97F4A7C15ull ^ uint64_t(t + 1) * 0x9E3779B97F4A7C15ull);
           while (true) {
             if (stop && stop->load(std::memory_order_relaxed)) return;
+            while (pause && pause->load(std::memory_order_relaxed)) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+              if (stop && stop->load(std::memory_order_relaxed)) return;
+            }
             size_t i = next.fetch_add(1);
             if (i >= count) break;
             uint32_t node = uint32_t(from + i);

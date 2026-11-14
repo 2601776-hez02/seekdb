@@ -192,6 +192,9 @@ class Engine {
 
   // data epoch + cached filter bitsets (indexed by index node id)
   uint64_t dataEpoch_ = 0;
+  // set while a TopK query runs: background index builds pause between nodes
+  // so concurrent queries keep full memory bandwidth (cooperative yielding)
+  std::atomic<bool> queryActive_{false};
   struct FilterCache {
     uint64_t epoch = 0;
     int64_t tableId = -1;

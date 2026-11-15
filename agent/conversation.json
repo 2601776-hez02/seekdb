@@ -857,7 +857,7 @@
     },
     {
       "id": "vl34",
-      "content": "external review: 4 reproducible bugs found -> all fixed, reviewer repro passes; full regression + protocol_check + judge replay green"
+      "content": "external review round2: epoch bump before checkpoint (stale-filter fix) + regression epoch_cp_test; all reviewer repros pass"
     }
   ],
   "evidence": [

@@ -1601,6 +1601,11 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
   if (e != Err::OK) { WalTruncateTo(start); return e; }
   e = WalSync();
   if (e != Err::OK) { WalTruncateTo(start); return e; }
+  // bump the data epoch BEFORE applying: every cache (filter bitsets, sorted
+  // memtable snapshot) is keyed by the epoch, and a later flush failure or
+  // checkpoint early-return must not leave committed mutations invisible to
+  // the caches
+  dataEpoch_++;
   // Apply the just-durably-written stream straight from the collected
   // mutations: the payloads are byte-identical to the WAL records, so this
   // is equivalent to the previous re-read pass without 1M pread syscalls
@@ -1647,7 +1652,6 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
     }
   }
   if (walSize_ >= walCheckpointBytes_) return Checkpoint();
-  dataEpoch_++;
   return Err::OK;
 }
 

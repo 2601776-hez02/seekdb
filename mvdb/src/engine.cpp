@@ -1506,6 +1506,10 @@ Err Engine::CommitTxn() {
   if (e != Err::OK) return e;
   e = WalSync();
   if (e != Err::OK) return e;
+  // bump the epoch BEFORE applying: a flush failure or checkpoint
+  // early-return below must not leave the committed mutations invisible to
+  // the epoch-keyed caches (same ordering as ApplyMutations)
+  dataEpoch_++;
   // apply overlay into memtables + index
   for (auto& kv : overlay_) {
     TableState* t = FindTableById(kv.first);
@@ -1548,7 +1552,6 @@ Err Engine::CommitTxn() {
   }
   overlay_.clear();
   inTxn_ = false;
-  dataEpoch_++;
   if (walSize_ >= walCheckpointBytes_) return Checkpoint();
   return Err::OK;
 }

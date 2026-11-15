@@ -857,7 +857,7 @@
     },
     {
       "id": "vl34",
-      "content": "external review round2: epoch bump before checkpoint (stale-filter fix) + regression epoch_cp_test; all reviewer repros pass"
+      "content": "external review rounds 2-3: epoch bumped before apply in BOTH ApplyMutations and CommitTxn; epoch_cp_test uses BIGINT predicate (inline path avoided) + 3000B rows: old binary fails, new passes"
     }
   ],
   "evidence": [

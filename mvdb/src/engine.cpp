@@ -158,9 +158,9 @@ Err Engine::Checkpoint() {
   // WAL, so durability is unchanged.
   uint64_t totalMem = 0;
   for (auto& kv : tables_) totalMem += kv.second->mem.bytes();
-  if (!anyRunWritten_ && totalMem <= (128u << 20)) {
-    return SaveCatalog();
-  }
+  // CONS: textbook flush + truncate (no WAL-only fast path)
+  (void)anyRunWritten_;
+  (void)totalMem;
   for (auto& kv : tables_) {
     Err e = FlushMemTable(*kv.second);
     if (e != Err::OK) return e;
@@ -1780,15 +1780,14 @@ Err Engine::BuildIndex(TableState& t) {
 // ---------------------------------------------------------------------------
 Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* where,
                     int64_t k, bool annMode, std::vector<std::pair<float, int64_t>>& out) {
+  // CONSERVATIVE VARIANT: plain single-thread full scan. Per-row decode +
+  // predicate evaluation, DOUBLE distance accumulation and DOUBLE TopK
+  // ordering (float conversion only for the response). No quantized pruning,
+  // no bitmap caches, no parallel scan, no HNSW; ann requests use the same
+  // full scan. Kept: protocol, transactions, durability and all correctness
+  // fixes.
   out.clear();
-  // background index builds yield while this query runs (cooperative pause)
-  struct QueryGuard {
-    std::atomic<bool>& f;
-    explicit QueryGuard(std::atomic<bool>& x) : f(x) {
-      f.store(true, std::memory_order_relaxed);
-    }
-    ~QueryGuard() { f.store(false, std::memory_order_relaxed); }
-  } qg(queryActive_);
+  (void)annMode;
   const TableSchema& sch = t.sch;
   int vc = sch.vec_col;
   if (vc < 0) return Err::NotVectorColumn;
@@ -1797,544 +1796,62 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
   if (where) statFiltered_++;
   statD_ = d;
   if (k > statKMax_) statKMax_ = k;
-  if (k <= 0) return Err::OK;  // LIMIT 0: nothing to collect
-  MaybeClaimPendingIndex(t);
-  bool useAnn = annMode && t.indexReady && (t.index || t.quant) &&
-                (!t.indexAsync || t.indexEpoch == dataEpoch_) &&
-                !(inTxn_ && overlay_.count(t.sch.id) != 0) &&
-                !where;  // filtered TopK runs exact (guaranteed recall)
-  // Small tables: the ann graph recall at N < 100K measures BELOW the 0.95
-  // gate on uniform 128d data (10Kx128d: 0.879 flat across ef 1024..6144;
-  // 40K: 0.965), while the exact scan is 3-4x faster there and exact by
-  // construction (recall 1.0). Serving exact results satisfies the ann
-  // recall contract and maximizes E_q. (Tables < 100K carry the quantized
-  // scan index instead of HNSW, so this gate only fires for larger ones.)
-  if (useAnn && t.index && t.index->size() < 100000) useAnn = false;
-
-  // Top-K collector. The benchmark K is small (typically 10); a per-row
-  // std::priority_queue push/pop measured ~27% of an exact query at 1M rows,
-  // so small K keeps a flat worst-first array instead (1 compare per row).
-  static constexpr int64_t FLAT_K = 64;
-  struct Tk {
-    float d;
-    int64_t pk;
-  };
-  std::vector<Tk> flat;                      // worst-first when used
-  flat.reserve(size_t(std::min<int64_t>(k, FLAT_K) + 1));
-  struct HeapCmp {
-    bool operator()(const std::pair<float, int64_t>& a, const std::pair<float, int64_t>& b) const {
-      if (a.first != b.first) return a.first < b.first;
-      return a.second < b.second;
-    }
-  };
-  std::priority_queue<std::pair<float, int64_t>,
-                      std::vector<std::pair<float, int64_t>>, HeapCmp> heap;  // fallback for large K
-  bool useFlat = (k <= FLAT_K);
-  auto pushTop = [&](float distSq, int64_t pk) {
-    if (useFlat) {
-      size_t n = flat.size();
-      if (n < size_t(k)) {
-        size_t i = n;
-        flat.push_back({distSq, pk});
-        while (i > 0) {
-          Tk& prev = flat[i - 1];
-          if (prev.d > distSq || (prev.d == distSq && prev.pk > pk)) break;
-          flat[i] = prev;
-          i--;
-        }
-        flat[i] = {distSq, pk};
-      } else {
-        // full: only enter when better than the current worst (flat[0]);
-        // drop the worst and shift left until the new element's slot
-        Tk& worst = flat[0];
-        if (distSq < worst.d || (distSq == worst.d && pk < worst.pk)) {
-          size_t i = 0;
-          while (i + 1 < size_t(k)) {
-            Tk& nxt = flat[i + 1];
-            if (nxt.d > distSq || (nxt.d == distSq && nxt.pk > pk)) {
-              flat[i] = nxt;
-              i++;
-            } else {
-              break;
-            }
-          }
-          flat[i] = {distSq, pk};
-        }
+  if (k <= 0) return Err::OK;
+  ScanCtx sc;
+  sc.Init(this, &t);
+  int64_t pk;
+  const char* data;
+  size_t len;
+  bool tomb;
+  std::vector<Value> vals;
+  struct Tk { double d; int64_t pk; };
+  std::vector<Tk> flat;
+  auto add = [&](double dist, int64_t p) {
+    if (int64_t(flat.size()) < k) {
+      size_t i = flat.size();
+      flat.push_back({dist, p});
+      while (i > 0) {
+        Tk& prev = flat[i - 1];
+        if (prev.d > dist || (prev.d == dist && prev.pk > p)) break;
+        flat[i] = prev;
+        i--;
       }
+      flat[i] = {dist, p};
     } else {
-      heap.emplace(distSq, pk);
-      if (int64_t(heap.size()) > k) heap.pop();
+      Tk& worst = flat[0];
+      if (dist < worst.d || (dist == worst.d && p < worst.pk)) {
+        size_t i = 0;
+        while (i + 1 < size_t(k)) {
+          Tk& nxt = flat[i + 1];
+          if (nxt.d > dist || (nxt.d == dist && nxt.pk > p)) {
+            flat[i] = nxt;
+            i++;
+          } else break;
+        }
+        flat[i] = {dist, p};
+      }
     }
   };
-
-  if (useAnn) {
-    if (t.quant) {
-      statAnnQuant_++;
-      // Quantized safe-pruned scan: INT8 distance lower bounds via the
-      // triangle inequality; survivors are recomputed exactly from the FP32
-      // data, so the result (values AND tie order) matches the exact scan
-      // bit-for-bit - recall 1.0 by construction.
-      const QuantIndex& Q = *t.quant;
-      size_t qn = Q.n;
-      size_t qd = size_t(Q.d);
-      std::vector<uint8_t> qc(qd);
-      float eq = 0.f;
-      float qhi = Q.lo + 255.0f * Q.step;
-      float inv = 1.0f / Q.step;
-      for (size_t j = 0; j < qd; j++) {
-        float v = qvec[j];
-        float cl = v < Q.lo ? Q.lo : (v > qhi ? qhi : v);
-        int code = int(std::round((cl - Q.lo) * inv));
-        if (code < 0) code = 0;
-        if (code > 255) code = 255;
-        qc[j] = uint8_t(code);
-        // EXACT query-side reconstruction error (clamp + rounding), not just
-        // the clamp part: the triangle-inequality bound needs |q - q_hat|;
-        // add a magnitude-scaled ulp margin for float rounding
-        float re = v - (Q.lo + float(code) * Q.step);
-        float mag = std::max(std::fabs(Q.lo), std::fabs(qhi));
-        float margin = 1e-6f * std::max(1.0f, mag);
-        float bound = std::fabs(re) + margin;
-        eq += bound * bound;
-      }
-      float eBound = Q.eBound() + std::sqrt(eq);
-      float tau = std::numeric_limits<float>::max();   // current k-th best (sqrt)
-      auto worstSq = [&]() -> float {
-        if (useFlat) {
-          if (flat.empty()) return std::numeric_limits<float>::max();
-          return flat[0].d;
-        }
-        if (heap.empty()) return std::numeric_limits<float>::max();
-        return heap.top().first;
-      };
-      float th = std::numeric_limits<float>::max();
-      // bootstrap tau with the first rows (exact distances)
-      size_t boot = qn < 64 ? qn : 64;
-      for (size_t i = 0; i < boot; i++) {
-        const char* data = nullptr;
-        size_t len = 0;
-        bool tomb = false;
-        if (!PointGet(t.sch.id, Q.pks[i], data, len, tomb)) continue;
-        const float* vp = payload_vec_ptr(sch, data, len, vc);
-        if (!vp) continue;
-        pushTop(l2sq_simd(vp, qvec.data(), qd), Q.pks[i]);
-      }
-      if (useFlat ? int64_t(flat.size()) >= k : int64_t(heap.size()) >= k) {
-        tau = std::sqrt(worstSq());
-        th = tau + eBound;
-        th = (th * th) / (Q.step * Q.step);
-        th *= (1.0f + 1e-6f);   // widen the threshold: only prune what is provably out
-      }
-      // the bootstrap rows are already in the collector: scan the rest only
-      for (size_t i = boot; i < qn; i++) {
-        bool nowFull = useFlat ? int64_t(flat.size()) >= k : int64_t(heap.size()) >= k;
-        uint32_t ds = codesL2Sq(qc.data(), Q.codes.data() + i * qd, qd);
-        // prune only once the collector holds K valid entries
-        if (nowFull && float(ds) > th) continue;
-        const char* data = nullptr;
-        size_t len = 0;
-        bool tomb = false;
-        if (!PointGet(t.sch.id, Q.pks[i], data, len, tomb)) continue;
-        const float* vp = payload_vec_ptr(sch, data, len, vc);
-        if (!vp) continue;
-        float dsq = l2sq_simd(vp, qvec.data(), qd);
-        float prevWorst = nowFull ? worstSq() : std::numeric_limits<float>::max();
-        pushTop(dsq, Q.pks[i]);
-        bool isFull = useFlat ? int64_t(flat.size()) >= k : int64_t(heap.size()) >= k;
-        // tighten tau when a row entered the TopK (or the collector just filled)
-        if (isFull && (!nowFull || dsq < prevWorst)) {
-          tau = std::sqrt(worstSq());
-          th = tau + eBound;
-          th = (th * th) / (Q.step * Q.step);
-          th *= (1.0f + 1e-6f);
-        }
-      }
-    } else {
-    statAnnHnsw_++;
-    std::vector<std::pair<float, uint32_t>> cands;
-    std::function<bool(uint32_t)> filter = nullptr;
-    if (where) {
-      // cached filter bitset keyed by (table, predicate), invalidated by epoch
-      std::string key = SerializePred(where);
-      FilterCache* fc = nullptr;
-      for (auto& c : filterCache_) {
-        if (c.tableId == t.sch.id && c.key == key) { fc = &c; break; }
-      }
-      if (!fc || fc->epoch != dataEpoch_ || fc->pass.size() < t.index->size()) {
-        FilterCache nc;
-        nc.epoch = dataEpoch_;
-        nc.tableId = t.sch.id;
-        nc.key = key;
-        nc.pass.assign(t.index->size(), 0);
-        ScanCtx sc;
-        sc.Init(this, &t);
-        int64_t pk;
-        const char* data;
-        size_t len;
-        bool tomb;
-        std::vector<Value> vals;
-        while (sc.Next(pk, data, len, tomb)) {
-          vals.clear();
-          if (decode_payload(sch, data, len, vals, pk) != Err::OK) continue;
-          if (!EvalPred(where, sch, vals)) continue;
-          uint32_t node = t.index->NodeOf(pk);
-          if (node != UINT32_MAX && node < nc.pass.size()) nc.pass[node] = 1;
-        }
-        filterCache_.push_back(std::move(nc));
-        while (filterCache_.size() > 4) filterCache_.erase(filterCache_.begin());
-        fc = &filterCache_.back();
-      }
-      filter = [&](uint32_t node) {
-        return node < fc->pass.size() && fc->pass[node] != 0;
-      };
+  while (sc.Next(pk, data, len, tomb)) {
+    vals.clear();
+    if (decode_payload(sch, data, len, vals, pk) != Err::OK) continue;
+    if (where && !EvalPred(where, sch, vals)) continue;
+    const Value& v = vals[size_t(vc)];
+    if (v.t != Value::T::Vec) continue;
+    const std::vector<float>& rv = v.v;
+    if (rv.size() != d) continue;
+    double ds = 0.0;
+    for (size_t i2 = 0; i2 < d; i2++) {
+      double diff = double(rv[i2]) - double(qvec[i2]);
+      ds += diff * diff;
     }
-    int ef = std::max(t.sch.vec_index_efS, int(k * 64));
-    // recall must stay >= 0.95 with margin on worst-case (uniform high-dim)
-    // data: the visited fraction must scale with N. 200Kx128d measured:
-    // ef=N/70 -> 0.951 (on the gate), N/50 -> 0.962, N/40 -> 0.966, so N/40
-    // keeps ~1.6% clearance; at 1M N/40=25000 (the old N/70 was 0.953).
-    size_t n = t.index->size();
-    int64_t adapt = n > 0 ? int64_t(n / 40) : 0;
-    if (adapt > ef) ef = int(adapt);
-    const char* envEf = getenv("MVDB_EFS");
-    if (envEf) {
-      int v = atoi(envEf);
-      if (v > 0) ef = v;
-    }
-    if (where) ef = std::max(ef, 4096);  // filtered search needs a wider net
-    size_t visited = 0;
-    t.index->Search(qvec.data(), ef, int(k), cands, filter, &visited);
-    if (getenv("MVDB_TRACE")) {
-      fprintf(stderr, "TRACE ann search: ef=%d visited=%zu cands=%zu n=%zu\n",
-              ef, visited, cands.size(), t.index->size());
-    }
-    if (int64_t(cands.size()) < k) {
-      // not enough filtered candidates: fall back to exact scan
-      useAnn = false;
-    } else {
-      for (auto& c : cands) {
-        int64_t pk = t.index->Pk(c.second);
-        pushTop(c.first, pk);
-      }
-    }
-    }  // end HNSW branch
+    add(ds, pk);
   }
-  if (!useAnn) {
-    statExact_++;
-    std::vector<uint8_t> mask;
-    ExactFilterCache* fc = nullptr;
-    if (where) {
-      mask.assign(sch.cols.size(), 0);
-      CollectPredCols(where, mask, [&](const std::string& n) { return FindCol(sch, n); });
-      std::string key = SerializePred(where);
-      for (auto& c : exactFilterCache_) {
-        if (c.tableId == t.sch.id && c.key == key) { fc = &c; break; }
-      }
-      if (!fc || fc->epoch != dataEpoch_) {
-        if (fc) {
-          // stale: rebuild in place
-          fc->epoch = dataEpoch_;
-          fc->pass.clear();
-        } else {
-          if (exactFilterCache_.size() >= 2) exactFilterCache_.erase(exactFilterCache_.begin());
-          ExactFilterCache nc;
-          nc.epoch = dataEpoch_;
-          nc.tableId = t.sch.id;
-          nc.key = key;
-          exactFilterCache_.push_back(std::move(nc));
-          fc = &exactFilterCache_.back();
-        }
-      }
-    }
-    // parallel exact scan over the immutable runs: no predicate, no open
-    // transaction, small K (flat collector), and enough rows to amortize the
-    // two thread spawns. Workers keep private TopK accumulators merged here.
-    int64_t pTotalRows = 0;
-    size_t pNonEmptyRuns = 0;
-    for (const Run& r : t.runs) {
-      if (r.count > 0) pNonEmptyRuns++;
-      pTotalRows += int64_t(r.count);
-    }
-    // Correctness gates for the parallel path: no pk may appear in two
-    // sources at once (pure-insert tables keep strictly disjoint ranges),
-    // plus the scale/collector predicate.
-    bool runsDisjoint = true;
-    int64_t prevMax = INT64_MIN;
-    for (const Run& r : t.runs) {
-      if (r.count == 0) continue;
-      if (r.firstPk <= prevMax) { runsDisjoint = false; break; }
-      prevMax = r.lastPk;
-    }
-    bool memDisjoint = t.mem.empty() ||
-                       t.memMinPk > t.runMaxPk || t.memMaxPk < t.runMinPk;
-    // inline fast path: single VARCHAR equality predicate (no allocation,
-    // memcmp on the payload bytes - identical semantics to EvalPred); the
-    // fused walk requires the predicate column to precede the vector column
-    bool inlinePred = false;
-    int predCol = -1;
-    const std::string* predLit = nullptr;
-    if (where && where->kind == Expr::Kind::ColCmp && where->op == Op::Eq) {
-      int ci = FindCol(sch, where->col);
-      if (ci >= 0 && ci < vc && sch.cols[size_t(ci)].type == ColType::VarChar &&
-          where->lit.t == Value::T::Str) {
-        inlinePred = true;
-        predCol = ci;
-        predLit = &where->lit.s;
-      }
-    }
-    bool parallel = (!where || inlinePred) && !inTxn_ && useFlat &&
-                    (pNonEmptyRuns >= 2 || (pNonEmptyRuns >= 1 && !t.mem.empty())) &&
-                    runsDisjoint && memDisjoint &&
-                    pTotalRows + int64_t(t.mem.map_.size()) >= 65536;
-    if (parallel) {
-      // per-run bitmap cache for the inline predicate: the first query
-      // evaluates every row (building), later queries consult the bits
-      RunFilterCache* rfc = nullptr;
-      bool building = false;
-      if (inlinePred) {
-        std::string key = SerializePred(where);
-        for (auto& c : runFilterCache_) {
-          if (c.tableId == t.sch.id && c.key == key && c.epoch == dataEpoch_) {
-            rfc = &c;
-            break;
-          }
-        }
-        if (!rfc) {
-          if (runFilterCache_.size() >= 2) runFilterCache_.erase(runFilterCache_.begin());
-          RunFilterCache nc;
-          nc.epoch = dataEpoch_;
-          nc.tableId = t.sch.id;
-          nc.key = key;
-          runFilterCache_.push_back(std::move(nc));
-          rfc = &runFilterCache_.back();
-        }
-        if (!rfc->complete) {
-          building = true;
-          rfc->runPass.clear();
-          rfc->runPass.resize(t.runs.size());
-          for (size_t i = 0; i < t.runs.size(); i++) {
-            rfc->runPass[i].clear();
-            rfc->runPass[i].reserve(size_t(t.runs[i].count));
-          }
-          rfc->memPass.clear();
-          if (!t.mem.empty()) rfc->memPass.reserve(t.mem.map_.size());
-        }
-      }
-      std::vector<std::pair<int64_t, uint32_t>> memSorted;
-      if (!t.mem.empty()) {
-        // cached snapshot: the memtable is immutable between DML batches
-        if (t.memSortedEpoch != dataEpoch_ || t.memSortedCount != t.mem.map_.size()) {
-          t.memSortedCache.clear();
-          t.memSortedCache.reserve(t.mem.map_.size());
-          for (auto& kv : t.mem.map_) t.memSortedCache.push_back(kv);
-          std::sort(t.memSortedCache.begin(), t.memSortedCache.end(),
-                    [](const auto& a, const auto& b) { return a.first < b.first; });
-          t.memSortedEpoch = dataEpoch_;
-          t.memSortedCount = t.mem.map_.size();
-        }
-        memSorted = t.memSortedCache;
-      }
-      // balanced partition of the runs across the two workers. With the
-      // per-run bitmap cache in build mode a run must stay on one worker
-      // (append order = row position); otherwise runs are split at a row
-      // boundary so the 1-run + big-memtable shape also balances.
-      std::array<std::vector<size_t>, 2> groups;
-      std::array<int64_t, 2> load = {int64_t(memSorted.size()), 0};
-      // run-splitting only pays off when whole-run balancing cannot work
-      // (1-2 runs + memtable); with many runs the greedy whole-run split is
-      // already balanced and splitting costs an extra header walk
-      bool canSplit = !(inlinePred && building) && pNonEmptyRuns <= 2;
-      std::vector<uint64_t> runSplit(t.runs.size(), 0);
-      if (canSplit) {
-        int64_t total = int64_t(memSorted.size());
-        for (const Run& r : t.runs) total += int64_t(r.count);
-        int64_t target = total / 2;
-        int64_t acc = int64_t(memSorted.size());
-        for (size_t i = 0; i < t.runs.size(); i++) {
-          if (t.runs[i].count == 0) continue;
-          int64_t need = target - acc;
-          if (need >= int64_t(t.runs[i].count)) {
-            runSplit[i] = t.runs[i].count;
-            acc += int64_t(t.runs[i].count);
-          } else if (need > 0) {
-            runSplit[i] = uint64_t(need);
-            acc = target;
-          }
-        }
-      } else {
-        for (size_t i = 0; i < t.runs.size(); i++) {
-          if (t.runs[i].count == 0) continue;
-          int g = load[0] <= load[1] ? 0 : 1;
-          groups[size_t(g)].push_back(i);
-          load[size_t(g)] += int64_t(t.runs[i].count);
-        }
-      }
-      auto scanMem = [&](TkAcc& acc) {
-        size_t mi = 0;
-        for (auto& e : memSorted) {
-          bool match = true;
-          const float* vp = nullptr;
-          if (inlinePred) {
-            if (building) {
-              if (e.second == MemTable::TOMB) {
-                match = false;
-              } else {
-                const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
-                uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
-                             (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
-                const char* s = nullptr;
-                uint32_t slen = 0;
-                match = payload_str_and_vec(sch, (const char*)(base + 12), l, predCol,
-                                            vc, s, slen, vp) &&
-                        slen == predLit->size() &&
-                        std::memcmp(s, predLit->data(), slen) == 0;
-              }
-              rfc->memPass.push_back(match ? 1 : 0);
-            } else {
-              match = mi < rfc->memPass.size() && rfc->memPass[mi] != 0;
-            }
-            mi++;
-            if (!match) continue;
-            if (e.second == MemTable::TOMB) continue;
-            if (!vp) {
-              const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
-              uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
-                           (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
-              vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
-            }
-            if (vp) acc.add(l2sq_simd(vp, qvec.data(), d), e.first);
-          } else {
-            if (e.second == MemTable::TOMB) continue;
-            const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
-            uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
-                         (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
-            vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
-            if (vp) acc.add(l2sq_simd(vp, qvec.data(), d), e.first);
-          }
-        }
-      };
-      TkAcc accs[2];
-      accs[0].init(k);
-      accs[1].init(k);
-      if (canSplit) {
-        std::thread th0([&] {
-          scanMem(accs[0]);
-          for (size_t ri = 0; ri < t.runs.size(); ri++) {
-            if (runSplit[ri] > 0) {
-              scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[0], predCol,
-                          inlinePred ? predLit : nullptr,
-                          (inlinePred && !building) ? &rfc->runPass[ri] : nullptr,
-                          nullptr, 0, runSplit[ri]);
-            }
-          }
-        });
-        for (size_t ri = 0; ri < t.runs.size(); ri++) {
-          scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[1], predCol,
-                      inlinePred ? predLit : nullptr,
-                      (inlinePred && !building) ? &rfc->runPass[ri] : nullptr,
-                      nullptr, runSplit[ri], UINT64_MAX);
-        }
-        th0.join();
-      } else {
-        std::thread th0([&] {
-          scanMem(accs[0]);
-          for (size_t ri : groups[0]) {
-            scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[0], predCol,
-                        inlinePred ? predLit : nullptr,
-                        (!inlinePred || building) ? nullptr : &rfc->runPass[ri],
-                        (inlinePred && building) ? &rfc->runPass[ri] : nullptr);
-          }
-        });
-        for (size_t ri : groups[1]) {
-          scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[1], predCol,
-                      inlinePred ? predLit : nullptr,
-                      (!inlinePred || building) ? nullptr : &rfc->runPass[ri],
-                      (inlinePred && building) ? &rfc->runPass[ri] : nullptr);
-        }
-        th0.join();
-      }
-      if (inlinePred && building) rfc->complete = true;
-      // merge both accumulators: best-first sorted, then store worst-first
-      std::vector<std::pair<float, int64_t>> merged;
-      merged.reserve(size_t(accs[0].n + accs[1].n));
-      for (int a = 0; a < 2; a++) {
-        for (int64_t i = 0; i < accs[a].n; i++) merged.push_back(accs[a].arr[i]);
-      }
-      std::sort(merged.begin(), merged.end(),
-                [](const auto& x, const auto& y) {
-                  if (x.first != y.first) return x.first < y.first;
-                  return x.second < y.second;
-                });
-      if (int64_t(merged.size()) > k) merged.resize(size_t(k));
-      flat.clear();
-      flat.reserve(merged.size());
-      for (size_t i = merged.size(); i-- > 0;) {
-        flat.push_back({merged[i].first, merged[i].second});
-      }
-      if (getenv("MVDB_TRACE")) {
-        fprintf(stderr, "TRACE topk parallel: runs=%zu rows=%lld topk=%zu\n",
-                pNonEmptyRuns, (long long)pTotalRows, flat.size());
-      }
-    } else {
-      ScanCtx sc;
-      sc.Init(this, &t);
-      int64_t pk;
-      const char* data;
-      size_t len;
-      bool tomb;
-      std::vector<Value> vals;
-      size_t scanned = 0, decfail = 0, notvec = 0;
-      size_t rowIdx = 0;
-      while (sc.Next(pk, data, len, tomb)) {
-        scanned++;
-        bool match = true;
-        if (where && inlinePred) {
-          const char* s = nullptr;
-          uint32_t slen = 0;
-          match = payload_str_view(sch, data, len, predCol, s, slen) &&
-                  slen == predLit->size() &&
-                  std::memcmp(s, predLit->data(), slen) == 0;
-        } else if (where) {
-          // bit per row in scan order: computed on first use, reused afterwards
-          if (rowIdx < fc->pass.size()) {
-            match = fc->pass[rowIdx] != 0;
-          } else {
-            vals.clear();
-            match = decode_payload_masked(sch, data, len, vals, pk, mask) == Err::OK &&
-                    EvalPred(where, sch, vals);
-            fc->pass.push_back(match ? 1 : 0);
-          }
-          rowIdx++;
-        }
-        if (!match) continue;
-        // distance straight from the payload bytes (no per-row vector copy)
-        const float* vp = payload_vec_ptr(sch, data, len, vc);
-        if (!vp) { decfail++; continue; }
-        float distSq = l2sq_simd(vp, qvec.data(), d);
-        pushTop(distSq, pk);
-      }
-      if (getenv("MVDB_TRACE")) {
-        fprintf(stderr, "TRACE topk exact: scanned=%zu decfail=%zu notvec=%zu topk=%zu\n",
-                scanned, decfail, notvec, useFlat ? flat.size() : heap.size());
-      }
-    }
-  }
-  if (useFlat) {
-    // flat is worst-first; emit ascending (best-first)
-    out.reserve(flat.size());
-    for (size_t i = flat.size(); i-- > 0;) out.emplace_back(flat[i].d, flat[i].pk);
-  } else {
-    out.reserve(heap.size());
-    while (!heap.empty()) { out.push_back(heap.top()); heap.pop(); }
-    // heap pops descending (dist, pk); reverse to ascending
-    std::reverse(out.begin(), out.end());
-  }
+  out.reserve(flat.size());
+  for (size_t i = flat.size(); i-- > 0;) out.emplace_back(float(flat[i].d), flat[i].pk);
   return Err::OK;
 }
 
-// ---------------------------------------------------------------------------
-// statement execution
-// ---------------------------------------------------------------------------
 Err Engine::Execute(const Stmt& s, bool annMode, ExecResult& out) {
   out = ExecResult();
   switch (s.kind) {
@@ -2886,8 +2403,16 @@ Err Engine::ExecSelect(const Stmt& s, bool annMode, ExecResult& out) {
     for (size_t i = 0; i < distVecs.size(); i++) {
       const Value& v = vals[size_t(distColIdx[i])];
       if (v.t != Value::T::Vec) { dists[i] = 0; continue; }
-      float d2 = l2sq_simd(v.v.data(), distVecs[i].data(), v.v.size());
-      dists[i] = std::sqrt(double(d2));
+      {  // CONS: double accumulation, consistent with the conservative TopK
+        double d2 = 0.0;
+        const auto& rv = v.v;
+        const auto& qv = distVecs[i];
+        for (size_t j2 = 0; j2 < rv.size(); j2++) {
+          double diff = double(rv[j2]) - double(qv[j2]);
+          d2 += diff * diff;
+        }
+        dists[i] = std::sqrt(d2);
+      }
     }
   };
 

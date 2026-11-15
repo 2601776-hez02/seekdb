@@ -419,6 +419,10 @@ int main(int argc, char** argv) {
   }
   // handshake: exactly this object, one line, flushed, before reading input
   emit("{\"type\":\"ready\"}\n");
+  // diagnostic banner on stderr (stdout stays protocol-clean) so a failing
+  // platform run can identify the build and its workload accounting
+  fprintf(stderr, "[mvdb] build=dd55b745+diag ready data=%s\n", dataDir.c_str());
+  fflush(stderr);
 
   std::string line;
   while (!gStop && std::getline(std::cin, line)) {

@@ -282,10 +282,14 @@ Err Engine::Shutdown() {
     if (t->buildThread.joinable()) t->buildThread.join();
   }
   Err e = Checkpoint();
-  if (getenv("MVDB_TRACE")) {
-    fprintf(stderr, "TRACE shutdown: bytesWritten=%llu\n",
-            (unsigned long long)g_bytesWritten.load(std::memory_order_relaxed));
-  }
+  fprintf(stderr,
+          "[mvdb] stats: queries=%llu exact=%llu annQuant=%llu annHnsw=%llu "
+          "filtered=%llu dims=%zu kmax=%lld bytesWritten=%llu\n",
+          (unsigned long long)statQueries_, (unsigned long long)statExact_,
+          (unsigned long long)statAnnQuant_, (unsigned long long)statAnnHnsw_,
+          (unsigned long long)statFiltered_, (unsigned long)statD_,
+          (long long)statKMax_,
+          (unsigned long long)g_bytesWritten.load(std::memory_order_relaxed));
   if (walFd_ >= 0) { ::close(walFd_); walFd_ = -1; }
   return e;
 }
@@ -513,9 +517,9 @@ Err Engine::WalRecover() {
   if (::fstat(walFd_, &st) != 0) return Err::IOError;
   uint64_t off = 0;
   uint64_t validEnd = 0;
-  uint64_t replayEnd = 0;   // offset just after the last COMMIT record
+  uint64_t replayEnd = 0;   // offset just after the last committed record
   {
-    uint64_t lastCommit = 0;
+    uint64_t lastCommitted = 0;
     while (true) {
       char h[12];
       ssize_t got = ::pread(walFd_, h, 12, off);
@@ -531,11 +535,23 @@ Err Engine::WalRecover() {
       got = ::pread(walFd_, &head[0], len, off + 12);
       if (got < ssize_t(len)) { validEnd = off; break; }
       if (crc32(head.data(), head.size()) != crc) { validEnd = off; break; }
-      if (head.size() >= 1 && head[0] == 3) lastCommit = off + 12 + len;
+      // commit points: txn COMMIT records and DDL records (the DDL catalog is
+      // separately durable: SaveCatalog fsyncs it, so a DDL record stands on
+      // its own without a trailing COMMIT)
+      if (head.size() >= 1 && (head[0] == 3 || head[0] == 1)) {
+        lastCommitted = off + 12 + len;
+      }
       off += 12 + len;
       validEnd = off;
     }
-    replayEnd = lastCommit;
+    replayEnd = lastCommitted;
+  }
+  // drop the uncommitted tail: CRC-intact PUT records after the last commit
+  // must not survive, otherwise the next COMMIT would pull them into the
+  // replay range of a later recovery (they would "revive")
+  if (replayEnd < validEnd) {
+    if (::ftruncate(walFd_, off_t(replayEnd)) != 0) return Err::IOError;
+    validEnd = replayEnd;
   }
   // pass 2: replay PUT/DDL records up to replayEnd (all committed)
   off = 0;
@@ -761,6 +777,9 @@ Err Engine::OpenRuns(TableState& t) {
     t.runs.push_back(std::move(r));
     if (seq + 1 > t.runSeq) t.runSeq = seq + 1;
   }
+  // runs exist on disk: the WAL-as-storage checkpoint fast path must NOT
+  // apply (the WAL would keep rows that already live in runs)
+  if (!t.runs.empty()) anyRunWritten_ = true;
   return Err::OK;
 }
 
@@ -1513,6 +1532,13 @@ Err Engine::CommitTxn() {
           }
         }
       }
+      // the quantized snapshot has no incremental path: drop it on ANY
+      // committed mutation (insert/update/delete) so ann queries fall back
+      // to the exact scan (recall 1.0) until the next CREATE
+      if (t->quant) {
+        t->quant.reset();
+        t->indexReady = false;
+      }
       if (ent.first < t->memMinPk) t->memMinPk = ent.first;
       if (ent.first > t->memMaxPk) t->memMaxPk = ent.first;
     }
@@ -1710,9 +1736,17 @@ Err Engine::BuildIndex(TableState& t) {
       if (v < lo) lo = v;
       if (v > hi) hi = v;
     }
-    if (hi - lo < 1e-6f) hi = lo + 1e-6f;
+    float range = hi - lo;
+    if (!(range > 0.f) || !std::isfinite(range) || range < 1e-6f) {
+      // degenerate codebook (constant data, unrepresentable range): all
+      // codes zero, never prune - every row is recomputed exactly
+      q.lo = lo;
+      q.step = 1.0f;
+      q.codes.assign(n * d, 0);
+      return Err::OK;
+    }
     q.lo = lo;
-    q.step = (hi - lo) / 255.0f;
+    q.step = range / 255.0f;
     float inv = 1.0f / q.step;
     q.codes.resize(n * d);
     for (size_t i = 0; i < n; i++) {
@@ -1752,6 +1786,10 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
   int vc = sch.vec_col;
   if (vc < 0) return Err::NotVectorColumn;
   size_t d = size_t(sch.cols[size_t(vc)].n);
+  statQueries_++;
+  if (where) statFiltered_++;
+  statD_ = d;
+  if (k > statKMax_) statKMax_ = k;
   if (k <= 0) return Err::OK;  // LIMIT 0: nothing to collect
   MaybeClaimPendingIndex(t);
   bool useAnn = annMode && t.indexReady && (t.index || t.quant) &&
@@ -1824,6 +1862,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
 
   if (useAnn) {
     if (t.quant) {
+      statAnnQuant_++;
       // Quantized safe-pruned scan: INT8 distance lower bounds via the
       // triangle inequality; survivors are recomputed exactly from the FP32
       // data, so the result (values AND tie order) matches the exact scan
@@ -1838,12 +1877,18 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
       for (size_t j = 0; j < qd; j++) {
         float v = qvec[j];
         float cl = v < Q.lo ? Q.lo : (v > qhi ? qhi : v);
-        float err = v - cl;
-        eq += err * err;
         int code = int(std::round((cl - Q.lo) * inv));
         if (code < 0) code = 0;
         if (code > 255) code = 255;
         qc[j] = uint8_t(code);
+        // EXACT query-side reconstruction error (clamp + rounding), not just
+        // the clamp part: the triangle-inequality bound needs |q - q_hat|;
+        // add a magnitude-scaled ulp margin for float rounding
+        float re = v - (Q.lo + float(code) * Q.step);
+        float mag = std::max(std::fabs(Q.lo), std::fabs(qhi));
+        float margin = 1e-6f * std::max(1.0f, mag);
+        float bound = std::fabs(re) + margin;
+        eq += bound * bound;
       }
       float eBound = Q.eBound() + std::sqrt(eq);
       float tau = std::numeric_limits<float>::max();   // current k-th best (sqrt)
@@ -1867,14 +1912,18 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
         if (!vp) continue;
         pushTop(l2sq_simd(vp, qvec.data(), qd), Q.pks[i]);
       }
-      tau = std::sqrt(worstSq());
-      th = tau + eBound;
-      th = (th * th) / (Q.step * Q.step);
-      th *= (1.0f - 1e-6f);   // conservative margin for float rounding
+      if (useFlat ? int64_t(flat.size()) >= k : int64_t(heap.size()) >= k) {
+        tau = std::sqrt(worstSq());
+        th = tau + eBound;
+        th = (th * th) / (Q.step * Q.step);
+        th *= (1.0f + 1e-6f);   // widen the threshold: only prune what is provably out
+      }
       // the bootstrap rows are already in the collector: scan the rest only
       for (size_t i = boot; i < qn; i++) {
+        bool nowFull = useFlat ? int64_t(flat.size()) >= k : int64_t(heap.size()) >= k;
         uint32_t ds = codesL2Sq(qc.data(), Q.codes.data() + i * qd, qd);
-        if (float(ds) > th) continue;   // LB > tau: provably not in the TopK
+        // prune only once the collector holds K valid entries
+        if (nowFull && float(ds) > th) continue;
         const char* data = nullptr;
         size_t len = 0;
         bool tomb = false;
@@ -1882,16 +1931,19 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
         const float* vp = payload_vec_ptr(sch, data, len, vc);
         if (!vp) continue;
         float dsq = l2sq_simd(vp, qvec.data(), qd);
-        float oldWorst = worstSq();
+        float prevWorst = nowFull ? worstSq() : std::numeric_limits<float>::max();
         pushTop(dsq, Q.pks[i]);
-        if (dsq < oldWorst) {
+        bool isFull = useFlat ? int64_t(flat.size()) >= k : int64_t(heap.size()) >= k;
+        // tighten tau when a row entered the TopK (or the collector just filled)
+        if (isFull && (!nowFull || dsq < prevWorst)) {
           tau = std::sqrt(worstSq());
           th = tau + eBound;
           th = (th * th) / (Q.step * Q.step);
-          th *= (1.0f - 1e-6f);
+          th *= (1.0f + 1e-6f);
         }
       }
     } else {
+    statAnnHnsw_++;
     std::vector<std::pair<float, uint32_t>> cands;
     std::function<bool(uint32_t)> filter = nullptr;
     if (where) {
@@ -1961,6 +2013,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
     }  // end HNSW branch
   }
   if (!useAnn) {
+    statExact_++;
     std::vector<uint8_t> mask;
     ExactFilterCache* fc = nullptr;
     if (where) {

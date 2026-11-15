@@ -519,9 +519,12 @@ struct QuantIndex {
   float step = 0.f;
   std::vector<uint8_t> codes;    // n*d, row-major
   std::vector<int64_t> pks;
-  // per-vector quantization error bound: sqrt(d) * (step/2 + eps)
+  // per-vector quantization error bound: sqrt(d) * (step/2 + eps), with the
+  // eps term scaled by the data magnitude to cover float rounding at large
+  // values (ulp of a float ~ 1.19e-7 * |x|)
   float eBound() const {
-    return float(std::sqrt(double(d))) * (step * 0.5f + 1e-6f);
+    float scale = std::max(1.0f, std::max(std::fabs(lo), std::fabs(lo + 255.0f * step)));
+    return float(std::sqrt(double(d))) * (step * 0.5f + 1e-6f * scale);
   }
 };
 

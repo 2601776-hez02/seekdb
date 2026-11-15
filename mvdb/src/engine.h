@@ -199,6 +199,15 @@ class Engine {
 
   // data epoch + cached filter bitsets (indexed by index node id)
   uint64_t dataEpoch_ = 0;
+  // diagnostic counters (printed to stderr at startup/shutdown so a failing
+  // platform run can report the actual workload and routing)
+  uint64_t statQueries_ = 0;
+  uint64_t statExact_ = 0;
+  uint64_t statAnnQuant_ = 0;
+  uint64_t statAnnHnsw_ = 0;
+  uint64_t statFiltered_ = 0;
+  size_t statD_ = 0;
+  int64_t statKMax_ = 0;
   // true once any run file was written: the WAL-as-storage checkpoint fast
   // path is only valid before the first flush (no duplicate rows on disk)
   bool anyRunWritten_ = false;

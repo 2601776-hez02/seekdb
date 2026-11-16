@@ -586,8 +586,24 @@ Err Engine::WalRecover() {
       }
       TableState* t = FindTableById(tid);
       if (t) {
-        if (flags & 1) t->mem.Del(pk);
-        else t->mem.Put(pk, head.substr(26));
+        if (flags & 1) {
+          t->mem.Del(pk);
+        } else {
+          std::string payload = head.substr(26);
+          t->mem.Put(pk, payload);
+          // numeric-safety bound must survive crash recovery
+          if (t->sch.vec_col >= 0) {
+            std::vector<Value> vals;
+            if (decode_payload(t->sch, payload.data(), payload.size(), vals, pk) == Err::OK &&
+                size_t(t->sch.vec_col) < vals.size() &&
+                vals[size_t(t->sch.vec_col)].t == Value::T::Vec) {
+              for (float x : vals[size_t(t->sch.vec_col)].v) {
+                double a = std::fabs(double(x));
+                if (a > t->vecMaxAbs) t->vecMaxAbs = a;
+              }
+            }
+          }
+        }
         if (pk < t->memMinPk) t->memMinPk = pk;
         if (pk > t->memMaxPk) t->memMaxPk = pk;
         if (t->mem.bytes() >= memtableFlushBytes_) {
@@ -780,6 +796,33 @@ Err Engine::OpenRuns(TableState& t) {
   // runs exist on disk: the WAL-as-storage checkpoint fast path must NOT
   // apply (the WAL would keep rows that already live in runs)
   if (!t.runs.empty()) anyRunWritten_ = true;
+  // numeric-safety bound for rows that live in run files (monotonic): needed
+  // before any HNSW/quant routing decision after a restart
+  if (t.sch.vec_col >= 0) {
+    int vc = t.sch.vec_col;
+    for (Run& r : t.runs) {
+      uint64_t off = 8, idx = 0;
+      while (idx < r.count && off + 13 <= r.fileSize) {
+        uint8_t flags = r.map[off + 8];
+        uint32_t l = 0;
+        std::memcpy(&l, r.map + off + 9, 4);
+        if (!(flags & 1)) {
+          int64_t pk = 0;
+          std::memcpy(&pk, r.map + off, 8);
+          std::vector<Value> vals;
+          if (decode_payload(t.sch, (const char*)(r.map + off + 13), l, vals, pk) == Err::OK &&
+              size_t(vc) < vals.size() && vals[size_t(vc)].t == Value::T::Vec) {
+            for (float x : vals[size_t(vc)].v) {
+              double a = std::fabs(double(x));
+              if (a > t.vecMaxAbs) t.vecMaxAbs = a;
+            }
+          }
+        }
+        off += 13 + l;
+        idx++;
+      }
+    }
+  }
   return Err::OK;
 }
 
@@ -1211,7 +1254,8 @@ struct TkAcc {
 static void scanRunTopK(const Run& r, const TableSchema& sch, int vc, size_t d,
                         const float* q, TkAcc& acc, int predCol, const std::string* lit,
                         const std::vector<uint8_t>* bits, std::vector<uint8_t>* bitsBuild,
-                        uint64_t fromIdx = 0, uint64_t toIdx = UINT64_MAX) {
+                        uint64_t fromIdx = 0, uint64_t toIdx = UINT64_MAX,
+                        bool dbl = false) {
   uint64_t off = 8;
   uint64_t idx = 0;
   if (toIdx > r.count) toIdx = r.count;
@@ -1240,7 +1284,7 @@ static void scanRunTopK(const Run& r, const TableSchema& sch, int vc, size_t d,
       const char* payload = (const char*)(r.map + off + 13);
       if (lit == nullptr) {
         const float* vp = payload_vec_ptr(sch, payload, l, vc);
-        if (vp) acc.add(l2sq_score(vp, q, d), pk);
+        if (vp) acc.add(dbl ? l2sq_double(vp, q, d) : l2sq_score(vp, q, d), pk);
       } else if (bitsBuild) {
         const char* s = nullptr;
         uint32_t slen = 0;
@@ -1248,11 +1292,11 @@ static void scanRunTopK(const Run& r, const TableSchema& sch, int vc, size_t d,
         bool match = payload_str_and_vec(sch, payload, l, predCol, vc, s, slen, vp) &&
                      slen == lit->size() && std::memcmp(s, lit->data(), slen) == 0;
         bitsBuild->push_back(match ? 1 : 0);
-        if (match) acc.add(l2sq_score(vp, q, d), pk);
+        if (match) acc.add(dbl ? l2sq_double(vp, q, d) : l2sq_score(vp, q, d), pk);
       } else {
         if ((*bits)[idx]) {
           const float* vp = payload_vec_ptr(sch, payload, l, vc);
-          if (vp) acc.add(l2sq_score(vp, q, d), pk);
+          if (vp) acc.add(dbl ? l2sq_double(vp, q, d) : l2sq_score(vp, q, d), pk);
         }
       }
     }
@@ -1811,6 +1855,26 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
   // scan index instead of HNSW, so this gate only fires for larger ones.)
   if (useAnn && t.index && t.index->size() < 100000) useAnn = false;
 
+  // Numeric-safety gate (checked BEFORE any graph search or quant pruning).
+  // Worst-case squared distance for this table+query: |diff| <= M+Q, so
+  // l2sq <= d*(M+Q)^2 with M = max |stored element| (monotonic bound) and
+  // Q = max |query element|, computed in double. If that bound comes within
+  // 4x of the float32 limit, the HNSW graph (built on float32 distances) may
+  // never reach the true neighbours and the quantized pruning may drop them,
+  // so both are bypassed and the query runs an unpruned exact scan scored in
+  // double. Normal data keeps the existing fast path.
+  bool danger = false;
+  if (d > 0) {
+    double qmax = 0.0;
+    for (size_t i = 0; i < d; i++) {
+      double a = std::fabs(double(qvec[i]));
+      if (a > qmax) qmax = a;
+    }
+    double span = double(d) * (t.vecMaxAbs + qmax) * (t.vecMaxAbs + qmax);
+    danger = span > double(std::numeric_limits<float>::max()) * 0.25;
+  }
+  if (danger) useAnn = false;   // no HNSW graph, no quant pruning
+
   // Top-K collector. The benchmark K is small (typically 10); a per-row
   // std::priority_queue push/pop measured ~27% of an exact query at 1M rows,
   // so small K keeps a flat worst-first array instead (1 compare per row).
@@ -2202,14 +2266,14 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
                            (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
               vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
             }
-            if (vp) acc.add(l2sq_score(vp, qvec.data(), d), e.first);
+            if (vp) acc.add(danger ? l2sq_double(vp, qvec.data(), d) : l2sq_score(vp, qvec.data(), d), e.first);
           } else {
             if (e.second == MemTable::TOMB) continue;
             const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
             uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
                          (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
             vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
-            if (vp) acc.add(l2sq_score(vp, qvec.data(), d), e.first);
+            if (vp) acc.add(danger ? l2sq_double(vp, qvec.data(), d) : l2sq_score(vp, qvec.data(), d), e.first);
           }
         }
       };
@@ -2224,7 +2288,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
               scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[0], predCol,
                           inlinePred ? predLit : nullptr,
                           (inlinePred && !building) ? &rfc->runPass[ri] : nullptr,
-                          nullptr, 0, runSplit[ri]);
+                          nullptr, 0, runSplit[ri], danger);
             }
           }
         });
@@ -2232,7 +2296,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
           scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[1], predCol,
                       inlinePred ? predLit : nullptr,
                       (inlinePred && !building) ? &rfc->runPass[ri] : nullptr,
-                      nullptr, runSplit[ri], UINT64_MAX);
+                      nullptr, runSplit[ri], UINT64_MAX, danger);
         }
         th0.join();
       } else {
@@ -2242,14 +2306,14 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
             scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[0], predCol,
                         inlinePred ? predLit : nullptr,
                         (!inlinePred || building) ? nullptr : &rfc->runPass[ri],
-                        (inlinePred && building) ? &rfc->runPass[ri] : nullptr);
+                        (inlinePred && building) ? &rfc->runPass[ri] : nullptr, 0, UINT64_MAX, danger);
           }
         });
         for (size_t ri : groups[1]) {
           scanRunTopK(t.runs[ri], sch, vc, d, qvec.data(), accs[1], predCol,
                       inlinePred ? predLit : nullptr,
                       (!inlinePred || building) ? nullptr : &rfc->runPass[ri],
-                      (inlinePred && building) ? &rfc->runPass[ri] : nullptr);
+                      (inlinePred && building) ? &rfc->runPass[ri] : nullptr, 0, UINT64_MAX, danger);
         }
         th0.join();
       }
@@ -2310,7 +2374,8 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
         // distance straight from the payload bytes (no per-row vector copy)
         const float* vp = payload_vec_ptr(sch, data, len, vc);
         if (!vp) { decfail++; continue; }
-        double distSq = l2sq_score(vp, qvec.data(), d);
+        double distSq = danger ? l2sq_double(vp, qvec.data(), d)
+                               : l2sq_score(vp, qvec.data(), d);
         pushTop(distSq, pk);
       }
       if (getenv("MVDB_TRACE")) {
@@ -2577,6 +2642,15 @@ Err Engine::ExecInsert(const Stmt& s, bool annMode, ExecResult& out) {
       Err e = CoerceValue(sch.cols[ci], vals[ci]);
       if (e != Err::OK) return e;
     }
+    // maintain the numeric-safety bound (monotonic; a rolled-back txn can
+    // only make it larger, which is safe)
+    if (sch.vec_col >= 0 && size_t(sch.vec_col) < ncols &&
+        vals[size_t(sch.vec_col)].t == Value::T::Vec) {
+      for (float x : vals[size_t(sch.vec_col)].v) {
+        double a = std::fabs(double(x));
+        if (a > t->vecMaxAbs) t->vecMaxAbs = a;
+      }
+    }
     std::string payload;
     Err e = encode_payload(sch, vals, payload);
     if (e != Err::OK) return e;
@@ -2631,6 +2705,18 @@ Err Engine::ExecUpdate(const Stmt& s, bool annMode, ExecResult& out) {
     if (e != Err::OK) return e;
     setCols.push_back(ci);
     setVals.push_back(std::move(nv));
+  }
+  // maintain the numeric-safety bound for vector assignments (conservative:
+  // rows that end up unchanged or a rolled-back txn only enlarge it)
+  if (sch.vec_col >= 0) {
+    for (size_t i = 0; i < setCols.size(); i++) {
+      if (setCols[i] == sch.vec_col && setVals[i].t == Value::T::Vec) {
+        for (float x : setVals[i].v) {
+          double a = std::fabs(double(x));
+          if (a > t->vecMaxAbs) t->vecMaxAbs = a;
+        }
+      }
+    }
   }
   Err ve = ValidatePred(s.where.get(), sch, [this](const TableSchema& s2, const std::string& n) {
     return FindCol(s2, n);

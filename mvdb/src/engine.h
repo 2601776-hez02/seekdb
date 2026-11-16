@@ -116,6 +116,12 @@ struct TableState {
   std::vector<std::pair<int64_t, uint32_t>> memSortedCache;
   uint64_t memSortedEpoch = 0;
   size_t memSortedCount = 0;
+  // numeric-safety bound: max |vector element| ever written to this table
+  // (monotonic; deletions never shrink it - a stale larger bound only makes
+  // more queries take the safe exact path). Used to bypass the HNSW graph and
+  // the quantized pruning whenever the worst-case squared distance could
+  // approach the float32 range.
+  double vecMaxAbs = 0.0;
   // index availability. Sync builds (small tables) stay valid across DML via
   // incremental maintenance; async builds (large tables) are gated on the
   // data epoch captured when the build started.

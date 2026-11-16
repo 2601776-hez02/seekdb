@@ -121,8 +121,38 @@ def main():
     for (gpk, gd), (rpk, rd) in zip(got, ref):
         assert gpk == rpk, (got, ref)
         assert abs(gd - rd) <= 1e-6 * max(1.0, abs(rd)), (gpk, gd, rd)
+
+    # ---- overflow fallback: pk order opposite to the true distance order ----
+    # [3e20] and [2e20] both overflow a float32 squared distance; a float32
+    # TopK ties at inf and falls back to pk order (wrong: 2e20 < 3e20).
+    assert db.send("CREATE TABLE ovf (id BIGINT PRIMARY KEY, c VARCHAR(8), e VECTOR(1));")["ok"]
+    assert db.send("INSERT INTO ovf VALUES (1, 'k', '[3e20]'), (2, 'k', '[2e20]');")["affected_rows"] == 2
+
+    def ovf_top1(mode, where=""):
+        r = db.send("SELECT id, L2_DISTANCE(e,'[0]') AS d FROM ovf%s ORDER BY d LIMIT 1;" % where,
+                    mode=mode)
+        assert r["ok"], (mode, where, r)
+        return int(r["rows"][0][0]), float(r["rows"][0][1])
+
+    for mode in ("exact", "ann"):
+        pk, dd = ovf_top1(mode)
+        assert pk == 2, (mode, "wrong id", pk, dd)
+        assert abs(dd - 2e20) <= 1e-6 * 2e20, (mode, dd)
+    pk, dd = ovf_top1("exact", " WHERE c='k'")
+    assert pk == 2, ("filtered", pk, dd)
+    # with a vector index the quantized scan must keep the true order too
+    assert db.send("CREATE VECTOR INDEX ovf_idx ON ovf(e);")["ok"]
+    for mode in ("exact", "ann"):
+        pk, dd = ovf_top1(mode)
+        assert pk == 2, (mode, "with-index", pk, dd)
+    # restart -> same answers
     db.stop()
-    print("VECTOR ROUND-TRIP OK (direct/alias/select-star, update, restart, 128d)")
+    db.start()
+    r = db.send("SELECT id, L2_DISTANCE(e,'[0]') AS d FROM ovf ORDER BY d LIMIT 2;")
+    assert [row[0] for row in r["rows"]] == [2, 1], r
+    assert abs(float(r["rows"][0][1]) - 2e20) <= 1e-6 * 2e20, r
+    db.stop()
+    print("VECTOR ROUND-TRIP OK (direct/alias/select-star, update, restart, 128d, overflow-fallback)")
 
 
 if __name__ == "__main__":

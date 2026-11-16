@@ -299,10 +299,11 @@ class Engine {
   Err WalAppendRow(const Mut& m);   // single-copy fused row record (same format)
   Err ApplyMutations(const std::function<Err(Mut&, bool&)>& gen);
 
-  // top-k scan for vector queries
+  // top-k scan for vector queries (scores are double: float32 SIMD fast path,
+  // double fallback per overflowed row so ordering never uses an inf tie)
   Err VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* where,
               int64_t k, bool annMode,
-              std::vector<std::pair<float, int64_t>>& out);
+              std::vector<std::pair<double, int64_t>>& out);
 
   // (re)build the HNSW index of a table from its committed rows
   Err BuildIndex(TableState& t);

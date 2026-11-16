@@ -93,6 +93,31 @@ inline float l2sq_simd(const float* a, const float* b, size_t d) {
   return (s0 + s1) + (s2 + s3);
 }
 
+// Exact double accumulation of the squared L2 distance. No float32 overflow:
+// for legal float32 vectors |diff| <= 2*FLT_MAX, so the squared sum is at most
+// 4*d*FLT_MAX^2 (d<=1024 -> ~4.8e81), far below DBL_MAX. Note the overflow
+// condition depends on the WHOLE vector's sum of squared diffs, not on a
+// single component bound.
+inline double l2sq_double(const float* a, const float* b, size_t d) {
+  double acc = 0.0;
+  for (size_t i = 0; i < d; i++) {
+    double diff = double(a[i]) - double(b[i]);
+    acc += diff * diff;
+  }
+  return acc;
+}
+
+// Score used for TopK comparison. The fast path stays float32 SIMD; when that
+// score is non-finite (sum of squared diffs > FLT_MAX), this row is recomputed
+// in double so the ordering uses the true distance instead of an inf tie.
+// Covers every candidate row in every scan path (no K-only recompute, no
+// pruning based on an inflated float bound).
+inline double l2sq_score(const float* a, const float* b, size_t d) {
+  float f = l2sq_simd(a, b, d);
+  if (std::isfinite(f)) return double(f);
+  return l2sq_double(a, b, d);
+}
+
 // ---------------------------------------------------------------------------
 // HNSW over L2. vecs_ is d * N floats (row-major, node id = row). pks_[node]
 // maps a node to its primary key. Node ids grow monotonically; updates mark

@@ -1168,11 +1168,11 @@ static bool payload_str_and_vec(const TableSchema& sch, const char* data, size_t
 // exact scan workers; each worker keeps its own, merged on the main thread
 struct TkAcc {
   static constexpr int64_t MAX = 64;
-  std::pair<float, int64_t> arr[MAX];
+  std::pair<double, int64_t> arr[MAX];
   int64_t n = 0;
   int64_t k = 0;
   void init(int64_t kk) { k = kk; n = 0; }
-  void add(float d, int64_t pk) {
+  void add(double d, int64_t pk) {
     if (k <= 0) return;
     if (n < k) {
       int64_t i = n++;
@@ -1240,7 +1240,7 @@ static void scanRunTopK(const Run& r, const TableSchema& sch, int vc, size_t d,
       const char* payload = (const char*)(r.map + off + 13);
       if (lit == nullptr) {
         const float* vp = payload_vec_ptr(sch, payload, l, vc);
-        if (vp) acc.add(l2sq_simd(vp, q, d), pk);
+        if (vp) acc.add(l2sq_score(vp, q, d), pk);
       } else if (bitsBuild) {
         const char* s = nullptr;
         uint32_t slen = 0;
@@ -1248,11 +1248,11 @@ static void scanRunTopK(const Run& r, const TableSchema& sch, int vc, size_t d,
         bool match = payload_str_and_vec(sch, payload, l, predCol, vc, s, slen, vp) &&
                      slen == lit->size() && std::memcmp(s, lit->data(), slen) == 0;
         bitsBuild->push_back(match ? 1 : 0);
-        if (match) acc.add(l2sq_simd(vp, q, d), pk);
+        if (match) acc.add(l2sq_score(vp, q, d), pk);
       } else {
         if ((*bits)[idx]) {
           const float* vp = payload_vec_ptr(sch, payload, l, vc);
-          if (vp) acc.add(l2sq_simd(vp, q, d), pk);
+          if (vp) acc.add(l2sq_score(vp, q, d), pk);
         }
       }
     }
@@ -1779,7 +1779,7 @@ Err Engine::BuildIndex(TableState& t) {
 // TopK vector search
 // ---------------------------------------------------------------------------
 Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* where,
-                    int64_t k, bool annMode, std::vector<std::pair<float, int64_t>>& out) {
+                    int64_t k, bool annMode, std::vector<std::pair<double, int64_t>>& out) {
   out.clear();
   // background index builds yield while this query runs (cooperative pause)
   struct QueryGuard {
@@ -1816,21 +1816,21 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
   // so small K keeps a flat worst-first array instead (1 compare per row).
   static constexpr int64_t FLAT_K = 64;
   struct Tk {
-    float d;
+    double d;
     int64_t pk;
   };
   std::vector<Tk> flat;                      // worst-first when used
   flat.reserve(size_t(std::min<int64_t>(k, FLAT_K) + 1));
   struct HeapCmp {
-    bool operator()(const std::pair<float, int64_t>& a, const std::pair<float, int64_t>& b) const {
+    bool operator()(const std::pair<double, int64_t>& a, const std::pair<double, int64_t>& b) const {
       if (a.first != b.first) return a.first < b.first;
       return a.second < b.second;
     }
   };
-  std::priority_queue<std::pair<float, int64_t>,
-                      std::vector<std::pair<float, int64_t>>, HeapCmp> heap;  // fallback for large K
+  std::priority_queue<std::pair<double, int64_t>,
+                      std::vector<std::pair<double, int64_t>>, HeapCmp> heap;  // fallback for large K
   bool useFlat = (k <= FLAT_K);
-  auto pushTop = [&](float distSq, int64_t pk) {
+  auto pushTop = [&](double distSq, int64_t pk) {
     if (useFlat) {
       size_t n = flat.size();
       if (n < size_t(k)) {
@@ -1899,12 +1899,12 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
       }
       float eBound = Q.eBound() + std::sqrt(eq);
       float tau = std::numeric_limits<float>::max();   // current k-th best (sqrt)
-      auto worstSq = [&]() -> float {
+      auto worstSq = [&]() -> double {
         if (useFlat) {
-          if (flat.empty()) return std::numeric_limits<float>::max();
+          if (flat.empty()) return std::numeric_limits<double>::max();
           return flat[0].d;
         }
-        if (heap.empty()) return std::numeric_limits<float>::max();
+        if (heap.empty()) return std::numeric_limits<double>::max();
         return heap.top().first;
       };
       float th = std::numeric_limits<float>::max();
@@ -1917,10 +1917,10 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
         if (!PointGet(t.sch.id, Q.pks[i], data, len, tomb)) continue;
         const float* vp = payload_vec_ptr(sch, data, len, vc);
         if (!vp) continue;
-        pushTop(l2sq_simd(vp, qvec.data(), qd), Q.pks[i]);
+        pushTop(l2sq_score(vp, qvec.data(), qd), Q.pks[i]);
       }
       if (useFlat ? int64_t(flat.size()) >= k : int64_t(heap.size()) >= k) {
-        tau = std::sqrt(worstSq());
+        tau = float(std::sqrt(worstSq()));
         th = tau + eBound;
         th = (th * th) / (Q.step * Q.step);
         th *= (1.0f + 1e-6f);   // widen the threshold: only prune what is provably out
@@ -1937,13 +1937,13 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
         if (!PointGet(t.sch.id, Q.pks[i], data, len, tomb)) continue;
         const float* vp = payload_vec_ptr(sch, data, len, vc);
         if (!vp) continue;
-        float dsq = l2sq_simd(vp, qvec.data(), qd);
-        float prevWorst = nowFull ? worstSq() : std::numeric_limits<float>::max();
+        double dsq = l2sq_score(vp, qvec.data(), qd);
+        double prevWorst = nowFull ? worstSq() : std::numeric_limits<double>::max();
         pushTop(dsq, Q.pks[i]);
         bool isFull = useFlat ? int64_t(flat.size()) >= k : int64_t(heap.size()) >= k;
         // tighten tau when a row entered the TopK (or the collector just filled)
         if (isFull && (!nowFull || dsq < prevWorst)) {
-          tau = std::sqrt(worstSq());
+          tau = float(std::sqrt(worstSq()));
           th = tau + eBound;
           th = (th * th) / (Q.step * Q.step);
           th *= (1.0f + 1e-6f);
@@ -2014,7 +2014,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
     } else {
       for (auto& c : cands) {
         int64_t pk = t.index->Pk(c.second);
-        pushTop(c.first, pk);
+        pushTop(double(c.first), pk);
       }
     }
     }  // end HNSW branch
@@ -2202,14 +2202,14 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
                            (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
               vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
             }
-            if (vp) acc.add(l2sq_simd(vp, qvec.data(), d), e.first);
+            if (vp) acc.add(l2sq_score(vp, qvec.data(), d), e.first);
           } else {
             if (e.second == MemTable::TOMB) continue;
             const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
             uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
                          (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
             vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
-            if (vp) acc.add(l2sq_simd(vp, qvec.data(), d), e.first);
+            if (vp) acc.add(l2sq_score(vp, qvec.data(), d), e.first);
           }
         }
       };
@@ -2255,7 +2255,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
       }
       if (inlinePred && building) rfc->complete = true;
       // merge both accumulators: best-first sorted, then store worst-first
-      std::vector<std::pair<float, int64_t>> merged;
+      std::vector<std::pair<double, int64_t>> merged;
       merged.reserve(size_t(accs[0].n + accs[1].n));
       for (int a = 0; a < 2; a++) {
         for (int64_t i = 0; i < accs[a].n; i++) merged.push_back(accs[a].arr[i]);
@@ -2310,7 +2310,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
         // distance straight from the payload bytes (no per-row vector copy)
         const float* vp = payload_vec_ptr(sch, data, len, vc);
         if (!vp) { decfail++; continue; }
-        float distSq = l2sq_simd(vp, qvec.data(), d);
+        double distSq = l2sq_score(vp, qvec.data(), d);
         pushTop(distSq, pk);
       }
       if (getenv("MVDB_TRACE")) {
@@ -2887,9 +2887,10 @@ Err Engine::ExecSelect(const Stmt& s, bool annMode, ExecResult& out) {
       const Value& v = vals[size_t(distColIdx[i])];
       if (v.t != Value::T::Vec) { dists[i] = 0; continue; }
       // Double accumulation for the emitted distance: every legal float32
-      // vector has squared norm <= 128*FLT_MAX^2 ~ 1.5e79, far below DBL_MAX,
-      // so the result is always finite and no clamping/substitution is
-      // needed. Cost is O(K*d) per query (only the selected/output rows).
+      // vector has |diff| <= 2*FLT_MAX, so the squared sum is at most
+      // 4*d*FLT_MAX^2 (d<=1024 -> ~4.8e81), far below DBL_MAX; the result is
+      // always finite and no clamping/substitution is needed. Cost is O(K*d)
+      // per query (only the selected/output rows).
       const float* a = v.v.data();
       const float* b = distVecs[i].data();
       double acc = 0.0;
@@ -2904,7 +2905,7 @@ Err Engine::ExecSelect(const Stmt& s, bool annMode, ExecResult& out) {
   // fast path: ORDER BY distance LIMIT k (TopK), one sort key which is a dist
   if (!sortKeys.empty() && sortKeys[0].isDist && s.limit >= 0 && distVecs.size() >= 1) {
     int dIdx = sortKeys[0].distIdx;
-    std::vector<std::pair<float, int64_t>> topk;
+    std::vector<std::pair<double, int64_t>> topk;
     Err e = VecTopK(*t, distVecs[size_t(dIdx)], s.where.get(), s.limit, annMode, topk);
     if (e != Err::OK) return e;
     for (auto& pr : topk) {

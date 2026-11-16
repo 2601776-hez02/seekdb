@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Crash-recovery and robustness tests for minivectordb (official JSONL protocol)."""
 import json
+import math
 import os
 import signal
 import subprocess
@@ -347,7 +348,11 @@ def test_edge_values():
     r = db.send("SELECT * FROM t WHERE id = 8;")
     assert r["columns"] == ["id", "v", "s", "e"], r
     assert r["rows"][0][0:3] == [8, 7, "perm"], r
-    assert isinstance(r["rows"][0][3], list) and _f32(r["rows"][0][3]) == _f32([3.0, 4.0]), r
+    col = r["rows"][0][3]
+    assert isinstance(col, list) and len(col) == 2, r
+    assert all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in col), r
+    assert all(math.isfinite(x) for x in col), r
+    assert _f32(col) == _f32([3.0, 4.0]), r
     # duplicate pk via column list
     r = db.send("INSERT INTO t (id, v, s, e) VALUES (8, 1, 'dup', '[0,0]');")
     assert not r["ok"] and r["error"]["code"] == "duplicate_key", r

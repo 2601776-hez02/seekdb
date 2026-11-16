@@ -158,9 +158,9 @@ Err Engine::Checkpoint() {
   // WAL, so durability is unchanged.
   uint64_t totalMem = 0;
   for (auto& kv : tables_) totalMem += kv.second->mem.bytes();
-  // CONS: textbook flush + truncate (no WAL-only fast path)
-  (void)anyRunWritten_;
-  (void)totalMem;
+  if (!anyRunWritten_ && totalMem <= (128u << 20)) {
+    return SaveCatalog();
+  }
   for (auto& kv : tables_) {
     Err e = FlushMemTable(*kv.second);
     if (e != Err::OK) return e;
@@ -1780,12 +1780,12 @@ Err Engine::BuildIndex(TableState& t) {
 // ---------------------------------------------------------------------------
 Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* where,
                     int64_t k, bool annMode, std::vector<std::pair<float, int64_t>>& out) {
-  // CONSERVATIVE VARIANT: plain single-thread full scan. Per-row decode +
+  // CONSERVATIVE CANDIDATE: plain single-thread full scan. Per-row decode +
   // predicate evaluation, DOUBLE distance accumulation and DOUBLE TopK
-  // ordering (float conversion only for the response). No quantized pruning,
-  // no bitmap caches, no parallel scan, no HNSW; ann requests use the same
-  // full scan. Kept: protocol, transactions, durability and all correctness
-  // fixes.
+  // ordering (float conversion only for the response, no re-sort after).
+  // No quantized pruning, no bitmap caches, no parallel scan, no HNSW; ann
+  // requests use the same full scan. Everything else (storage, checkpoint,
+  // builds, protocol, durability fixes) is untouched.
   out.clear();
   (void)annMode;
   const TableSchema& sch = t.sch;

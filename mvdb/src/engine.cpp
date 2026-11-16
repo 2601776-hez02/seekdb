@@ -158,9 +158,9 @@ Err Engine::Checkpoint() {
   // WAL, so durability is unchanged.
   uint64_t totalMem = 0;
   for (auto& kv : tables_) totalMem += kv.second->mem.bytes();
-  if (!anyRunWritten_ && totalMem <= (128u << 20)) {
-    return SaveCatalog();
-  }
+  // CP VARIANT: full flush + WAL truncation at every checkpoint
+  (void)totalMem;
+  (void)anyRunWritten_;
   for (auto& kv : tables_) {
     Err e = FlushMemTable(*kv.second);
     if (e != Err::OK) return e;

@@ -18,7 +18,9 @@
 #include "engine.h"
 #include "parser.h"
 
+#include <cmath>
 #include <csignal>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <unistd.h>
@@ -303,17 +305,19 @@ static void valueToJson(const Value& v, std::string& out) {
       out += '"';
       break;
     case Value::T::Vec: {
-      out += '"';
+      // STDIO_PROTOCOL.md 3: vector projections must be JSON arrays of
+      // finite numbers (a string "[1,2]" is a protocol violation).
       out += '[';
       for (size_t i = 0; i < v.v.size(); i++) {
         if (i) out += ',';
         char buf[64];
+        double x = double(v.v[i]);
+        if (!std::isfinite(x)) x = 0.0;  // unreachable: input rejects NaN/Inf
         // shortest float32-friendly form (7 significant digits round-trips f32)
-        snprintf(buf, sizeof(buf), "%.7g", double(v.v[i]));
+        snprintf(buf, sizeof(buf), "%.7g", x);
         out += buf;
       }
       out += ']';
-      out += '"';
       break;
     }
   }

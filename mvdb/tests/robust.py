@@ -335,11 +335,11 @@ def test_edge_values():
     assert r["ok"] and r["affected_rows"] == 1, r
     r = db.send("SELECT id, v, s FROM t WHERE id = 8;")
     assert r["rows"] == [[8, 7, "perm"]], r
-    # SELECT * including the vector column (serialized as a string)
+    # SELECT * including the vector column (JSON array per STDIO_PROTOCOL 3)
     r = db.send("SELECT * FROM t WHERE id = 8;")
     assert r["columns"] == ["id", "v", "s", "e"], r
     assert r["rows"][0][0:3] == [8, 7, "perm"], r
-    assert isinstance(r["rows"][0][3], str) and r["rows"][0][3].startswith("[3,4"), r
+    assert isinstance(r["rows"][0][3], list) and [float(x) for x in r["rows"][0][3]] == [3.0, 4.0], r
     # duplicate pk via column list
     r = db.send("INSERT INTO t (id, v, s, e) VALUES (8, 1, 'dup', '[0,0]');")
     assert not r["ok"] and r["error"]["code"] == "duplicate_key", r
@@ -350,7 +350,7 @@ def test_edge_values():
     r = db.send("INSERT INTO t VALUES (9, 0, 'x', '[1e-3, -2.5E2]');")
     assert r["ok"], r
     r = db.send("SELECT e FROM t WHERE id = 9;")
-    assert r["rows"][0][0] == "[0.001,-250]", r
+    assert r["rows"][0][0] == [0.001, -250], r
     # ORDER BY varchar = code point order
     r = db.send("INSERT INTO t VALUES (10, 0, 'a', '[0,0]'), (11, 0, 'b', '[0,0]'), (12, 0, 'A', '[0,0]');")
     assert r["affected_rows"] == 3, r

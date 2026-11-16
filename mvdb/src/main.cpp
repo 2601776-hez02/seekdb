@@ -295,13 +295,7 @@ static void valueToJson(const Value& v, std::string& out) {
       break;
     case Value::T::F64: {
       char buf[64];
-      // JSON has no inf/nan. A float32 distance can overflow on huge
-      // components; clamp non-finite values so stdout stays valid JSON
-      // (protocol: "不输出 NaN、Infinity 等非标准 JSON 数值").
-      double x = v.f;
-      if (!std::isfinite(x)) x = (x > 0) ? 3.4028234663852886e38
-                                         : (x < 0 ? -3.4028234663852886e38 : 0.0);
-      snprintf(buf, sizeof(buf), "%.9g", x);
+      snprintf(buf, sizeof(buf), "%.9g", v.f);
       out += buf;
       break;
     }
@@ -312,16 +306,16 @@ static void valueToJson(const Value& v, std::string& out) {
       break;
     case Value::T::Vec: {
       // STDIO_PROTOCOL.md 3: vector projections must be JSON arrays of
-      // finite numbers (a string "[1,2]" is a protocol violation).
+      // finite numbers (a string "[1,2]" is a protocol violation). Stored
+      // values are validated finite on write (parse_vec_literal rejects
+      // float32 overflow), so %.9g always yields a finite JSON number.
       out += '[';
       for (size_t i = 0; i < v.v.size(); i++) {
         if (i) out += ',';
         char buf[64];
-        double x = double(v.v[i]);
-        if (!std::isfinite(x)) x = 0.0;  // unreachable: input rejects NaN/Inf
         // 9 significant digits = FLT_DECIMAL_DIG: guarantees that the text
         // parses back to the exact float32 stored value.
-        snprintf(buf, sizeof(buf), "%.9g", x);
+        snprintf(buf, sizeof(buf), "%.9g", double(v.v[i]));
         out += buf;
       }
       out += ']';

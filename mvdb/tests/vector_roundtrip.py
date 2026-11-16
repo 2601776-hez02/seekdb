@@ -100,6 +100,27 @@ def main():
     check_vec(db.send("SELECT e FROM p WHERE id = 2;"), VECTORS[1], "after-restart id=2")
     check_vec(db.send("SELECT e FROM p WHERE id = 3;"), VECTORS[2], "after-restart id=3")
     check_vec(db.send("SELECT e FROM q WHERE id = 1;"), WIDE, "after-restart wide-128")
+
+    # ---- large legal magnitudes: emitted distance = double reference ----
+    # (a) input must reject float32 overflow / non-finite literals
+    assert db.send("CREATE TABLE big (id BIGINT PRIMARY KEY, e VECTOR(4));")["ok"]
+    BIG = [(1, [1.0, 0.0, 0.0, 0.0]),
+           (2, [1e9, 0.0, 0.0, 0.0]),
+           (3, [1e19, 0.0, 0.0, 0.0]),
+           (4, [1e30, 0.0, 0.0, 0.0])]
+    for pk, v in BIG:
+        assert db.send("INSERT INTO big VALUES (%d, '%s');" % (pk, lit(v)))["ok"]
+    for bad in ("[1e39,0,0,0]", "[nan,0,0,0]", "[inf,0,0,0]"):
+        r = db.send("INSERT INTO big VALUES (9, '%s');" % bad)
+        assert not r["ok"] and r["error"]["code"] == "invalid_vector", (bad, r)
+    # (b) distance values and order must match an independent double reference
+    r = db.send("SELECT id, L2_DISTANCE(e,'[0,0,0,0]') AS d FROM big ORDER BY d LIMIT 10;")
+    got = [(int(row[0]), float(row[1])) for row in r["rows"]]
+    ref = sorted((pk, math.sqrt(sum(float(a) * float(a) for a in v))) for pk, v in BIG)
+    assert [g[0] for g in got] == [x[0] for x in ref], (got, ref)
+    for (gpk, gd), (rpk, rd) in zip(got, ref):
+        assert gpk == rpk, (got, ref)
+        assert abs(gd - rd) <= 1e-6 * max(1.0, abs(rd)), (gpk, gd, rd)
     db.stop()
     print("VECTOR ROUND-TRIP OK (direct/alias/select-star, update, restart, 128d)")
 

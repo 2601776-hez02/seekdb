@@ -2886,8 +2886,18 @@ Err Engine::ExecSelect(const Stmt& s, bool annMode, ExecResult& out) {
     for (size_t i = 0; i < distVecs.size(); i++) {
       const Value& v = vals[size_t(distColIdx[i])];
       if (v.t != Value::T::Vec) { dists[i] = 0; continue; }
-      float d2 = l2sq_simd(v.v.data(), distVecs[i].data(), v.v.size());
-      dists[i] = std::sqrt(double(d2));
+      // Double accumulation for the emitted distance: every legal float32
+      // vector has squared norm <= 128*FLT_MAX^2 ~ 1.5e79, far below DBL_MAX,
+      // so the result is always finite and no clamping/substitution is
+      // needed. Cost is O(K*d) per query (only the selected/output rows).
+      const float* a = v.v.data();
+      const float* b = distVecs[i].data();
+      double acc = 0.0;
+      for (size_t j = 0; j < v.v.size(); j++) {
+        double diff = double(a[j]) - double(b[j]);
+        acc += diff * diff;
+      }
+      dists[i] = std::sqrt(acc);
     }
   };
 

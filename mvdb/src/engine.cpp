@@ -1875,6 +1875,15 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
   }
   if (danger) useAnn = false;   // no HNSW graph, no quant pruning
 
+  // Exact-mode acceleration: the quantized index prunes with a conservative
+  // lower bound and recomputes every survivor exactly, so its top-K is
+  // bit-identical to the exact scan. Exact requests may use it too, but only
+  // when unfiltered, the index is current and the numeric gate says the data
+  // is safe; the danger gate above keeps overflow handling unchanged.
+  bool quantExact = !annMode && !where && !danger && t.indexReady && t.quant &&
+                    (!t.indexAsync || t.indexEpoch == dataEpoch_) &&
+                    !(inTxn_ && overlay_.count(t.sch.id) != 0);
+
   // Top-K collector. The benchmark K is small (typically 10); a per-row
   // std::priority_queue push/pop measured ~27% of an exact query at 1M rows,
   // so small K keeps a flat worst-first array instead (1 compare per row).
@@ -1931,7 +1940,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
     }
   };
 
-  if (useAnn) {
+  if (useAnn || quantExact) {
     if (t.quant) {
       statAnnQuant_++;
       // Quantized safe-pruned scan: INT8 distance lower bounds via the
@@ -2083,7 +2092,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
     }
     }  // end HNSW branch
   }
-  if (!useAnn) {
+  if (!useAnn && !quantExact) {
     statExact_++;
     std::vector<uint8_t> mask;
     ExactFilterCache* fc = nullptr;

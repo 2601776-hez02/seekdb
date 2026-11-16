@@ -11,6 +11,14 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from transport import Db as _Base  # noqa: E402
 
+import struct  # noqa: E402
+
+
+def _f32(vals):
+    """Round numbers to float32 so text output can be asserted for exact
+    round-trip (protocol: vector projections keep the stored float32 value)."""
+    return [struct.unpack("<f", struct.pack("<f", float(x)))[0] for x in vals]
+
 BINARY = sys.argv[1]
 
 
@@ -339,7 +347,7 @@ def test_edge_values():
     r = db.send("SELECT * FROM t WHERE id = 8;")
     assert r["columns"] == ["id", "v", "s", "e"], r
     assert r["rows"][0][0:3] == [8, 7, "perm"], r
-    assert isinstance(r["rows"][0][3], list) and [float(x) for x in r["rows"][0][3]] == [3.0, 4.0], r
+    assert isinstance(r["rows"][0][3], list) and _f32(r["rows"][0][3]) == _f32([3.0, 4.0]), r
     # duplicate pk via column list
     r = db.send("INSERT INTO t (id, v, s, e) VALUES (8, 1, 'dup', '[0,0]');")
     assert not r["ok"] and r["error"]["code"] == "duplicate_key", r
@@ -350,7 +358,15 @@ def test_edge_values():
     r = db.send("INSERT INTO t VALUES (9, 0, 'x', '[1e-3, -2.5E2]');")
     assert r["ok"], r
     r = db.send("SELECT e FROM t WHERE id = 9;")
-    assert r["rows"][0][0] == [0.001, -250], r
+    # %.9g text must round-trip to the exact stored float32 value
+    assert len(r["rows"][0][0]) == 2 and _f32(r["rows"][0][0]) == _f32([0.001, -250]), r
+    # float32 distance overflow: stdout must stay valid JSON (no inf/nan)
+    r = db.send("INSERT INTO t VALUES (13, 0, 'x', '[3.4e38, 0]');")
+    assert r["ok"], r
+    r = db.send("SELECT L2_DISTANCE(e,'[0,0]') AS d FROM t WHERE id = 13;")
+    assert r["ok"], r
+    d = r["rows"][0][0]
+    assert isinstance(d, (int, float)) and d == d and abs(d) < 1e39, r
     # ORDER BY varchar = code point order
     r = db.send("INSERT INTO t VALUES (10, 0, 'a', '[0,0]'), (11, 0, 'b', '[0,0]'), (12, 0, 'A', '[0,0]');")
     assert r["affected_rows"] == 3, r

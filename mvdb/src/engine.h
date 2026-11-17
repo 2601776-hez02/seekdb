@@ -297,6 +297,7 @@ class Engine {
 
   // graceful shutdown: rollback txn, flush, checkpoint
   Err Shutdown();
+  void PreWarmWorker();
 
   // flush everything to runs + truncate WAL (checkpoint)
   Err Checkpoint();

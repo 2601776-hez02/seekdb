@@ -696,6 +696,8 @@ Err Engine::FlushMemTable(TableState& t) {
   anyRunWritten_ = true;
   t.runSeq++;
   t.mem.Clear();
+  t.memSortedCache.clear();
+  t.memSortedCount = 0;
   t.memMinPk = INT64_MAX;
   t.memMaxPk = INT64_MIN;
   // append the freshly written run instead of re-opening every run
@@ -1335,10 +1337,19 @@ struct ScanCtx {
       }
     }
     if (!t->mem.empty()) {
-      memSorted.reserve(t->mem.map_.size());
-      for (auto& kv : t->mem.map_) memSorted.push_back(kv);
-      std::sort(memSorted.begin(), memSorted.end(),
-                [](const auto& a, const auto& b) { return a.first < b.first; });
+      // Cache committed memtable order; overlay remains a separate stream.
+      // Copy offsets into this scan so later cache invalidation cannot alias it.
+      if (t->memSortedEpoch != e->DataEpoch() ||
+          t->memSortedCount != t->mem.map_.size()) {
+        t->memSortedCache.clear();
+        t->memSortedCache.reserve(t->mem.map_.size());
+        for (auto& kv : t->mem.map_) t->memSortedCache.push_back(kv);
+        std::sort(t->memSortedCache.begin(), t->memSortedCache.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        t->memSortedEpoch = e->DataEpoch();
+        t->memSortedCount = t->mem.map_.size();
+      }
+      memSorted = t->memSortedCache;
     }
     rcs.resize(t->runs.size());
     for (size_t i = 0; i < t->runs.size(); i++) rcs[i].Reset(&t->runs[i]);
@@ -1441,6 +1452,8 @@ struct ScanCtx {
           if (c.ok && c.pk == best) {
             if (c.flags & 1) suppressed = true;
             else if (!emitted) { rdata = c.data; rlen = c.len; emitted = true; }
+            // The newest matching run decides visibility, including tombstones.
+            break;
           }
         }
       }
@@ -2668,7 +2681,7 @@ Err Engine::ExecInsert(const Stmt& s, bool annMode, ExecResult& out) {
     const char* dummy;
     size_t dlen;
     bool dmb;
-    if (PointGet(t->sch.id, pk, dummy, dlen, dmb)) return Err::DuplicateKey;
+    if (PointGet(t->sch.id, pk, dummy, dlen, dmb) && !dmb) return Err::DuplicateKey;
     seen.insert(pk);
     Mut m;
     m.tableId = t->sch.id;

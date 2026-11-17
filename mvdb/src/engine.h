@@ -176,6 +176,7 @@ class Engine {
   Err Checkpoint();
 
   bool InTxn() const { return inTxn_; }
+  uint64_t DataEpoch() const { return dataEpoch_; }
   const std::unordered_map<int64_t, OverlayMap>& Overlays() const { return overlay_; }
   const TableState* GetTable(const std::string& name) const {
     auto it = byName_.find(name);

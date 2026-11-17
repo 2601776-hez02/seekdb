@@ -31,8 +31,98 @@ struct MemTable {
   // chunks keep the slack below one chunk and avoid the O(n) realloc copies
   static constexpr size_t CHUNK = 1u << 20;
   std::vector<std::unique_ptr<uint8_t[]>> chunks_;
-  std::unordered_map<int64_t, uint32_t> map_;
   size_t size_ = 0;  // logical end offset (offsets stay global across chunks)
+
+  // flat open-addressing map pk -> chunk offset: the unordered_map's per-node
+  // overhead (~48B/row) is ~0.4MB of the M peak at the 10K benchmark load;
+  // linear probing with a 0.7 load factor keeps it near 0.2MB
+  struct FlatMap {
+    std::vector<uint64_t> k_;
+    std::vector<uint32_t> v_;
+    std::vector<uint64_t> occ_;  // occupancy bits, one per slot
+    size_t mask_ = 0;
+    size_t cnt_ = 0;
+    static constexpr size_t MIN = 64;
+    void clear() {
+      k_.clear();
+      v_.clear();
+      occ_.clear();
+      mask_ = 0;
+      cnt_ = 0;
+    }
+    size_t size() const { return cnt_; }
+    bool empty() const { return cnt_ == 0; }
+    static size_t hash64(uint64_t x) {
+      x ^= x >> 33;
+      x *= 0xff51afd7ed558ccdULL;
+      x ^= x >> 33;
+      return size_t(x);
+    }
+    void rehashTo(size_t cap) {
+      std::vector<uint64_t> nk(cap, 0);
+      std::vector<uint32_t> nv(cap, 0);
+      std::vector<uint64_t> no((cap + 63) / 64, 0);
+      std::vector<uint64_t> ok = std::move(k_);
+      std::vector<uint32_t> ov = std::move(v_);
+      std::vector<uint64_t> oo = std::move(occ_);
+      const size_t omask = mask_;
+      k_ = std::move(nk);
+      v_ = std::move(nv);
+      occ_ = std::move(no);
+      mask_ = cap - 1;
+      cnt_ = 0;
+      if (!oo.empty()) {
+        for (size_t i = 0; i <= omask; i++) {
+          const size_t w = i >> 6, b = i & 63;
+          if ((oo[w] >> b) & 1) insertNoCheck(int64_t(ok[i]), ov[i]);
+        }
+      }
+    }
+    void insertNoCheck(int64_t pk, uint32_t val) {
+      size_t i = hash64(uint64_t(pk)) & mask_;
+      while ((occ_[i >> 6] >> (i & 63)) & 1) i = (i + 1) & mask_;
+      k_[i] = uint64_t(pk);
+      v_[i] = val;
+      occ_[i >> 6] |= 1ull << (i & 63);
+      cnt_++;
+    }
+    void set(int64_t pk, uint32_t val) {
+      if (mask_ == 0 || cnt_ * 10 >= mask_ * 7 + 7)
+        rehashTo(mask_ ? (mask_ + 1) * 2 : MIN);
+      size_t i = hash64(uint64_t(pk)) & mask_;
+      while ((occ_[i >> 6] >> (i & 63)) & 1) {
+        if (k_[i] == uint64_t(pk)) {
+          v_[i] = val;
+          return;
+        }
+        i = (i + 1) & mask_;
+      }
+      k_[i] = uint64_t(pk);
+      v_[i] = val;
+      occ_[i >> 6] |= 1ull << (i & 63);
+      cnt_++;
+    }
+    bool get(int64_t pk, uint32_t& out) const {
+      if (cnt_ == 0) return false;
+      size_t i = hash64(uint64_t(pk)) & mask_;
+      while ((occ_[i >> 6] >> (i & 63)) & 1) {
+        if (k_[i] == uint64_t(pk)) {
+          out = v_[i];
+          return true;
+        }
+        i = (i + 1) & mask_;
+      }
+      return false;
+    }
+    template <class F>
+    void forEach(F f) const {
+      for (size_t i = 0; i <= mask_; i++) {
+        const size_t w = i >> 6, b = i & 63;
+        if ((occ_[w] >> b) & 1) f(int64_t(k_[i]), v_[i]);
+      }
+    }
+  };
+  FlatMap map_;
 
   size_t bytes() const { return size_; }
   size_t capacity() const { return chunks_.size() * CHUNK; }
@@ -54,7 +144,7 @@ struct MemTable {
       size_ = start;
     }
     uint8_t* p = chunks_[idx].get() + (start & (CHUNK - 1));
-    map_[pk] = uint32_t(start);
+    map_.set(pk, uint32_t(start));
     p[0] = uint8_t(payload.size() & 0xFF);
     p[1] = uint8_t((payload.size() >> 8) & 0xFF);
     p[2] = uint8_t((payload.size() >> 16) & 0xFF);
@@ -63,12 +153,15 @@ struct MemTable {
     std::memcpy(p + 12, payload.data(), payload.size());
     size_ = start + entry;
   }
-  void Del(int64_t pk) { map_[pk] = TOMB; }
+  void Del(int64_t pk) { map_.set(pk, TOMB); }
   bool Get(int64_t pk, const char*& data, size_t& len, bool& tomb) const {
-    auto it = map_.find(pk);
-    if (it == map_.end()) return false;
-    if (it->second == TOMB) { tomb = true; return true; }
-    const uint8_t* base = at(it->second);
+    uint32_t off;
+    if (!map_.get(pk, off)) return false;
+    if (off == TOMB) {
+      tomb = true;
+      return true;
+    }
+    const uint8_t* base = at(off);
     uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
                  (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
     data = (const char*)(base + 12);
@@ -76,7 +169,11 @@ struct MemTable {
     tomb = false;
     return true;
   }
-  void Clear() { chunks_.clear(); map_.clear(); size_ = 0; }
+  void Clear() {
+    chunks_.clear();
+    map_.clear();
+    size_ = 0;
+  }
   bool empty() const { return map_.empty(); }
 };
 

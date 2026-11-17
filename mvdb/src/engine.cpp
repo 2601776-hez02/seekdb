@@ -703,7 +703,7 @@ Err Engine::FlushMemTable(TableState& t) {
   if (t.mem.empty()) return Err::OK;
   std::vector<std::pair<int64_t, uint32_t>> entries;
   entries.reserve(t.mem.map_.size());
-  for (auto& kv : t.mem.map_) entries.push_back(kv);
+  t.mem.map_.forEach([&](int64_t pk, uint32_t off) { entries.push_back({pk, off}); });
   std::sort(entries.begin(), entries.end(),
             [](const auto& a, const auto& b) { return a.first < b.first; });
 
@@ -1474,7 +1474,7 @@ struct ScanCtx {
           t->memSortedCount != t->mem.map_.size()) {
         t->memSortedCache.clear();
         t->memSortedCache.reserve(t->mem.map_.size());
-        for (auto& kv : t->mem.map_) t->memSortedCache.push_back(kv);
+        t->mem.map_.forEach([&](int64_t pk, uint32_t off) { t->memSortedCache.push_back({pk, off}); });
         std::sort(t->memSortedCache.begin(), t->memSortedCache.end(),
                   [](const auto& a, const auto& b) { return a.first < b.first; });
         t->memSortedEpoch = e->DataEpoch();
@@ -2474,7 +2474,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
       if (t.memSortedEpoch != dataEpoch_ || t.memSortedCount != t.mem.map_.size()) {
         t.memSortedCache.clear();
         t.memSortedCache.reserve(t.mem.map_.size());
-        for (auto& kv : t.mem.map_) t.memSortedCache.push_back(kv);
+        t.mem.map_.forEach([&](int64_t pk, uint32_t off) { t.memSortedCache.push_back({pk, off}); });
         std::sort(t.memSortedCache.begin(), t.memSortedCache.end(),
                   [](const auto& a, const auto& b) { return a.first < b.first; });
         t.memSortedEpoch = dataEpoch_;
@@ -2581,7 +2581,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
         if (t.memSortedEpoch != dataEpoch_ || t.memSortedCount != t.mem.map_.size()) {
           t.memSortedCache.clear();
           t.memSortedCache.reserve(t.mem.map_.size());
-          for (auto& kv : t.mem.map_) t.memSortedCache.push_back(kv);
+          t.mem.map_.forEach([&](int64_t pk, uint32_t off) { t.memSortedCache.push_back({pk, off}); });
           std::sort(t.memSortedCache.begin(), t.memSortedCache.end(),
                     [](const auto& a, const auto& b) { return a.first < b.first; });
           t.memSortedEpoch = dataEpoch_;

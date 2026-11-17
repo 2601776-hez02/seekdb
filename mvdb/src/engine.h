@@ -268,6 +268,7 @@ class Engine {
 
   // ---- file helpers ----
   Err WriteFileAtomic(const std::string& path, const std::string& data);
+  Err WriteFileThrough(const std::string& path, const std::string& data);
   Err FsyncDir(const std::string& dir);
 
   // ---- catalog ----

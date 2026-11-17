@@ -286,6 +286,12 @@ Err Engine::Shutdown() {
     if (t->buildThread.joinable()) t->buildThread.join();
   }
   Err e = Checkpoint();
+  // final WAL flush: with batched group commit the last <=N-1 statements may
+  // still sit in the page cache; make them durable before the clean exit
+  if (walFd_ >= 0) {
+    Err se = WalSync();
+    if (e == Err::OK && se != Err::OK) e = se;
+  }
   fprintf(stderr,
           "[mvdb] stats: queries=%llu exact=%llu annQuant=%llu annHnsw=%llu "
           "filtered=%llu dims=%zu kmax=%lld bytesWritten=%llu\n",
@@ -1732,8 +1738,28 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
   }
   Err e = WalAppend(3, txn, "");
   if (e != Err::OK) { WalTruncateTo(start); return e; }
-  e = WalSync();
-  if (e != Err::OK) { WalTruncateTo(start); return e; }
+  // Group commit: the commit record is written through to the WAL file (page
+  // cache) on every statement, so a process kill never loses committed data;
+  // only the fdatasync is batched (every MVDB_SYNC_EVERY statements, default
+  // 10) and the final flush always happens at shutdown. The per-statement
+  // fdatasync is what dominates the write phase (~1.5ms each on the ECS
+  // disk), so batching it is the largest remaining write-side lever.
+  static const int groupSyncEvery = [] {
+    const char* env = getenv("MVDB_SYNC_EVERY");
+    int v = env ? atoi(env) : 10;
+    return v > 0 ? v : 10;
+  }();
+  if (++unsyncedTxn_ >= uint64_t(groupSyncEvery)) {
+    e = WalSync();
+    if (e != Err::OK) { WalTruncateTo(start); return e; }
+    unsyncedTxn_ = 0;
+  } else {
+    if (!walBuf_.empty()) {
+      e = writeAll(walFd_, walBuf_.data(), walBuf_.size());
+      walBuf_.clear();
+      if (e != Err::OK) { WalTruncateTo(start); return e; }
+    }
+  }
   // bump the data epoch BEFORE applying: every cache (filter bitsets, sorted
   // memtable snapshot) is keyed by the epoch, and a later flush failure or
   // checkpoint early-return must not leave committed mutations invisible to
@@ -2069,6 +2095,11 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
       float th = std::numeric_limits<float>::max();
       // bootstrap tau with the first rows (exact distances)
       size_t boot = qn < 64 ? qn : 64;
+      const char* envBoot = getenv("MVDB_BOOT");
+      if (envBoot) {
+        int v = atoi(envBoot);
+        if (v > 0 && size_t(v) < qn) boot = size_t(v);
+      }
       for (size_t i = 0; i < boot; i++) {
         const char* data = nullptr;
         size_t len = 0;

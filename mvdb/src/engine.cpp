@@ -301,6 +301,15 @@ Err Engine::Shutdown() {
           (unsigned long long)statFiltered_, (unsigned long)statD_,
           (long long)statKMax_,
           (unsigned long long)g_bytesWritten.load(std::memory_order_relaxed));
+  if (getenv("MVDB_MDEBUG")) {
+    for (auto& kv : tables_) {
+      const auto* t = kv.second.get();
+      fprintf(stderr, "[mvdb] mdebug table=%lld memBytes=%zu memCap=%zu codes=%zu sortCache=%zu\n",
+              (long long)kv.first, t->mem.bytes(), t->mem.capacity(),
+              t->quant ? t->quant->codes.size() : 0,
+              t->memSortedCache.size());
+    }
+  }
   if (walFd_ >= 0) { ::close(walFd_); walFd_ = -1; }
   return e;
 }
@@ -699,7 +708,7 @@ Err Engine::FlushMemTable(TableState& t) {
             [](const auto& a, const auto& b) { return a.first < b.first; });
 
   std::string dat;
-  dat.reserve(t.mem.buf_.size() + entries.size() * 13 + 8);
+  dat.reserve(t.mem.bytes() + entries.size() * 13 + 8);
   put_u64(dat, uint64_t(entries.size()));
   for (auto& e : entries) {
     int64_t pk = e.first;
@@ -708,9 +717,20 @@ Err Engine::FlushMemTable(TableState& t) {
       put_u8(dat, 1);   // tombstone
       put_u32(dat, 0);
     } else {
-      const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
+      uint64_t off = e.second;
+      if (off + 12 > t.mem.bytes()) {
+        fprintf(stderr, "[mvdb] flush BAD offset=%llu bytes=%zu nchunks=%zu\n",
+                (unsigned long long)off, t.mem.bytes(), t.mem.chunks_.size());
+        abort();
+      }
+      const uint8_t* base = t.mem.at(e.second);
       uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
                    (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
+      if (off + 12 + uint64_t(l) > t.mem.bytes()) {
+        fprintf(stderr, "[mvdb] flush BAD len=%u at off=%llu bytes=%zu\n",
+                l, (unsigned long long)off, t.mem.bytes());
+        abort();
+      }
       put_i64(dat, pk);
       put_u8(dat, 0);
       put_u32(dat, l);
@@ -1549,7 +1569,7 @@ struct ScanCtx {
       if (memIdx < memSorted.size() && memSorted[memIdx].first == best) {
         if (memSorted[memIdx].second == MemTable::TOMB) suppressed = true;
         else {
-          const uint8_t* base = (const uint8_t*)t->mem.buf_.data() + memSorted[memIdx].second;
+          const uint8_t* base = t->mem.at(memSorted[memIdx].second);
           uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
                        (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
           rdata = (const char*)(base + 12);
@@ -2485,7 +2505,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
         for (size_t mi = 0; mi < ms.size(); mi++) {
           const auto& e = ms[mi];
           if (e.second == MemTable::TOMB) continue;
-          const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
+          const uint8_t* base = t.mem.at(e.second);
           uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
                        (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
           const char* s = nullptr;
@@ -2505,7 +2525,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
           if (!bits[mi]) continue;
           const auto& e = ms[mi];
           if (e.second == MemTable::TOMB) continue;
-          const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
+          const uint8_t* base = t.mem.at(e.second);
           uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
                        (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
           const float* vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
@@ -2614,7 +2634,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
               if (e.second == MemTable::TOMB) {
                 match = false;
               } else {
-                const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
+                const uint8_t* base = t.mem.at(e.second);
                 uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
                              (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
                 const char* s = nullptr;
@@ -2632,7 +2652,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
             if (!match) continue;
             if (e.second == MemTable::TOMB) continue;
             if (!vp) {
-              const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
+              const uint8_t* base = t.mem.at(e.second);
               uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
                            (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
               vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
@@ -2640,7 +2660,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
             if (vp) acc.add(danger ? l2sq_double(vp, qvec.data(), d) : l2sq_score(vp, qvec.data(), d), e.first);
           } else {
             if (e.second == MemTable::TOMB) continue;
-            const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
+            const uint8_t* base = t.mem.at(e.second);
             uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
                          (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
             vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);

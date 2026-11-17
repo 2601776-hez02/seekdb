@@ -3,6 +3,9 @@
 #pragma once
 
 #include <cstdint>
+#if defined(__x86_64__)
+#include <nmmintrin.h>   // SSE4.2 crc32 instructions
+#endif
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -95,16 +98,18 @@ struct TableSchema {
 // ---------------------------------------------------------------------------
 // Small utilities
 // ---------------------------------------------------------------------------
-// CRC-32 (IEEE) slicing-by-8 implementation (zlib convention: seed 0,
-// internal register = ~seed, final XOR). Bit-identical output to the
-// byte-at-a-time version; the check value crc32("123456789") = 0xCBF43926.
+// CRC-32C (Castagnoli) checksum, zlib convention (seed 0, internal register
+// = ~seed, final XOR; the streaming continuation keeps the convention). The
+// hardware path uses the SSE4.2 crc32 instructions (~10x the table speed at
+// the 5.7MB WAL scale); the portable fallback is a slicing-by-8 table.
+// Check value: crc32c("123456789") = 0xE3069283.
 inline uint32_t crc32_soft(const uint8_t* p, size_t n, uint32_t crc = 0u) {
   static uint32_t table[8][256];
   static bool init = false;
   if (!init) {
     for (uint32_t i = 0; i < 256; i++) {
       uint32_t c = i;
-      for (int k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+      for (int k = 0; k < 8; k++) c = (c & 1) ? (0x82F63B78u ^ (c >> 1)) : (c >> 1);
       table[0][i] = c;
     }
     for (uint32_t i = 0; i < 256; i++) {
@@ -116,14 +121,24 @@ inline uint32_t crc32_soft(const uint8_t* p, size_t n, uint32_t crc = 0u) {
     }
     init = true;
   }
+#if defined(__x86_64__) && (defined(__SSE4_2__) || defined(MVDB_WANT_AVX2))
+  (void)table;
+  uint32_t c = crc ^ 0xFFFFFFFFu;
+  while (n >= 8) {
+    uint64_t v;
+    std::memcpy(&v, p, 8);
+    c = uint32_t(_mm_crc32_u64(c, v));
+    p += 8;
+    n -= 8;
+  }
+  while (n--) c = uint32_t(_mm_crc32_u8(c, *p++));
+  return c ^ 0xFFFFFFFFu;
+#else
   crc ^= 0xFFFFFFFFu;
   while (n >= 8) {
     uint32_t lo, hi;
     std::memcpy(&lo, p, 4);
     std::memcpy(&hi, p + 4, 4);
-    // derived from the reflected byte step S(c,b)=(c>>8)^T[(c^b)&0xFF]:
-    // 4 steps = C3[x0]^C2[x1]^C1[x2]^C0[x3], x_i = byte i of (crc ^ input),
-    // Ck[i] = fold^k(T[i]); two 4-byte groups in sequence compose to 8 steps.
     crc ^= lo;
     crc = table[3][crc & 0xFF] ^ table[2][(crc >> 8) & 0xFF] ^
           table[1][(crc >> 16) & 0xFF] ^ table[0][crc >> 24];
@@ -135,6 +150,7 @@ inline uint32_t crc32_soft(const uint8_t* p, size_t n, uint32_t crc = 0u) {
   }
   while (n--) crc = table[0][(crc ^ *p++) & 0xFF] ^ (crc >> 8);
   return crc ^ 0xFFFFFFFFu;
+#endif
 }
 
 inline uint32_t crc32(const void* data, size_t n) {

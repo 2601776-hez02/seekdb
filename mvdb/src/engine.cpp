@@ -1750,13 +1750,15 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
   // Group commit: the commit record is written through to the WAL file (page
   // cache) on every statement, so a process kill never loses committed data;
   // only the fdatasync is batched (every MVDB_SYNC_EVERY statements, default
-  // 10) and the final flush always happens at shutdown. The per-statement
-  // fdatasync is what dominates the write phase (~1.5ms each on the ECS
-  // disk), so batching it is the largest remaining write-side lever.
+  // 20) and the final flush always happens at shutdown. The official crash
+  // model is process-kill-only ("不模拟断电"), so the unsynced tail always
+  // survives in the page cache; the per-statement fdatasync is what dominates
+  // the write phase (~1.5ms each on the ECS disk), so batching it is the
+  // largest write-side lever.
   static const int groupSyncEvery = [] {
     const char* env = getenv("MVDB_SYNC_EVERY");
-    int v = env ? atoi(env) : 10;
-    return v > 0 ? v : 10;
+    int v = env ? atoi(env) : 20;
+    return v > 0 ? v : 20;
   }();
   if (++unsyncedTxn_ >= uint64_t(groupSyncEvery)) {
     e = WalSync();

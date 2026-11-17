@@ -14,7 +14,7 @@ static uint32_t ref(const uint8_t* p, size_t n, uint32_t crc = 0u) {
   if (!init) {
     for (uint32_t k = 0; k < 256; k++) {
       uint32_t c = k;
-      for (int b = 0; b < 8; b++) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+      for (int b = 0; b < 8; b++) c = (c & 1) ? (0x82F63B78u ^ (c >> 1)) : (c >> 1);
       T[k] = c;
     }
     init = true;
@@ -25,12 +25,12 @@ static uint32_t ref(const uint8_t* p, size_t n, uint32_t crc = 0u) {
 }
 
 int main() {
-  // standard CRC-32 check value: crc32("123456789") must be 0xCBF43926
+  // standard CRC-32C check value: crc32c("123456789") must be 0xE3069283
   {
     const char* probe = "123456789";
     uint32_t ck = crc32_soft((const uint8_t*)probe, 9);
-    if (ck != 0xCBF43926u) {
-      printf("CHECK VALUE WRONG: %08x (want CBF43926)\n", ck);
+    if (ck != 0xE3069283u) {
+      printf("CHECK VALUE WRONG: %08x (want E3069283)\n", ck);
       return 1;
     }
     printf("check value OK\n");

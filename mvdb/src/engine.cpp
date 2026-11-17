@@ -586,10 +586,11 @@ Err Engine::WalRecover() {
       if (crc32(head.data(), head.size()) != crc) { validEnd = off; break; }
       // commit points: txn COMMIT records, DDL records (the DDL catalog is
       // separately durable: SaveCatalog fsyncs it, so a DDL record stands on
-      // its own without a trailing COMMIT) and fused BATCH records (type 4:
-      // the CRC covers every row, so a complete batch commits whole and a
-      // torn batch is dropped whole)
-      if (head.size() >= 1 && (head[0] == 3 || head[0] == 1 || head[0] == 4)) {
+      // its own without a trailing COMMIT) and fused BATCH records (types
+      // 4/5: the CRC covers every row, so a complete batch commits whole and
+      // a torn batch is dropped whole)
+      if (head.size() >= 1 && (head[0] == 3 || head[0] == 1 || head[0] == 4 ||
+                               head[0] == 5)) {
         lastCommitted = off + 12 + len;
       }
       off += 12 + len;
@@ -667,8 +668,31 @@ Err Engine::WalRecover() {
       Err e2 = applyRow(tid, flags, pk, head.substr(26));
       if (e2 != Err::OK) return e2;
     } else if (type == 4) {
-      // fused batch record: [type][txn i64][count u32][rows: tid i64|flags u8|
-      // pk i64|plen u32|payload]
+      // fused single-table batch: [type][txn i64][count u32][table i64]
+      // [rows: flags u8|pk i64|plen u32|payload]
+      if (head.size() < 21) break;
+      int64_t tid = 0;
+      uint32_t count = 0;
+      std::memcpy(&count, head.data() + 9, 4);
+      std::memcpy(&tid, head.data() + 13, 8);
+      size_t pos = 21;
+      for (uint32_t i = 0; i < count; i++) {
+        if (pos + 13 > head.size()) break;
+        int64_t pk = 0;
+        uint8_t flags = 0;
+        uint32_t pl = 0;
+        std::memcpy(&flags, head.data() + pos, 1);
+        std::memcpy(&pk, head.data() + pos + 1, 8);
+        std::memcpy(&pl, head.data() + pos + 9, 4);
+        pos += 13;
+        if (pos + pl > head.size()) break;
+        Err e2 = applyRow(tid, flags, pk, head.substr(pos, pl));
+        if (e2 != Err::OK) return e2;
+        pos += pl;
+      }
+    } else if (type == 5) {
+      // fused multi-table batch (explicit-txn commits): [type][txn i64]
+      // [count u32][rows: tid i64|flags u8|pk i64|plen u32|payload]
       if (head.size() < 13) break;
       size_t pos = 13;
       uint32_t count = 0;
@@ -1825,9 +1849,20 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
   // (the row records cost 21B each, ~210KB of B_w at the official load).
   // The record is the atomic unit in recovery: the CRC covers every row, so
   // a torn batch is dropped whole and a complete batch replays whole.
+  // Single-table batches (every autocommit statement) store the table id
+  // once (type 4); an explicit-txn commit may span tables and keeps it per
+  // row (type 5).
   {
-    size_t body = 1 + 8 + 4;  // type 4 | txn | count
-    for (const Mut& m : batch) body += 8 + 1 + 8 + 4 + m.payload.size();
+    int64_t tbl0 = batch.empty() ? 0 : batch[0].tableId;
+    bool singleTbl = true;
+    for (const Mut& m : batch) {
+      if (m.tableId != tbl0) { singleTbl = false; break; }
+    }
+    size_t body = 1 + 8 + 4;  // type | txn | count
+    if (singleTbl) body += 8;
+    for (const Mut& m : batch) {
+      body += (singleTbl ? 0 : 8) + 1 + 8 + 4 + m.payload.size();
+    }
     uint32_t payLen = uint32_t(body);
     size_t s2 = walBuf_.size();
     char h[12];
@@ -1836,13 +1871,14 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
     std::memcpy(h + 4, &payLen, 4);
     std::memcpy(h + 8, &zero, 4);
     walBuf_.append(h, 12);
-    uint8_t t4 = 4;
-    walBuf_.append((const char*)&t4, 1);
+    uint8_t t = singleTbl ? 4 : 5;
+    walBuf_.append((const char*)&t, 1);
     walBuf_.append((const char*)&txn, 8);
     uint32_t count = uint32_t(batch.size());
     walBuf_.append((const char*)&count, 4);
+    if (singleTbl) walBuf_.append((const char*)&tbl0, 8);
     for (const Mut& m : batch) {
-      walBuf_.append((const char*)&m.tableId, 8);
+      if (!singleTbl) walBuf_.append((const char*)&m.tableId, 8);
       uint8_t flags = m.tomb ? 1 : 0;
       walBuf_.append((const char*)&flags, 1);
       walBuf_.append((const char*)&m.pk, 8);

@@ -248,6 +248,16 @@ class Engine {
     bool complete = false;                      // full build finished
   };
   std::vector<RunFilterCache> runFilterCache_;
+  // memtable-sorted-position predicate bitmap for the parallel memtable-only
+  // inline-equality scan (avoids re-running the per-row varchar compare)
+  struct MemPredCache {
+    uint64_t epoch = 0;
+    int64_t tableId = -1;
+    std::string key;
+    size_t count = 0;
+    std::vector<uint8_t> pass;   // bit per memSorted position
+  };
+  std::vector<MemPredCache> memPredCache_;
 
   // thresholds (overridable via env for testing / tuning)
   uint64_t memtableFlushBytes_ = MEMTABLE_FLUSH_BYTES;

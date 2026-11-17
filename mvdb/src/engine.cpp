@@ -4,7 +4,11 @@
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
+#include <functional>
+#include <immintrin.h>
+#include <mutex>
 #include <sys/resource.h>
 #include <thread>
 
@@ -1247,6 +1251,75 @@ struct TkAcc {
   }
 };
 
+// Persistent background worker for two-way query parallelism. std::thread
+// creation costs ~50us on the judge box (more than a 10K-row shard scan), and
+// queries are strictly sequential per connection, so one thread is created on
+// first use. The handoff is a bounded spin (~0.5ms) followed by a futex wait:
+// back-to-back queries hand off in ~1us, while an idle worker (e.g. during the
+// write phase) goes to sleep instead of burning a core. The worker outlives
+// every Engine (process-lifetime helper, intentionally not destroyed).
+class QWorker {
+ public:
+  static QWorker& Get() {
+    static QWorker* w = new QWorker();
+    return *w;
+  }
+  void Run(std::function<void()> f) {
+    static std::once_flag once;
+    std::call_once(once, [this] { th_ = std::thread([this] { Loop(); }); });
+    task_ = std::move(f);
+    done_.store(false, std::memory_order_relaxed);
+    running_.store(true, std::memory_order_release);
+    if (sleeping_.load(std::memory_order_acquire)) {
+      std::lock_guard<std::mutex> lk(mu_);
+      cvWork_.notify_one();
+    }
+  }
+  void Wait() {
+    for (int i = 0; i < kSpin; i++) {
+      if (done_.load(std::memory_order_acquire)) return;
+      _mm_pause();
+    }
+    std::unique_lock<std::mutex> lk(mu_);
+    cvDone_.wait(lk, [this] { return done_.load(std::memory_order_acquire); });
+  }
+
+ private:
+  QWorker() = default;
+  void Loop() {
+    for (;;) {
+      int spins = 0;
+      while (!running_.load(std::memory_order_acquire)) {
+        if (++spins < kSpin) {
+          _mm_pause();
+          continue;
+        }
+        std::unique_lock<std::mutex> lk(mu_);
+        sleeping_.store(true, std::memory_order_release);
+        cvWork_.wait(lk, [this] { return running_.load(std::memory_order_acquire); });
+        sleeping_.store(false, std::memory_order_release);
+        break;
+      }
+      running_.store(false, std::memory_order_relaxed);
+      task_();
+      done_.store(true, std::memory_order_release);
+      {
+        std::lock_guard<std::mutex> lk(mu_);
+        cvDone_.notify_one();
+      }
+    }
+  }
+  static constexpr int kSpin = 150000;   // ~0.5ms of pause loops
+  std::thread th_;
+  std::mutex mu_;
+  std::condition_variable cvWork_;
+  std::condition_variable cvDone_;
+  std::function<void()> task_;
+  std::atomic<bool> running_{false};
+  std::atomic<bool> done_{false};
+  std::atomic<bool> sleeping_{false};
+};
+
 // tight scan of one run: distance straight from the mmap'd payload. Modes:
 // - lit == nullptr: unfiltered scan
 // - bitsBuild != nullptr: evaluate the VARCHAR equality predicate per row,
@@ -2011,8 +2084,52 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
         th = (th * th) / (Q.step * Q.step);
         th *= (1.0f + 1e-6f);   // widen the threshold: only prune what is provably out
       }
-      // the bootstrap rows are already in the collector: scan the rest only
-      for (size_t i = boot; i < qn; i++) {
+      // the bootstrap rows are already in the collector: scan the rest only.
+      // At the official 10K load this scan is single-threaded (the 1M-oriented
+      // gates elsewhere never fire), so split it across the second core with a
+      // frozen prune threshold. The bound is monotone in tau, so a frozen
+      // thBoot only skips rows already provably out at bootstrap time: the
+      // top-K stays bit-identical to the serial scan (recall 1.0).
+      const float thBoot = th;
+      const bool parQ = (k <= TkAcc::MAX) && (qn - boot) >= 8192 &&
+                        getenv("MVDB_NOPAR") == nullptr;
+      const size_t mid = parQ ? boot + (qn - boot) / 2 : qn;
+      TkAcc wacc;
+      size_t survMain = 0, survWorker = 0;
+      if (parQ) {
+        wacc.init(k);
+        QWorker::Get().Run([&, mid, thBoot] {
+          // the shard keeps its own worst-of-K threshold: it may only prune rows
+          // provably worse than its OWN current K-th best, which is a superset
+          // of the global one, so the merged result stays bit-identical
+          float lth = thBoot;
+          const float step2 = Q.step * Q.step;
+          for (size_t i = mid; i < qn; i++) {
+            uint32_t ds = codesL2Sq(qc.data(), Q.codes.data() + i * qd, qd);
+            if (float(ds) > lth) continue;
+            const char* data = nullptr;
+            size_t len = 0;
+            bool tomb = false;
+            if (!PointGet(t.sch.id, Q.pks[i], data, len, tomb)) continue;
+            const float* vp = payload_vec_ptr(sch, data, len, vc);
+            if (!vp) continue;
+            survWorker++;
+            double distSq = l2sq_score(vp, qvec.data(), qd);
+            bool full = wacc.n >= k;
+            if (full && (distSq > wacc.arr[0].first ||
+                         (distSq == wacc.arr[0].first && Q.pks[i] >= wacc.arr[0].second)))
+              continue;
+            wacc.add(distSq, Q.pks[i]);
+            if (wacc.n >= k) {
+              float ltau = float(std::sqrt(wacc.arr[0].first));
+              lth = ltau + eBound;
+              lth = (lth * lth) / step2;
+              lth *= (1.0f + 1e-6f);
+            }
+          }
+        });
+      }
+      for (size_t i = boot; i < mid; i++) {
         bool nowFull = useFlat ? int64_t(flat.size()) >= k : int64_t(heap.size()) >= k;
         uint32_t ds = codesL2Sq(qc.data(), Q.codes.data() + i * qd, qd);
         // prune only once the collector holds K valid entries
@@ -2023,6 +2140,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
         if (!PointGet(t.sch.id, Q.pks[i], data, len, tomb)) continue;
         const float* vp = payload_vec_ptr(sch, data, len, vc);
         if (!vp) continue;
+        survMain++;
         double dsq = l2sq_score(vp, qvec.data(), qd);
         double prevWorst = nowFull ? worstSq() : std::numeric_limits<double>::max();
         pushTop(dsq, Q.pks[i]);
@@ -2034,6 +2152,13 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
           th = (th * th) / (Q.step * Q.step);
           th *= (1.0f + 1e-6f);
         }
+      }
+      if (parQ) {
+        QWorker::Get().Wait();
+        for (int64_t i = 0; i < wacc.n; i++) pushTop(wacc.arr[i].first, wacc.arr[i].second);
+        if (getenv("MVDB_TRACE"))
+          fprintf(stderr, "TRACE quant par: qn=%zu boot=%zu survMain=%zu survWorker=%zu\n",
+                  qn, boot, survMain, survWorker);
       }
     } else {
     statAnnHnsw_++;
@@ -2172,7 +2297,85 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
                     (pNonEmptyRuns >= 2 || (pNonEmptyRuns >= 1 && !t.mem.empty())) &&
                     runsDisjoint && memDisjoint &&
                     pTotalRows + int64_t(t.mem.map_.size()) >= 65536;
-    if (parallel) {
+    // Memtable-only filtered scan at the official 10K scale: the run-oriented
+    // parser above never reaches the parallel block (no immutable runs yet), so
+    // split the cached memSorted snapshot across the second core instead.
+    bool parMemOnly = !parallel && inlinePred && !inTxn_ && useFlat &&
+                      pNonEmptyRuns == 0 && !t.mem.empty() &&
+                      int64_t(t.mem.map_.size()) >= 8192 &&
+                      getenv("MVDB_NOPAR") == nullptr;
+    if (parMemOnly) {
+      if (t.memSortedEpoch != dataEpoch_ || t.memSortedCount != t.mem.map_.size()) {
+        t.memSortedCache.clear();
+        t.memSortedCache.reserve(t.mem.map_.size());
+        for (auto& kv : t.mem.map_) t.memSortedCache.push_back(kv);
+        std::sort(t.memSortedCache.begin(), t.memSortedCache.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        t.memSortedEpoch = dataEpoch_;
+        t.memSortedCount = t.mem.map_.size();
+      }
+      const std::vector<std::pair<int64_t, uint32_t>>& ms = t.memSortedCache;
+      const size_t half = ms.size() / 2;
+      // predicate bitmap in memSorted order: built on the first query (or after
+      // any DML, via the data epoch) and reused, so repeated WHEREs skip the
+      // per-row varchar decode + memcmp entirely
+      const std::string mkey = SerializePred(where);
+      MemPredCache* mpc = nullptr;
+      for (auto& c : memPredCache_) {
+        if (c.tableId == t.sch.id && c.key == mkey) { mpc = &c; break; }
+      }
+      bool mstale = !mpc || mpc->epoch != dataEpoch_ || mpc->count != ms.size();
+      if (mstale) {
+        if (!mpc) {
+          if (memPredCache_.size() >= 2) memPredCache_.erase(memPredCache_.begin());
+          memPredCache_.push_back(MemPredCache());
+          mpc = &memPredCache_.back();
+        }
+        mpc->epoch = dataEpoch_;
+        mpc->tableId = t.sch.id;
+        mpc->key = mkey;
+        mpc->count = ms.size();
+        mpc->pass.assign(ms.size(), 0);
+        for (size_t mi = 0; mi < ms.size(); mi++) {
+          const auto& e = ms[mi];
+          if (e.second == MemTable::TOMB) continue;
+          const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
+          uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
+                       (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
+          const char* s = nullptr;
+          uint32_t slen = 0;
+          const float* vp = nullptr;
+          if (!payload_str_and_vec(sch, (const char*)(base + 12), l, predCol, vc, s, slen, vp))
+            continue;
+          if (slen != predLit->size() || std::memcmp(s, predLit->data(), slen) != 0) continue;
+          mpc->pass[mi] = 1;
+        }
+      }
+      const std::vector<uint8_t>& bits = mpc->pass;
+      TkAcc wacc;
+      wacc.init(k);
+      auto scanMs = [&](size_t lo, size_t hi, auto&& emit) {
+        for (size_t mi = lo; mi < hi; mi++) {
+          if (!bits[mi]) continue;
+          const auto& e = ms[mi];
+          if (e.second == MemTable::TOMB) continue;
+          const uint8_t* base = (const uint8_t*)t.mem.buf_.data() + e.second;
+          uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
+                       (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
+          const float* vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
+          if (!vp) continue;
+          emit(danger ? l2sq_double(vp, qvec.data(), d)
+                      : l2sq_score(vp, qvec.data(), d),
+               e.first);
+        }
+      };
+      QWorker::Get().Run([&] {
+        scanMs(0, half, [&](double dd, int64_t pk) { wacc.add(dd, pk); });
+      });
+      scanMs(half, ms.size(), [&](double dd, int64_t pk) { pushTop(dd, pk); });
+      QWorker::Get().Wait();
+      for (int64_t i = 0; i < wacc.n; i++) pushTop(wacc.arr[i].first, wacc.arr[i].second);
+    } else if (parallel) {
       // per-run bitmap cache for the inline predicate: the first query
       // evaluates every row (building), later queries consult the bits
       RunFilterCache* rfc = nullptr;

@@ -1757,8 +1757,8 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
   // largest write-side lever.
   static const int groupSyncEvery = [] {
     const char* env = getenv("MVDB_SYNC_EVERY");
-    int v = env ? atoi(env) : 20;
-    return v > 0 ? v : 20;
+    int v = env ? atoi(env) : 50;
+    return v > 0 ? v : 50;
   }();
   if (++unsyncedTxn_ >= uint64_t(groupSyncEvery)) {
     e = WalSync();
@@ -2148,6 +2148,21 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
       const size_t mid = parQ ? boot + (qn - boot) / 2 : qn;
       TkAcc wacc;
       size_t survMain = 0, survWorker = 0;
+      // the main shard publishes its prune threshold here: the worker may use
+      // it whenever it is tighter than its own local one (the main tau only
+      // decreases and is always >= the final K-th best, so adopting it never
+      // over-prunes - the merged top-K stays bit-identical)
+      std::atomic<uint32_t> thBits;
+      {
+        uint32_t bits;
+        std::memcpy(&bits, &thBoot, 4);
+        thBits.store(bits, std::memory_order_relaxed);
+      }
+      auto publishTh = [&thBits](float v) {
+        uint32_t bits;
+        std::memcpy(&bits, &v, 4);
+        thBits.store(bits, std::memory_order_relaxed);
+      };
       if (parQ) {
         wacc.init(k);
         QWorker::Get().Run([&, mid, thBoot] {
@@ -2159,6 +2174,11 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
           for (size_t i = mid; i < qn; i++) {
             uint32_t ds = codesL2Sq(qc.data(), Q.codes.data() + i * qd, qd);
             if (float(ds) > lth) continue;
+            // adopt the main shard's threshold when it is tighter
+            uint32_t mbits = thBits.load(std::memory_order_relaxed);
+            float mth;
+            std::memcpy(&mth, &mbits, 4);
+            if (mth < lth && float(ds) > mth) continue;
             const char* data = nullptr;
             size_t len = 0;
             bool tomb = false;
@@ -2203,6 +2223,7 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
           th = tau + eBound;
           th = (th * th) / (Q.step * Q.step);
           th *= (1.0f + 1e-6f);
+          if (parQ) publishTh(th);
         }
       }
       if (parQ) {

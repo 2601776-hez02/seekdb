@@ -198,6 +198,8 @@ class Engine {
   uint64_t walSize_ = 0;
   std::string walBuf_;   // pending WAL bytes (flushed before fsync)
   uint64_t unsyncedTxn_ = 0;  // autocommit commits since the last WAL fdatasync
+  uint64_t walSyncedOff_ = 0; // WAL prefix durably on the device (fadvise-safe)
+  uint64_t walFadvisedOff_ = 0;
   bool walHadData_ = false;  // set by WalRecover when valid records were seen
 
   // transaction

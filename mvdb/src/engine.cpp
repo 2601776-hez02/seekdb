@@ -584,10 +584,12 @@ Err Engine::WalRecover() {
       got = ::pread(walFd_, &head[0], len, off + 12);
       if (got < ssize_t(len)) { validEnd = off; break; }
       if (crc32(head.data(), head.size()) != crc) { validEnd = off; break; }
-      // commit points: txn COMMIT records and DDL records (the DDL catalog is
+      // commit points: txn COMMIT records, DDL records (the DDL catalog is
       // separately durable: SaveCatalog fsyncs it, so a DDL record stands on
-      // its own without a trailing COMMIT)
-      if (head.size() >= 1 && (head[0] == 3 || head[0] == 1)) {
+      // its own without a trailing COMMIT) and fused BATCH records (type 4:
+      // the CRC covers every row, so a complete batch commits whole and a
+      // torn batch is dropped whole)
+      if (head.size() >= 1 && (head[0] == 3 || head[0] == 1 || head[0] == 4)) {
         lastCommitted = off + 12 + len;
       }
       off += 12 + len;
@@ -618,6 +620,35 @@ Err Engine::WalRecover() {
     if (got < ssize_t(len)) break;
     if (crc32(head.data(), head.size()) != crc) break;
     uint8_t type = head.size() >= 1 ? head[0] : 0;
+    auto applyRow = [&](int64_t tid, uint8_t flags, int64_t pk,
+                        const std::string& payload) -> Err {
+      TableState* t = FindTableById(tid);
+      if (!t) return Err::OK;
+      if (flags & 1) {
+        t->mem.Del(pk);
+      } else {
+        t->mem.Put(pk, payload);
+        // numeric-safety bound must survive crash recovery
+        if (t->sch.vec_col >= 0) {
+          std::vector<Value> vals;
+          if (decode_payload(t->sch, payload.data(), payload.size(), vals, pk) == Err::OK &&
+              size_t(t->sch.vec_col) < vals.size() &&
+              vals[size_t(t->sch.vec_col)].t == Value::T::Vec) {
+            for (float x : vals[size_t(t->sch.vec_col)].v) {
+              double a = std::fabs(double(x));
+              if (a > t->vecMaxAbs) t->vecMaxAbs = a;
+            }
+          }
+        }
+      }
+      if (pk < t->memMinPk) t->memMinPk = pk;
+      if (pk > t->memMaxPk) t->memMaxPk = pk;
+      if (t->mem.bytes() >= memtableFlushBytes_) {
+        Err fe = FlushMemTable(*t);
+        if (fe != Err::OK) return fe;
+      }
+      return Err::OK;
+    };
     if (type == 1) {
       std::string cat = head.substr(9);
       Err e = ParseCatalog(cat, true);
@@ -633,32 +664,29 @@ Err Engine::WalRecover() {
         fprintf(stderr, "TRACE recover put: tid=%lld flags=%u pk=%lld\n",
                 (long long)tid, (unsigned)flags, (long long)pk);
       }
-      TableState* t = FindTableById(tid);
-      if (t) {
-        if (flags & 1) {
-          t->mem.Del(pk);
-        } else {
-          std::string payload = head.substr(26);
-          t->mem.Put(pk, payload);
-          // numeric-safety bound must survive crash recovery
-          if (t->sch.vec_col >= 0) {
-            std::vector<Value> vals;
-            if (decode_payload(t->sch, payload.data(), payload.size(), vals, pk) == Err::OK &&
-                size_t(t->sch.vec_col) < vals.size() &&
-                vals[size_t(t->sch.vec_col)].t == Value::T::Vec) {
-              for (float x : vals[size_t(t->sch.vec_col)].v) {
-                double a = std::fabs(double(x));
-                if (a > t->vecMaxAbs) t->vecMaxAbs = a;
-              }
-            }
-          }
-        }
-        if (pk < t->memMinPk) t->memMinPk = pk;
-        if (pk > t->memMaxPk) t->memMaxPk = pk;
-        if (t->mem.bytes() >= memtableFlushBytes_) {
-          Err e = FlushMemTable(*t);
-          if (e != Err::OK) return e;
-        }
+      Err e2 = applyRow(tid, flags, pk, head.substr(26));
+      if (e2 != Err::OK) return e2;
+    } else if (type == 4) {
+      // fused batch record: [type][txn i64][count u32][rows: tid i64|flags u8|
+      // pk i64|plen u32|payload]
+      if (head.size() < 13) break;
+      size_t pos = 13;
+      uint32_t count = 0;
+      std::memcpy(&count, head.data() + 9, 4);
+      for (uint32_t i = 0; i < count; i++) {
+        if (pos + 21 > head.size()) break;
+        int64_t tid = 0, pk = 0;
+        uint8_t flags = 0;
+        uint32_t pl = 0;
+        std::memcpy(&tid, head.data() + pos, 8);
+        std::memcpy(&flags, head.data() + pos + 8, 1);
+        std::memcpy(&pk, head.data() + pos + 9, 8);
+        std::memcpy(&pl, head.data() + pos + 17, 4);
+        pos += 21;
+        if (pos + pl > head.size()) break;
+        Err e2 = applyRow(tid, flags, pk, head.substr(pos, pl));
+        if (e2 != Err::OK) return e2;
+        pos += pl;
       }
     }
     off += 12 + len;
@@ -1790,13 +1818,48 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
       Err e = gen(m, done);
       if (e != Err::OK) { WalTruncateTo(start); return e; }
       if (done) break;
-      e = WalAppendRow(m);
-      if (e != Err::OK) { WalTruncateTo(start); return e; }
       batch.push_back(std::move(m));
     }
   }
-  Err e = WalAppend(3, txn, "");
-  if (e != Err::OK) { WalTruncateTo(start); return e; }
+  // Fused batch record: ONE header+CRC per statement instead of one per row
+  // (the row records cost 21B each, ~210KB of B_w at the official load).
+  // The record is the atomic unit in recovery: the CRC covers every row, so
+  // a torn batch is dropped whole and a complete batch replays whole.
+  {
+    size_t body = 1 + 8 + 4;  // type 4 | txn | count
+    for (const Mut& m : batch) body += 8 + 1 + 8 + 4 + m.payload.size();
+    uint32_t payLen = uint32_t(body);
+    size_t s2 = walBuf_.size();
+    char h[12];
+    uint32_t magic = 0x4D57414Cu, zero = 0;
+    std::memcpy(h, &magic, 4);
+    std::memcpy(h + 4, &payLen, 4);
+    std::memcpy(h + 8, &zero, 4);
+    walBuf_.append(h, 12);
+    uint8_t t4 = 4;
+    walBuf_.append((const char*)&t4, 1);
+    walBuf_.append((const char*)&txn, 8);
+    uint32_t count = uint32_t(batch.size());
+    walBuf_.append((const char*)&count, 4);
+    for (const Mut& m : batch) {
+      walBuf_.append((const char*)&m.tableId, 8);
+      uint8_t flags = m.tomb ? 1 : 0;
+      walBuf_.append((const char*)&flags, 1);
+      walBuf_.append((const char*)&m.pk, 8);
+      uint32_t pl = uint32_t(m.payload.size());
+      walBuf_.append((const char*)&pl, 4);
+      walBuf_.append(m.payload);
+    }
+    uint32_t c = crc32(walBuf_.data() + s2 + 12, size_t(payLen));
+    std::memcpy(&walBuf_[s2 + 8], &c, 4);
+    walSize_ += 12 + body;
+    if (walBuf_.size() >= (1u << 20)) {
+      Err e = writeAll(walFd_, walBuf_.data(), walBuf_.size());
+      walBuf_.clear();
+      if (e != Err::OK) { WalTruncateTo(start); return e; }
+    }
+  }
+  Err e = Err::OK;
   // Group commit: the commit record is written through to the WAL file (page
   // cache) on every statement, so a process kill never loses committed data;
   // only the fdatasync is batched (every MVDB_SYNC_EVERY statements, default

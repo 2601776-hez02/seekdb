@@ -2905,51 +2905,89 @@ Err Engine::ExecInsert(const Stmt& s, bool annMode, ExecResult& out) {
       colMap[size_t(ci)] = i;
     }
   }
-  // validate all rows first (statement atomicity; input-bounded memory)
+  // validate all rows first (statement atomicity; input-bounded memory).
+  // Large autocommit batches (the benchmark's 100-row INSERTs) split the
+  // per-row work (vector literal parse, payload encode, duplicate check)
+  // across the persistent query worker; the halves are merged in input order
+  // afterwards, so the WAL record order and the duplicate semantics are
+  // identical to the serial loop. The worker keeps its own seen-set and
+  // vecMaxAbs; both merge after the join.
   std::vector<Mut> muts;
   muts.reserve(s.rows.size());
   std::unordered_set<int64_t> seen;
-  for (const auto& rawRow : s.rows) {
-    if (rawRow.size() != ncols) return Err::SyntaxError;
-    std::vector<Value> vals(ncols);
-    for (size_t i = 0; i < ncols; i++) vals[i] = rawRow[colMap[i]];
-    for (size_t ci = 0; ci < ncols; ci++) {
-      Err e = CoerceValue(sch.cols[ci], vals[ci]);
-      if (e != Err::OK) return e;
-    }
-    // maintain the numeric-safety bound (monotonic; a rolled-back txn can
-    // only make it larger, which is safe)
-    if (sch.vec_col >= 0 && size_t(sch.vec_col) < ncols &&
-        vals[size_t(sch.vec_col)].t == Value::T::Vec) {
-      for (float x : vals[size_t(sch.vec_col)].v) {
-        double a = std::fabs(double(x));
-        if (a > t->vecMaxAbs) t->vecMaxAbs = a;
+  const size_t nrows = s.rows.size();
+  const bool parInsert = !inTxn_ && nrows >= 64 && getenv("MVDB_NOPAR") == nullptr;
+  const size_t midRows = parInsert ? nrows / 2 : nrows;
+  auto processRows = [&](size_t lo, size_t hi, std::vector<Mut>& out,
+                         std::unordered_set<int64_t>& outSeen, double& localMax) -> Err {
+    out.reserve(hi - lo);
+    for (size_t ri = lo; ri < hi; ri++) {
+      const auto& rawRow = s.rows[ri];
+      if (rawRow.size() != ncols) return Err::SyntaxError;
+      std::vector<Value> vals(ncols);
+      for (size_t i = 0; i < ncols; i++) vals[i] = rawRow[colMap[i]];
+      for (size_t ci = 0; ci < ncols; ci++) {
+        Err e = CoerceValue(sch.cols[ci], vals[ci]);
+        if (e != Err::OK) return e;
       }
+      // maintain the numeric-safety bound (monotonic; a rolled-back txn can
+      // only make it larger, which is safe)
+      if (sch.vec_col >= 0 && size_t(sch.vec_col) < ncols &&
+          vals[size_t(sch.vec_col)].t == Value::T::Vec) {
+        for (float x : vals[size_t(sch.vec_col)].v) {
+          double a = std::fabs(double(x));
+          if (a > localMax) localMax = a;
+        }
+      }
+      std::string payload;
+      Err e = encode_payload(sch, vals, payload);
+      if (e != Err::OK) return e;
+      int64_t pk = vals[size_t(sch.pk_col)].i;
+      if (outSeen.count(pk)) return Err::DuplicateKey;
+      const char* dummy;
+      size_t dlen;
+      bool dmb;
+      if (PointGet(t->sch.id, pk, dummy, dlen, dmb) && !dmb) return Err::DuplicateKey;
+      outSeen.insert(pk);
+      Mut m;
+      m.tableId = t->sch.id;
+      m.pk = pk;
+      m.tomb = false;
+      m.payload = std::move(payload);
+      out.push_back(std::move(m));
     }
-    std::string payload;
-    Err e = encode_payload(sch, vals, payload);
-    if (e != Err::OK) return e;
-    int64_t pk = vals[size_t(sch.pk_col)].i;
-    if (seen.count(pk)) return Err::DuplicateKey;
-    const char* dummy;
-    size_t dlen;
-    bool dmb;
-    if (PointGet(t->sch.id, pk, dummy, dlen, dmb) && !dmb) return Err::DuplicateKey;
-    seen.insert(pk);
-    Mut m;
-    m.tableId = t->sch.id;
-    m.pk = pk;
-    m.tomb = false;
-    m.payload = std::move(payload);
-    muts.push_back(std::move(m));
+    return Err::OK;
+  };
+  std::vector<Mut> workerMuts;
+  std::unordered_set<int64_t> workerSeen;
+  double workerMax = 0.0;
+  Err werr = Err::OK;
+  if (parInsert) {
+    QWorker::Get().Run([&] { werr = processRows(midRows, nrows, workerMuts, workerSeen, workerMax); });
   }
+  Err e = processRows(0, midRows, muts, seen, t->vecMaxAbs);
+  if (parInsert) {
+    QWorker::Get().Wait();
+    if (e == Err::OK) e = werr;
+  }
+  // cross-half duplicate check (per-half PointGet already covers the table)
+  if (e == Err::OK) {
+    for (int64_t pk : workerSeen) {
+      if (seen.count(pk)) { e = Err::DuplicateKey; break; }
+    }
+  }
+  if (e == Err::OK) {
+    if (workerMax > t->vecMaxAbs) t->vecMaxAbs = workerMax;
+    for (auto& m : workerMuts) muts.push_back(std::move(m));
+  }
+  if (e != Err::OK) return e;
   OverlayMap snapshot;
   if (inTxn_) {
     auto it = overlay_.find(t->sch.id);
     if (it != overlay_.end()) snapshot = it->second;
   }
   size_t mi = 0;
-  Err e = ApplyMutations([&](Mut& m, bool& done) -> Err {
+  e = ApplyMutations([&](Mut& m, bool& done) -> Err {
     if (mi >= muts.size()) { done = true; return Err::OK; }
     m = std::move(muts[mi++]);
     done = false;

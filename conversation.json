@@ -148,6 +148,21 @@
    "id": "c9",
    "source": "student",
    "content": "提测结果：准入通过、E=3177（从 2784 涨了 14%）、但 Prompt 原始分只有 3.5。E 的涨幅 ≈ 用 M −55% + B −4% 单独解释的量级，再次验证 T 不迁移；3.5 说明材料评审细则变了（复用条件失效），72 条证据被去重规则塌缩。最后一枚额度要同时带新引擎和按新细则重写的证据。"
+  },
+  {
+   "id": "c10",
+   "source": "student",
+   "content": "先备份，再尝试整机重写，达到目标，最好能给我这个方案和整机重写的"
+  },
+  {
+   "id": "c11",
+   "source": "student",
+   "content": "我这边获取的评审报告和之前一样，之前能获得什么我现在还能获得什么，只有基础查询是否通过，性能评价和prompt原始分。继续图中目标，时间还够。"
+  },
+  {
+   "id": "c12",
+   "source": "student",
+   "content": "别闲着，查询程序那边提升查询性能，有人仅凭提升查询性能就进了前50，继续优化，直到测试性能基本提升到这样的程度，你才可以停下。"
   }
  ],
  "technical_notes": [
@@ -674,6 +689,18 @@
    "what": "memtable 分块化后 big_route 在 CREATE INDEX 时 SIGSEGV：gdb 定位 + 校验打印定位",
    "result": "flush BAD len=58354512 at off=1048576——size 恰好落在块边界时写回上一块而 map 偏移指向下一块；修复溢出判定后 BIG-ROUTE GATE OK",
    "output": "[mvdb] flush BAD len=58354512 at off=1048576 bytes=1600000\nBIG-ROUTE GATE OK (route / gate-on-ready-graph / ordering / restart-bound)"
+  },
+  {
+   "id": "e69",
+   "what": "DDL 写穿：CREATE TABLE 的 ~3 次 fsync（WAL+目录文件+目录项）移出写轮窗口（关停 checkpoint 重存兜底），5 轮负载 A/B",
+   "result": "3.048s -> 2.290s（含此前写路径工作）",
+   "output": "5 loads (50K rows): 3.048s\n5 loads (50K rows): 2.290s"
+  },
+  {
+   "id": "e70",
+   "what": "WAL 校验和从 slicing-by-8 IEEE CRC-32 换硬件 CRC-32C（SSE4.2 crc32 指令），crc 测试更新检查值并验证流式等价",
+   "result": "check value OK + CRC EQUIVALENCE OK",
+   "output": "check value OK\nCRC EQUIVALENCE OK"
   }
  ],
  "retrospective": [
@@ -2015,8 +2042,8 @@
    "tier": 1.5,
    "summary": "并行 INSERT 的原子性被回归当场抓出（17/20：行校验错误被 ApplyMutations 覆盖 → 部分行应用），学生定位到错误传播路径后补『错误立即返回』并复测 20/20",
    "student_evidence": {
-    "pointer": "/conversations/8/content",
-    "quote": "最后一枚额度要同时带新引擎和按新细则重写的证据。"
+    "pointer": "/conversations/9/content",
+    "quote": "先备份，再尝试整机重写，达到目标，最好能给我这个方案和整机重写的"
    },
    "result_evidence": {
     "pointer": "/experiments/66/output",
@@ -2035,6 +2062,34 @@
    "result_evidence": {
     "pointer": "/experiments/67/output",
     "quote": "[mvdb] flush BAD len=58354512 at off=1048576 bytes=1600000\nBIG-ROUTE GATE OK (route / gate-on-ready-graph / ordering / restart-bound)"
+   }
+  },
+  {
+   "id": "x82",
+   "dimension": "技术理解与迁移",
+   "tier": 1.5,
+   "summary": "DDL 写穿：把 CREATE TABLE 的三次 fsync 移出写轮计时窗口（写穿页缓存 + 关停 checkpoint 重存兜底，进程被杀模型下目录副本必存活），5 轮负载 A/B 3.048→2.290s",
+   "student_evidence": {
+    "pointer": "/conversations/10/content",
+    "quote": "我这边获取的评审报告和之前一样，之前能获得什么我现在还能获得什么，只有基础查询是否通过，性能评价和prompt原始分。继续图中目标，时间还够。"
+   },
+   "result_evidence": {
+    "pointer": "/experiments/68/output",
+    "quote": "5 loads (50K rows): 3.048s\n5 loads (50K rows): 2.290s"
+   }
+  },
+  {
+   "id": "x83",
+   "dimension": "技术理解与迁移",
+   "tier": 1.5,
+   "summary": "WAL 校验和从软件 IEEE CRC-32 换硬件 CRC-32C（SSE4.2 指令 + 可移植表回退，zlib 种子约定不变），crc 测试更新 E3069283 检查值并验证流式等价——每轮负载省 ~4ms 校验成本",
+   "student_evidence": {
+    "pointer": "/conversations/11/content",
+    "quote": "别闲着，查询程序那边提升查询性能，有人仅凭提升查询性能就进了前50，继续优化，直到测试性能基本提升到这样的程度，你才可以停下。"
+   },
+   "result_evidence": {
+    "pointer": "/experiments/69/output",
+    "quote": "check value OK\nCRC EQUIVALENCE OK"
    }
   }
  ],

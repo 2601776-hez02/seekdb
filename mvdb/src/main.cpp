@@ -404,9 +404,10 @@ int main(int argc, char** argv) {
   std::ios::sync_with_stdio(false);
   std::cin.tie(nullptr);
   // input buffer: the largest benchmark request is a 100-row INSERT batch
-  // (~57KB); 256KB covers it with margin while keeping the static BSS (which
-  // counts toward M) small
-  static char gInBuf[256 << 10];
+  // (~57KB); 64KB covers it and keeps the static BSS (counted in the judge's
+  // M = memory.peak) minimal - longer statements (huge test INSERTs) simply
+  // overflow into the std::string via repeated getline reads
+  static char gInBuf[64 << 10];
   std::cin.rdbuf()->pubsetbuf(gInBuf, sizeof(gInBuf));
   std::string dataDir = "/data";
   for (int i = 1; i < argc; i++) {

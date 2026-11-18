@@ -2543,7 +2543,50 @@ Err Engine::VecTopK(TableState& t, const std::vector<float>& qvec, const Expr* w
                       pNonEmptyRuns == 0 && !t.mem.empty() &&
                       int64_t(t.mem.map_.size()) >= 8192 &&
                       getenv("MVDB_NOPAR") == nullptr;
-    if (parMemOnly) {
+    // The same shape for the UNFILTERED exact scan: with the small-table
+    // codebook removed the plain queries scan the FP32 memtable, and the
+    // run-oriented gate above (>= 65536 rows / runs) never fires at the
+    // official 10K load - so split the sorted snapshot here too (the merge
+    // uses the same comparator, results stay bit-identical).
+    bool parMemPlain = !parallel && !where && !inTxn_ && useFlat &&
+                       k <= TkAcc::MAX && pNonEmptyRuns == 0 && !t.mem.empty() &&
+                       int64_t(t.mem.map_.size()) >= 8192 &&
+                       getenv("MVDB_NOPAR") == nullptr;
+    if (parMemPlain) {
+      if (t.memSortedEpoch != dataEpoch_ || t.memSortedCount != t.mem.map_.size()) {
+        t.memSortedCache.clear();
+        t.memSortedCache.reserve(t.mem.map_.size());
+        t.mem.map_.forEach([&](int64_t pk, uint32_t off) { t.memSortedCache.push_back({pk, off}); });
+        std::sort(t.memSortedCache.begin(), t.memSortedCache.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        t.memSortedEpoch = dataEpoch_;
+        t.memSortedCount = t.mem.map_.size();
+      }
+      const std::vector<std::pair<int64_t, uint32_t>>& ms = t.memSortedCache;
+      const size_t half = ms.size() / 2;
+      TkAcc wacc;
+      wacc.init(k);
+      auto scanMsPlain = [&](size_t lo, size_t hi, auto&& emit) {
+        for (size_t mi = lo; mi < hi; mi++) {
+          const auto& e = ms[mi];
+          if (e.second == MemTable::TOMB) continue;
+          const uint8_t* base = t.mem.at(e.second);
+          uint32_t l = uint32_t(base[0]) | (uint32_t(base[1]) << 8) |
+                       (uint32_t(base[2]) << 16) | (uint32_t(base[3]) << 24);
+          const float* vp = payload_vec_ptr(sch, (const char*)(base + 12), l, vc);
+          if (!vp) continue;
+          emit(danger ? l2sq_double(vp, qvec.data(), d)
+                      : l2sq_score(vp, qvec.data(), d),
+               e.first);
+        }
+      };
+      QWorker::Get().Run([&] {
+        scanMsPlain(0, half, [&](double dd, int64_t pk) { wacc.add(dd, pk); });
+      });
+      scanMsPlain(half, ms.size(), [&](double dd, int64_t pk) { pushTop(dd, pk); });
+      QWorker::Get().Wait();
+      for (int64_t i = 0; i < wacc.n; i++) pushTop(wacc.arr[i].first, wacc.arr[i].second);
+    } else if (parMemOnly) {
       if (t.memSortedEpoch != dataEpoch_ || t.memSortedCount != t.mem.map_.size()) {
         t.memSortedCache.clear();
         t.memSortedCache.reserve(t.mem.map_.size());

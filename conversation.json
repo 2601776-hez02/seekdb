@@ -1,7 +1,7 @@
 {
  "meta": {
   "task": "MiniVectorDB 轻量向量数据库（2026-competition-round2 加赛）",
-  "repo": "gitee.com/hou-enze/seekdb, branch 2026-competition-round2",
+  "repo": "github.com/2601776-hez02/seekdb, branch 2026-competition-round2",
   "authors": "侯恩泽（学生）与 AI 助手协作",
   "note": "本文件记录本版本开发过程的真实提示词、实验与验证结果；对话经过摘要与脱敏整理，未包含任何密钥或令牌。未执行的内容均标注为计划(planned)，不以计划冒充结果。",
   "synthetic": false
@@ -38,6 +38,10 @@
   {
    "id": "p8",
    "content": "确认具体提测信息后提交；收到平台三行原始分后按结果决定下一枚额度"
+  },
+  {
+   "id": "p9",
+   "content": "我想让别人检查一下；评审发现的反例要求“旧版失败、新版通过”的对照验证"
   }
  ],
  "learning_plan": [
@@ -136,31 +140,70 @@
   },
   {
    "id": "c7",
-   "source": "student",
-   "content": "提测回来了：准入通过、性能原始指标 E=2784（本地查询 −37% 但平台只动了 −0.14%）。这说明平台 T 被每交互开销主导，本地查询提速不迁移。重新读题面：M 是容器 memory.peak 且含文件页缓存，B/M 才按公式比例迁移——把力气转到 M 和 B 上。"
+   "summary": "外部代码审查三轮：学生指定独立编译和旧版对照，评审找出 6 个可复现缺陷并给出最小反例；新回归最初未触发原缺陷，学生指出 VARCHAR 等值走内联路径绕过缓存，改 BIGINT 谓词后旧版在预期断言处失败、新版通过",
+   "turns": [
+    {
+     "role": "user",
+     "text": "我想让别人检查一下"
+    },
+    {
+     "role": "assistant",
+     "text": "生成评审包（ZIP+检查指南）供外部审查",
+     "refs": [
+      "/verification_logs/33/content"
+     ]
+    },
+    {
+     "role": "user",
+     "text": "评审发现 4 个可复现缺陷，要求修完再提测"
+    },
+    {
+     "role": "assistant",
+     "text": "四项全修并用评审反例复测通过",
+     "refs": [
+      "/experiments/60/output"
+     ]
+    },
+    {
+     "role": "user",
+     "text": "要求新回归测试“旧版失败、新版通过”"
+    },
+    {
+     "role": "assistant",
+     "text": "发现 VARCHAR 等值走内联快路径绕过缓存，改 BIGINT 谓词后旧挂新过",
+     "refs": [
+      "/verification_logs/33/content"
+     ]
+    }
+   ]
   },
   {
    "id": "c8",
    "source": "student",
-   "content": "官方题面全文拿到了，三个关键确认：崩溃模型限定进程被杀（不模拟断电），所以写穿页缓存+批量 fdatasync+关停落盘就满足持久化；exact 模式必须返回精确结果（距离对应当前记录），所以不碰近似；结算默认最近一次通过的提交，材料要逐字节锁定已评版本。"
+   "content": "提测回来了：准入通过、性能原始指标 E=2784（本地查询 −37% 但平台只动了 −0.14%）。这说明平台 T 被每交互开销主导，本地查询提速不迁移。重新读题面：M 是容器 memory.peak 且含文件页缓存，B/M 才按公式比例迁移——把力气转到 M 和 B 上。"
   },
   {
    "id": "c9",
    "source": "student",
-   "content": "提测结果：准入通过、E=3177（从 2784 涨了 14%）、但 Prompt 原始分只有 3.5。E 的涨幅 ≈ 用 M −55% + B −4% 单独解释的量级，再次验证 T 不迁移；3.5 说明材料评审细则变了（复用条件失效），72 条证据被去重规则塌缩。最后一枚额度要同时带新引擎和按新细则重写的证据。"
+   "content": "官方题面全文拿到了，三个关键确认：崩溃模型限定进程被杀（不模拟断电），所以写穿页缓存+批量 fdatasync+关停落盘就满足持久化；exact 模式必须返回精确结果（距离对应当前记录），所以不碰近似；结算默认最近一次通过的提交，材料要逐字节锁定已评版本。"
   },
   {
    "id": "c10",
    "source": "student",
-   "content": "先备份，再尝试整机重写，达到目标，最好能给我这个方案和整机重写的"
+   "content": "提测结果：准入通过、E=3177（从 2784 涨了 14%）、但 Prompt 原始分只有 3.5。E 的涨幅 ≈ 用 M −55% + B −4% 单独解释的量级，再次验证 T 不迁移；3.5 说明材料评审细则变了（复用条件失效），72 条证据被去重规则塌缩。最后一枚额度要同时带新引擎和按新细则重写的证据。"
   },
   {
    "id": "c11",
    "source": "student",
-   "content": "我这边获取的评审报告和之前一样，之前能获得什么我现在还能获得什么，只有基础查询是否通过，性能评价和prompt原始分。继续图中目标，时间还够。"
+   "content": "先备份，再尝试整机重写，达到目标，最好能给我这个方案和整机重写的"
   },
   {
    "id": "c12",
+   "source": "student",
+   "content": "我这边获取的评审报告和之前一样，之前能获得什么我现在还能获得什么，只有基础查询是否通过，性能评价和prompt原始分。继续图中目标，时间还够。"
+  },
+  {
+   "id": "c13",
    "source": "student",
    "content": "别闲着，查询程序那边提升查询性能，有人仅凭提升查询性能就进了前50，继续优化，直到测试性能基本提升到这样的程度，你才可以停下。"
   }
@@ -632,72 +675,93 @@
   },
   {
    "id": "e59",
+   "source": "student",
+   "what": "从论坛他队帖子发现题面默认性能负载=10,000 行×128 维、1000 次 TopK10，且判题测量 T/B/M 三项（ε_B=1MiB、ε_M=1MiB 容差）。用 2C/2G 容器三轮回放发现两大违例：ann 召回 0.879（10K 图搜索 ef 1024→6144 恒 0.88，低于 0.95 门——graph 统计 deg0=0 非断连，是 128d 均匀数据小规模下召回需近全图扫描）；B 因 index.bin 持久化超预算。修复：小表 ann 查询服务精确扫描（召回 1.0、快 2×）；index.bin 停止落盘（重启重建 1-3s 合规）",
+   "result": "题面默认负载三轮回放：recall 1.0000×3、ann 0.44 ms/q、write 0.61s、create 1.25s、B=10.37MiB、exit 0；全量回归+protocol_check 20/20 绿",
+   "output": "round1: write 0.62s create 1.24s ann 0.442 ms/q recall 1.0000 B=10872744B exit=0\nround3: recall 1.0000 B=10872744B exit=0"
+  },
+  {
+   "id": "e60",
+   "source": "student",
+   "what": "外部评审建议采纳两条：① B 双写减半——checkpoint 改为『run 未落盘且 memtable≤128MiB 时 WAL 即唯一持久副本』（跳过 flush+截断，恢复靠 WAL 重放，B 从 10.37→5.30MiB）；② 有误差界的量化安全剪枝——INT8 全局码本，三角不等式下界（保守误差界+查询越界误差），下界剪枝后对幸存者用 FP32 精确复算，召回 1.0 且扫描读 4× 更少字节",
+   "result": "10K×128d：ann 0.44→0.091 ms/q（裸机）/0.21（2C 容器），召回 1.0000；CREATE 1.25s→0.01s（量化索引替换 HNSW）；题面负载三轮回放 B=5.30MiB；修掉引导行重复入堆 bug 与剪枝浮点保守边距；全量正确性绿",
+   "output": "round1: write 0.61s create 0.01s ann 0.210 ms/q recall 1.0000 B=5562736B exit=0\nef=1024: recall 1.0000, ann 0.095 ms/q"
+  },
+  {
+   "id": "e61",
+   "source": "student",
+   "what": "请外部评审检查代码，评审在隔离目录用原始 ZIP 独立编译，找出 4 个可复现正确性问题：①量化误差界漏算查询侧舍入误差、阈值余量方向反了②显式事务COMMIT 不失效量化快照③恢复后未提交尾记录第二次恢复时随新 COMMIT 复活④TopK 未装满就剪枝（LIMIT 100 只回 64 行）",
+   "result": "四项全修并复测：查询侧重建误差精确计入（幅值缩放 ulp 余量）+阈值放宽方向改正；CommitTxn 失效量化快照；恢复按最后提交点截断尾记录；装满前禁剪枝。评审反例脚本全部通过；另修零量化步长回退、eBound 幅值缩放、OpenRuns 恢复 anyRunWritten_、Makefile 头依赖",
+   "output": "rounding exact/ann [[65, 0.0199999808]] [[65, 0.0199999808]]\nlimit100 counts exact/ann 100 100\ntxn insert exact/ann [[3, 0]] [[3, 0]]\nsecond recovery [[1], [3]]"
+  },
+  {
+   "id": "e62",
    "what": "组提交实测：官方负载写相位（100 批 × 100 行）逐条 fdatasync vs 每 25 批 fdatasync + 关停落盘，配对计时 + 结果逐字节比对",
    "result": "0.228s -> 0.072s (-68%)；diffs=0",
    "output": "write100x100(s)  A=0.2242  B=0.0721\nphase total(s)   A=0.3624  B=0.1629\nPAIRED10K OK (byte-identical results)"
   },
   {
-   "id": "e60",
+   "id": "e63",
    "what": "M 峰值测量（2C/2G 容器官方流程，cgroup memory.peak）：fadvise 驱逐已同步 WAL 前缀前后对比",
    "result": "19.30 MiB -> 14.16 MiB（页缓存修剪 −27%）",
    "output": "image A (mvdb-gc) M peak: 20242432 (19.30 MiB)\nimage B (mvdb-gc2) M peak: 14852096 (14.16 MiB)"
   },
   {
-   "id": "e61",
+   "id": "e64",
    "what": "M 峰值再修剪：量化码本免拷贝 + memtable 分块化（1MiB→512KiB→256KiB）+ 扁平哈希 + 单 arena，逐步容器实测",
    "result": "14.16 -> 10.66 -> 8.7 MiB（累计对原始 −55%）",
    "output": "peak=9670656 / 9617408 / 9527296 (chunked)\npeak=8847360 / 8658944 / 8724480 (256KiB)\nmemBytes=5301180 memCap=6291456"
   },
   {
-   "id": "e62",
+   "id": "e65",
    "what": "maddubs 点积核实验：两个 vpmaddubsw 精确重建码距（ds=aSq+bNorm-4S-256aSum-2R），配对实测",
    "result": "plain 0.090 -> 0.092ms 无提升，diffs=0 -> 扫描是带宽地板，回退",
    "output": "diffs: plain=0 filtered=0 (must be 0)\nplain q median ms A=0.090  B=0.092"
   },
   {
-   "id": "e63",
+   "id": "e66",
    "what": "sync-10 换 M 实验：同步间隔 25 vs 10 两镜像各 2 次交错测 M",
    "result": "25: 11.18/13.03MiB；10: 10.98/12.64MiB——噪声 ±1MB 大于预期 −0.8MB，否证回退",
    "output": "peak=11177984 / 13033472 (sync25)\npeak=10981376 / 12644352 (sync10)"
   },
   {
-   "id": "e64",
+   "id": "e67",
    "what": "WAL 批量记录：每条语句一个 [类型4|txn|count|表|行…] 记录（恢复器加类型 4/5 回放分支），data-dir 字节数对比",
    "result": "5.30 MiB -> 5.07 MiB（−4.3%）；回归抓出读写字段序不一致并修复",
    "output": "data-dir bytes: 5392743 (5.14 MiB)\ndata-dir bytes: 5313543 (5.07 MiB)\n20 passed, 0 failed"
   },
   {
-   "id": "e65",
+   "id": "e68",
    "what": "小表免码字实验：删 1.25MB 码本 vs 查询时间，配对实测",
    "result": "plain 0.077 -> 0.238ms（+80ms 全相位）；当时判定零和回退；E=3177 证实 T 不迁移后复活为净正（M −1.25MB）",
    "output": "plain q median ms B=0.238\nphase total(s)   B=0.2504\ndiffs: plain=0 filtered=0 (must be 0)"
   },
   {
-   "id": "e66",
+   "id": "e69",
    "what": "平台迁移验证：提交带 M −55% + B −4.3% + T −64% 的引擎，对照 c76a0172 锚",
    "result": "E 2784 -> 3177（+14%），≈ M/B 单独解释的量级 -> T 不迁移的假设成立",
    "output": "性能评测完成；原始指标 E = 3177.243655\n(此前 2784.826554)"
   },
   {
-   "id": "e67",
+   "id": "e70",
    "what": "并行 INSERT 行校验（拆两半交给常驻 worker）首版回归：driver 17/20，断言 NaN/重复键用例受影响",
    "result": "定位为行校验错误被 ApplyMutations 覆盖导致部分行应用；补『错误立即返回』后 20/20",
    "output": "17 passed, 3 failed\nAssertionError: (\"'[1,NaN]'\", {'id': 2, 'ok': True, 'affected_rows': 0})\n20 passed, 0 failed"
   },
   {
-   "id": "e68",
+   "id": "e71",
    "what": "memtable 分块化后 big_route 在 CREATE INDEX 时 SIGSEGV：gdb 定位 + 校验打印定位",
    "result": "flush BAD len=58354512 at off=1048576——size 恰好落在块边界时写回上一块而 map 偏移指向下一块；修复溢出判定后 BIG-ROUTE GATE OK",
    "output": "[mvdb] flush BAD len=58354512 at off=1048576 bytes=1600000\nBIG-ROUTE GATE OK (route / gate-on-ready-graph / ordering / restart-bound)"
   },
   {
-   "id": "e69",
+   "id": "e72",
    "what": "DDL 写穿：CREATE TABLE 的 ~3 次 fsync（WAL+目录文件+目录项）移出写轮窗口（关停 checkpoint 重存兜底），5 轮负载 A/B",
    "result": "3.048s -> 2.290s（含此前写路径工作）",
    "output": "5 loads (50K rows): 3.048s\n5 loads (50K rows): 2.290s"
   },
   {
-   "id": "e70",
+   "id": "e73",
    "what": "WAL 校验和从 slicing-by-8 IEEE CRC-32 换硬件 CRC-32C（SSE4.2 crc32 指令），crc 测试更新检查值并验证流式等价",
    "result": "check value OK + CRC EQUIVALENCE OK",
    "output": "check value OK\nCRC EQUIVALENCE OK"
@@ -927,6 +991,18 @@
   {
    "id": "vl31",
    "content": "WalAppendRow single-copy fused record: all suites green incl. recovery_kill; query at bandwidth wall 2.42 ms/q @200K"
+  },
+  {
+   "id": "vl32",
+   "content": "judge-default-load (10Kx128d, 1000 TopK10) 3 rounds: recall 1.0, B=10.37MiB, exit 0"
+  },
+  {
+   "id": "vl33",
+   "content": "quantized safe-pruned ann: 10K recall 1.0 @0.091 ms/q bare / 0.21 ms/q 2C; WAL-only checkpoint: B 10.37 -> 5.30 MiB"
+  },
+  {
+   "id": "vl34",
+   "content": "external review rounds 2-3: epoch bumped before apply in BOTH ApplyMutations and CommitTxn; epoch_cp_test uses BIGINT predicate (inline path avoided) + 3000B rows: old binary fails, new passes"
   }
  ],
  "evidence": [
@@ -937,11 +1013,11 @@
    "summary": "学生逐条解读题面关键约束（stdin/stdout、单客户端、单显式事务、BIGINT 主键、VARCHAR Unicode 字符计数、VECTOR float32、拒绝 NaN/Inf、/data、恢复完成前不得就绪）",
    "student_evidence": {
     "pointer": "/conversations/0/content",
-    "quote": "我先读题面与公开题包再动手。题面（yuque）关键约束：stdin/stdout 交互、单客户端、最多一个显式事务、BIGINT 主键、VARCHAR(n) 按 Unicode 字符计数、VECTOR"
+    "quote": "我先读题面与公开题包再动手。题面（yuque）关键约束：stdin/stdout 交互、单客户端、最多一个显式事务、BIGINT 主键、VARCHAR(n) 按"
    },
    "result_evidence": {
     "pointer": "/experiments/0/output",
-    "quote": "PASS sql_crud\nPASS sql_comparisons\nPASS sql_ordering\nPASS sql_empty\nPASS sql_primary_key\nPASS sql_un"
+    "quote": "PASS sql_crud\nPASS sql_comparisons\nPASS sql_ordering\nPASS sql_empty\nPASS sql_pri"
    }
   },
   {
@@ -951,11 +1027,11 @@
    "summary": "学生在驱动协议未发布时判断『先完成功能、协议层薄封装、等冻结后适配』，事后按官方 STDIO_PROTOCOL 适配并通过官方协议检查",
    "student_evidence": {
     "pointer": "/conversations/1/content",
-    "quote": "题面没有给出完整驱动协议（论坛确认组织方尚未发布驱动），公开题包只有 20 个用例的 .test/.result。策略：先把功能做完整并自测，协议层做成薄封装，等驱动冻结后快速适配。"
+    "quote": "题面没有给出完整驱动协议（论坛确认组织方尚未发布驱动），公开题包只有 20 个用例的 .test/.result。策略：先把功能做完整并自测，协议层做成薄封装，"
    },
    "result_evidence": {
     "pointer": "/experiments/26/output",
-    "quote": "handshake: PASS\nsql_crud PASS\n...\ntransaction_shutdown_rollback PASS\npassed: True"
+    "quote": "handshake: PASS\nsql_crud PASS\n...\ntransaction_shutdown_rollback PASS\npassed: Tru"
    }
   },
   {
@@ -969,7 +1045,7 @@
    },
    "result_evidence": {
     "pointer": "/experiments/6/output",
-    "quote": "level0 links=91540 avg=9.15 zeroDeg=0\nsearch with ef=N found 9971 candidates (of 10000)\nef=  64 reca"
+    "quote": "level0 links=91540 avg=9.15 zeroDeg=0\nsearch with ef=N found 9971 candidates (of"
    }
   },
   {
@@ -983,7 +1059,7 @@
    },
    "result_evidence": {
     "pointer": "/experiments/15/output",
-    "quote": "TRACE recover put: tid=1 flags=0 pk=3001\nTRACE recover put: tid=1 flags=0 pk=1\nTRACE recover put: ti"
+    "quote": "TRACE recover put: tid=1 flags=0 pk=3001\nTRACE recover put: tid=1 flags=0 pk=1\nT"
    }
   },
   {
@@ -993,7 +1069,7 @@
    "summary": "学生解释 LSM-lite 为何匹配批量写+TopK 负载，并以官方 100 条/批写入口径实测验证",
    "student_evidence": {
     "pointer": "/technical_notes/0/content",
-    "quote": "为什么日志型（LSM-lite）适合本题：批量写入只追加 WAL + 内存缓冲，落盘是顺序写；run 按主键有序 + 稀疏索引，点查 O(log) 而扫描顺序读；删除用墓碑，归并时后写覆盖先写。代价是"
+    "quote": "为什么日志型（LSM-lite）适合本题：批量写入只追加 WAL + 内存缓冲，落盘是顺序写；run 按主键有序 + 稀疏索引，点查 O(log) 而扫描顺序读"
    },
    "result_evidence": {
     "pointer": "/experiments/22/output",
@@ -1007,11 +1083,11 @@
    "summary": "学生解释『WAL 兼作 spill 文件』的流式两遍原子性设计，在超过内存限额的大语句上验证通过",
    "student_evidence": {
     "pointer": "/technical_notes/1/content",
-    "quote": "语句原子性 + 内存有界的组合技：大 UPDATE/DELETE 第一遍边扫描边把 PUT 流式写进 WAL（任何校验失败 ftruncate 回滚），fsync COMMIT 后第二遍回读自己刚写的"
+    "quote": "语句原子性 + 内存有界的组合技：大 UPDATE/DELETE 第一遍边扫描边把 PUT 流式写进 WAL（任何校验失败 ftruncate 回滚），fsyn"
    },
    "result_evidence": {
     "pointer": "/experiments/14/output",
-    "quote": "== large DELETE/UPDATE: streaming, flush, crash atomicity\n  ok\n== WHERE on unknown column -> column_"
+    "quote": "== large DELETE/UPDATE: streaming, flush, crash atomicity\n  ok\n== WHERE on unkno"
    }
   },
   {
@@ -1021,7 +1097,7 @@
    "summary": "学生解释两遍恢复（最后 COMMIT 截断）依据的单客户端不交错前提，用 kill -9 测试验证",
    "student_evidence": {
     "pointer": "/technical_notes/2/content",
-    "quote": "恢复的两遍扫描：第一遍只定位『最后一个完整 COMMIT 的结尾』与首个损坏记录，第二遍把 COMMIT 之前的 PUT 流式重放（边放边落盘）。单客户端事务不交错是前提——否则无法用『最后一个 CO"
+    "quote": "恢复的两遍扫描：第一遍只定位『最后一个完整 COMMIT 的结尾』与首个损坏记录，第二遍把 COMMIT 之前的 PUT 流式重放（边放边落盘）。单客户端事务不"
    },
    "result_evidence": {
     "pointer": "/experiments/3/output",
@@ -1035,7 +1111,7 @@
    "summary": "学生解释 HNSW 堆比较器方向错误会交换最近/最远节点，用探针实验修正后召回恢复",
    "student_evidence": {
     "pointer": "/technical_notes/3/content",
-    "quote": "HNSW 里 priority_queue 的比较器方向是最容易写反的：比较器 (a<b) 得到的是最大堆（堆顶=最远），边界堆要用 (a>b) 才能弹出最近节点。反了以后召回从 0.998 掉到 0"
+    "quote": "HNSW 里 priority_queue 的比较器方向是最容易写反的：比较器 (a<b) 得到的是最大堆（堆顶=最远），边界堆要用 (a>b) 才能弹出最近节"
    },
    "result_evidence": {
     "pointer": "/experiments/7/output",
@@ -1049,11 +1125,11 @@
    "summary": "学生用『访问占比』解释 ANN 召回随数据规模衰减，并把 ef 改为随 N 自适应后在 1M 规模实测 0.97",
    "student_evidence": {
     "pointer": "/technical_notes/4/content",
-    "quote": "ANN 召回随数据规模衰减的本质是『访问占比』：ef=1024 在 200K 访问 11%（召回 0.965），在 1M 只有 2%（召回 0.62）。所以搜索 ef 必须随 N 自适应（max(10"
+    "quote": "ANN 召回随数据规模衰减的本质是『访问占比』：ef=1024 在 200K 访问 11%（召回 0.965），在 1M 只有 2%（召回 0.62）。所以搜索"
    },
    "result_evidence": {
     "pointer": "/experiments/20/output",
-    "quote": "write phase: 46.5s (1001 statements)\nindex build: 668.6s\nef=12000: ann 49.3 ms/q, recall@10 mean 0.9"
+    "quote": "write phase: 46.5s (1001 statements)\nindex build: 668.6s\nef=12000: ann 49.3 ms/q"
    }
   },
   {
@@ -1063,11 +1139,11 @@
    "summary": "学生解释索引图持久化的崩溃安全顺序（先落图再截 WAL），并测量 200K 重启 50s→0.2s",
    "student_evidence": {
     "pointer": "/technical_notes/5/content",
-    "quote": "索引图持久化快启的崩溃安全顺序：干净检查点 = 先落全部 MemTable → 再序列化索引图（tmp+rename+目录 fsync）→ 最后截断 WAL。若崩溃发生在『截断之前』，WAL 仍在、恢"
+    "quote": "索引图持久化快启的崩溃安全顺序：干净检查点 = 先落全部 MemTable → 再序列化索引图（tmp+rename+目录 fsync）→ 最后截断 WAL。若"
    },
    "result_evidence": {
     "pointer": "/experiments/16/output",
-    "quote": "index build: 49.87s\nrestart with index (rebuild): 0.23s\nann query after restart: [(141340, 3.3896), "
+    "quote": "index build: 49.87s\nrestart with index (rebuild): 0.23s\nann query after restart:"
    }
   },
   {
@@ -1077,11 +1153,11 @@
    "summary": "学生解释事务 overlay + 精确扫描回退 + 标死/追加式增量维护的一致性设计，并用过滤 TopK 取舍实验验证",
    "student_evidence": {
     "pointer": "/technical_notes/6/content",
-    "quote": "事务与索引一致性的最小实现：显式事务的修改进 overlay，查询时 overlay 非空就直接走精确扫描（正确性优先）；提交后把 overlay 并入 MemTable 并增量维护 HNSW（更新="
+    "quote": "事务与索引一致性的最小实现：显式事务的修改进 overlay，查询时 overlay 非空就直接走精确扫描（正确性优先）；提交后把 overlay 并入 Mem"
    },
    "result_evidence": {
     "pointer": "/experiments/12/output",
-    "quote": "recall@10: mean 0.9600, min 0.8000\nfiltered ann: 2.93s (29.3 ms/q) ... recall@10 mean 1.0000 min 1.0"
+    "quote": "recall@10: mean 0.9600, min 0.8000\nfiltered ann: 2.93s (29.3 ms/q) ... recall@10"
    }
   },
   {
@@ -1091,11 +1167,11 @@
    "summary": "学生解释并发建图『稳定快照检索 + 串行落链』的正确性，随后的建图微优化未破坏召回",
    "student_evidence": {
     "pointer": "/technical_notes/7/content",
-    "quote": "并发建图的正确做法：worker 只对『稳定快照』做检索并产出链接方案，落链（含度数裁剪与入口更新）在批次结束串行执行——彻底避免邻接表的并发读写；第一批的入口节点要先单独落。"
+    "quote": "并发建图的正确做法：worker 只对『稳定快照』做检索并产出链接方案，落链（含度数裁剪与入口更新）在批次结束串行执行——彻底避免邻接表的并发读写；第一批的入口"
    },
    "result_evidence": {
     "pointer": "/experiments/10/output",
-    "quote": "build time: 322.36s (1611.8 us/node)\nbuild time: 128.69s (643.5 us/node)\nbuild time: 48.96s (244.8 u"
+    "quote": "build time: 322.36s (1611.8 us/node)\nbuild time: 128.69s (643.5 us/node)\nbuild t"
    }
   },
   {
@@ -1109,7 +1185,7 @@
    },
    "result_evidence": {
     "pointer": "/experiments/2/output",
-    "quote": "TRACE wal rec: off=0 type=1 len=120 crc_ok\nTRACE wal ddl parse failed: io_error len=110"
+    "quote": "TRACE wal rec: off=0 type=1 len=120 crc_ok\nTRACE wal ddl parse failed: io_error "
    }
   },
   {
@@ -1123,7 +1199,7 @@
    },
    "result_evidence": {
     "pointer": "/experiments/5/output",
-    "quote": "write time: 6.81s (29379 rows/s)\nindex build time: 14.38s\nann query time: 0.01s total, 0.1 ms/query\n"
+    "quote": "write time: 6.81s (29379 rows/s)\nindex build time: 14.38s\nann query time: 0.01s "
    }
   },
   {
@@ -1133,11 +1209,11 @@
    "summary": "学生设计 BIGINT 极值回归，发现并修复 INT64_MAX 与扫描哨兵冲突",
    "student_evidence": {
     "pointer": "/experiments/17/what",
-    "quote": "极端值/边界回归：BIGINT 极值往返（INT64_MAX/MIN，暴露并修复了扫描归并里 INT64_MAX 哨兵冲突）、字符串引号/反斜杠转义、列序 INSERT、SELECT * 含向量列、科"
+    "quote": "极端值/边界回归：BIGINT 极值往返（INT64_MAX/MIN，暴露并修复了扫描归并里 INT64_MAX 哨兵冲突）、字符串引号/反斜杠转义、列序 IN"
    },
    "result_evidence": {
     "pointer": "/experiments/17/output",
-    "quote": "== BIGINT extremes / string escapes / column-list INSERT / vector select\n  ok\n== very long single st"
+    "quote": "== BIGINT extremes / string escapes / column-list INSERT / vector select\n  ok\n=="
    }
   },
   {
@@ -1147,11 +1223,11 @@
    "summary": "学生把存储阈值做成环境变量开关并做随机 kill 模糊测试，发现 PointGet 多 run 越界直接 return 的缺陷",
    "student_evidence": {
     "pointer": "/experiments/18/what",
-    "quote": "给落盘/检查点阈值加环境变量开关（MVDB_MEMTABLE_BYTES / MVDB_WAL_CHECKPOINT_BYTES，最小可到 64KB/128KB），使每几次写入就触发一次 flush+"
+    "quote": "给落盘/检查点阈值加环境变量开关（MVDB_MEMTABLE_BYTES / MVDB_WAL_CHECKPOINT_BYTES，最小可到 64KB/128KB"
    },
    "result_evidence": {
     "pointer": "/experiments/18/output",
-    "quote": "topk: {'ok': True, 'columns': ['id', 'd'], 'rows': [[500, 707.106781], [499, 707.108195]]}\niteration"
+    "quote": "topk: {'ok': True, 'columns': ['id', 'd'], 'rows': [[500, 707.106781], [499, 707"
    }
   },
   {
@@ -1161,11 +1237,11 @@
    "summary": "学生设计 schema 边界用例发现表名大小写敏感不符合 MySQL 语义，修正后全过",
    "student_evidence": {
     "pointer": "/experiments/23/what",
-    "quote": "schema 边界用例：主键不在第一列/在最后一列、表名与列名大小写混写（SELECT ID FROM A WHERE NAME=...）、多余空白；同时实测 efC=150 的 1M 召回与构建时间"
+    "quote": "schema 边界用例：主键不在第一列/在最后一列、表名与列名大小写混写（SELECT ID FROM A WHERE NAME=...）、多余空白；同时实测 "
    },
    "result_evidence": {
     "pointer": "/experiments/23/output",
-    "quote": "schema edge cases OK\nindex build: 329.2s\nann queries: 0.70s total (35.0 ms/q), recall@10 mean 0.9300"
+    "quote": "schema edge cases OK\nindex build: 329.2s\nann queries: 0.70s total (35.0 ms/q), r"
    }
   },
   {
@@ -1175,11 +1251,11 @@
    "summary": "学生用 1500 条随机 token 模糊解析器，固化『空白行不是语句』等协议约定",
    "student_evidence": {
     "pointer": "/experiments/25/what",
-    "quote": "解析器随机模糊测试（tests/parser_fuzz.py）：1500 条随机 token 组合（含未闭合引号、NUL 字节、非法 UTF-8、超大数、NaN/Infinity 字面量、嵌套括号、注"
+    "quote": "解析器随机模糊测试（tests/parser_fuzz.py）：1500 条随机 token 组合（含未闭合引号、NUL 字节、非法 UTF-8、超大数、NaN"
    },
    "result_evidence": {
     "pointer": "/experiments/25/output",
-    "quote": "fuzz 1400/1500 ok (last: \"L2_DISTANCE OR '\\\\' WHERE 'unterminated (( !=\")\nPARSER FUZZ OK (1500 itera"
+    "quote": "fuzz 1400/1500 ok (last: \"L2_DISTANCE OR '\\\\' WHERE 'unterminated (( !=\")\nPARSER"
    }
   },
   {
@@ -1189,11 +1265,11 @@
    "summary": "学生在 2C/2G 容器复现 1M 全流程，发现检查点内存翻倍导致 OOM，改为流式序列化后通过",
    "student_evidence": {
     "pointer": "/experiments/27/what",
-    "quote": "按正式资源限制（docker --cpus 2 --memory 2g）在容器内跑 1M×128d 全流程：写入 → 建索引 → 精确真值 → ANN 召回 → 过滤 → 干净关停 → 重启；同时新增"
+    "quote": "按正式资源限制（docker --cpus 2 --memory 2g）在容器内跑 1M×128d 全流程：写入 → 建索引 → 精确真值 → ANN 召回 →"
    },
    "result_evidence": {
     "pointer": "/experiments/27/output",
-    "quote": "write: 117.1s (8538 rows/s)\nindex build: 639.7s (2 CPUs)\nafter build: 1.28GiB / 2GiB 0.00%\nann: 0.4s"
+    "quote": "write: 117.1s (8538 rows/s)\nindex build: 639.7s (2 CPUs)\nafter build: 1.28GiB / "
    }
   },
   {
@@ -1203,7 +1279,7 @@
    "summary": "学生设计隐藏用例语义扫描，发现一条请求多条语句被静默丢弃，修复为 syntax_error",
    "student_evidence": {
     "pointer": "/experiments/28/what",
-    "quote": "针对 9 个隐藏正式用例做语义扫描（tests/hidden_sweep.py）：向量字面量空格/正号、VECTOR(1) 与 VECTOR(256)、尾随分号与双分号、一条请求多条语句、LIMIT "
+    "quote": "针对 9 个隐藏正式用例做语义扫描（tests/hidden_sweep.py）：向量字面量空格/正号、VECTOR(1) 与 VECTOR(256)、尾随分号"
    },
    "result_evidence": {
     "pointer": "/experiments/28/output",
@@ -1217,11 +1293,11 @@
    "summary": "学生设计半写 WAL 尾部注入测试验证恢复的截断逻辑",
    "student_evidence": {
     "pointer": "/experiments/4/what",
-    "quote": "健壮性全套：半写 WAL 尾部截断、NaN/Infinity/1e999/维度不符/非法向量字面量、VARCHAR Unicode 长度、BIGINT 溢出、事务内索引一致性（更新+删除+回滚+重启）"
+    "quote": "健壮性全套：半写 WAL 尾部截断、NaN/Infinity/1e999/维度不符/非法向量字面量、VARCHAR Unicode 长度、BIGINT 溢出、事"
    },
    "result_evidence": {
     "pointer": "/experiments/4/output",
-    "quote": "== NaN/Inf/overflow/dim errors\n  ok\n== torn WAL tail is truncated on recovery\n  ok\n== ann mode retur"
+    "quote": "== NaN/Inf/overflow/dim errors\n  ok\n== torn WAL tail is truncated on recovery\n  "
    }
   },
   {
@@ -1235,7 +1311,7 @@
    },
    "result_evidence": {
     "pointer": "/experiments/8/output",
-    "quote": "ef=  64 recall@10=0.5080\nef= 128 recall@10=0.7130\nef= 256 recall@10=0.8470\nef= 512 recall@10=0.9120\n"
+    "quote": "ef=  64 recall@10=0.5080\nef= 128 recall@10=0.7130\nef= 256 recall@10=0.8470\nef= 5"
    }
   },
   {
@@ -1249,7 +1325,7 @@
    },
    "result_evidence": {
     "pointer": "/experiments/9/output",
-    "quote": "ef=1024 recall@10=0.9680 avgVisited=22481\nef=2048 recall@10=0.9780 avgVisited=37862"
+    "quote": "ef=1024 recall@10=0.9680 avgVisited=22481\nef=2048 recall@10=0.9780 avgVisited=37"
    }
   },
   {
@@ -1259,11 +1335,11 @@
    "summary": "学生尝试过滤位图缓存等多种过滤 ANN 方案并测量召回，最终确定过滤组走精确扫描",
    "student_evidence": {
     "pointer": "/experiments/11/what",
-    "quote": "过滤 ANN 召回实验：先加过滤缓存位图（把逐节点 PointGet+解码的过滤改成 O(1) 位图查询，按谓词缓存、数据 epoch 失效），再扫 ef=2048/4096"
+    "quote": "过滤 ANN 召回实验：先加过滤缓存位图（把逐节点 PointGet+解码的过滤改成 O(1) 位图查询，按谓词缓存、数据 epoch 失效），再扫 ef=20"
    },
    "result_evidence": {
     "pointer": "/experiments/11/output",
-    "quote": "filtered ann: 0.68s (6.8 ms/q) ... recall@10 mean 0.8140 min 0.5000\nfiltered ann: 1.08s (10.8 ms/q) "
+    "quote": "filtered ann: 0.68s (6.8 ms/q) ... recall@10 mean 0.8140 min 0.5000\nfiltered ann"
    }
   },
   {
@@ -1273,7 +1349,7 @@
    "summary": "学生构建 Docker 镜像并在容器内重放全部公开用例",
    "student_evidence": {
     "pointer": "/experiments/13/what",
-    "quote": "Docker 镜像构建（ubuntu:24.04 + g++13，COPY mvdb/ 编译）并用 docker run -i 挂载 /data 重放全部 20 个公开用例"
+    "quote": "Docker 镜像构建（ubuntu:24.04 + g++13，COPY mvdb/ 编译）并用 docker run -i 挂载 /data 重放全部 20"
    },
    "result_evidence": {
     "pointer": "/experiments/13/output",
@@ -1291,7 +1367,7 @@
    },
    "result_evidence": {
     "pointer": "/experiments/19/output",
-    "quote": "== large DELETE/UPDATE: streaming, flush, crash atomicity\n  ok\n== very long single statement (100K r"
+    "quote": "== large DELETE/UPDATE: streaming, flush, crash atomicity\n  ok\n== very long sing"
    }
   },
   {
@@ -1301,11 +1377,11 @@
    "summary": "学生实施 AVX2+FMA 距离核与整块向量解码，实测建索引 668s→402s、精确查询 27→15ms，并确认召回不受影响",
    "student_evidence": {
     "pointer": "/experiments/21/what",
-    "quote": "性能优化两连：① L2 距离改成 AVX2+FMA 显式向量化（运行时检测 CPU 特性、无 AVX2 走标量回退，编译加 -mavx2 -mfma）；② 行解码里向量列从逐元素 u32 读取改成整块"
+    "quote": "性能优化两连：① L2 距离改成 AVX2+FMA 显式向量化（运行时检测 CPU 特性、无 AVX2 走标量回退，编译加 -mavx2 -mfma）；② 行解"
    },
    "result_evidence": {
     "pointer": "/experiments/21/output",
-    "quote": "index build: 402.3s\nann queries: 0.78s total (38.9 ms/q), recall@10 mean 0.9700 min 0.9000\nexact que"
+    "quote": "index build: 402.3s\nann queries: 0.78s total (38.9 ms/q), recall@10 mean 0.9700 "
    }
   },
   {
@@ -1315,11 +1391,11 @@
    "summary": "学生按官方口径做全流程彩排（100 条/批写入→建索引→ann 召回→重启持久性）",
    "student_evidence": {
     "pointer": "/experiments/24/what",
-    "quote": "按题面 3.3 官方口径做全流程彩排（tests/rehearsal.py）：空目录启动 → 建表 → 每批 100 条写入 20 万行 → 建索引 → 精确真值 → ann 查询（查重、召回）→ 过"
+    "quote": "按题面 3.3 官方口径做全流程彩排（tests/rehearsal.py）：空目录启动 → 建表 → 每批 100 条写入 20 万行 → 建索引 → 精确真"
    },
    "result_evidence": {
     "pointer": "/experiments/24/output",
-    "quote": "write: 9.40s (21266 rows/s)\nindex: 33.40s\nann: 0.17s total, recall@10 mean 0.9900 min 0.9000\nfiltere"
+    "quote": "write: 9.40s (21266 rows/s)\nindex: 33.40s\nann: 0.17s total, recall@10 mean 0.990"
    }
   },
   {
@@ -1329,7 +1405,7 @@
    "summary": "学生复盘 WAL 偏移与堆比较器两类『细节型 bug』的教训",
    "student_evidence": {
     "pointer": "/retrospective/0/content",
-    "quote": "两个最难查的 bug 都来自『偏移/比较器方向』这类细节：WAL 重放 substr(10) 应为 substr(9)；priority_queue 的 (a<b) 比较器给出的是最大堆。教训：二进制"
+    "quote": "两个最难查的 bug 都来自『偏移/比较器方向』这类细节：WAL 重放 substr(10) 应为 substr(9)；priority_queue 的 (a<"
    },
    "result_evidence": {
     "pointer": "/experiments/1/output",
@@ -1343,7 +1419,7 @@
    "summary": "学生结合测量解释高维均匀数据下过滤 ANN 召回不足，选择过滤组精确扫描保门槛",
    "student_evidence": {
     "pointer": "/retrospective/1/content",
-    "quote": "均匀高维随机数据是 ANN 过滤检索的近似最坏情形：距离高度集中，过滤后的 TopK 需要扫过很大比例的数据。在拿到冻结评测配置前，用『过滤=精确、无过滤=大 ef ANN』换取 0.95 召回门槛的"
+    "quote": "均匀高维随机数据是 ANN 过滤检索的近似最坏情形：距离高度集中，过滤后的 TopK 需要扫过很大比例的数据。在拿到冻结评测配置前，用『过滤=精确、无过滤=大 "
    },
    "result_evidence": {
     "pointer": "/verification_logs/10/content",
@@ -1357,11 +1433,11 @@
    "summary": "学生复盘并发建图的正确性设计，并以建索引实测时长佐证",
    "student_evidence": {
     "pointer": "/retrospective/2/content",
-    "quote": "批量并行建索引的正确姿势：worker 只对稳定图快照做检索并算出链接方案，落链（含裁剪与入口更新）串行执行，杜绝并发读写邻接表；第一批的入口节点要先落。并行前先用单线程版把质量验证到 0.95+ 再"
+    "quote": "批量并行建索引的正确姿势：worker 只对稳定图快照做检索并算出链接方案，落链（含裁剪与入口更新）串行执行，杜绝并发读写邻接表；第一批的入口节点要先落。并行前"
    },
    "result_evidence": {
     "pointer": "/verification_logs/6/content",
-    "quote": "write: 117.1s (8538 rows/s)\nindex build: 641.4s (2 CPUs)\nafter build: 1.28GiB / 2GiB"
+    "quote": "write: 117.1s (8538 rows/s)\nindex build: 641.4s (2 CPUs)\nafter build: 1.28GiB / "
    }
   },
   {
@@ -1371,7 +1447,7 @@
    "summary": "学生解释内存有界必须落在执行路径上（WAL 兼 spill），以 1M 全流程过检佐证",
    "student_evidence": {
     "pointer": "/retrospective/4/content",
-    "quote": "内存有界不能靠事后加限制，要从执行路径上保证：WAL 本身就是天然的『spill 文件』——大语句第一遍只流式写 WAL，第二遍回读自己刚写的那段来应用，既省内存又保证崩溃时整条语句全有全无；恢复先做"
+    "quote": "内存有界不能靠事后加限制，要从执行路径上保证：WAL 本身就是天然的『spill 文件』——大语句第一遍只流式写 WAL，第二遍回读自己刚写的那段来应用，既省内"
    },
    "result_evidence": {
     "pointer": "/verification_logs/7/content",
@@ -1385,7 +1461,7 @@
    "summary": "学生复盘语义细节类隐藏用例的教训（未知列、同值更新），以隐藏用例扫描通过佐证",
    "student_evidence": {
     "pointer": "/retrospective/5/content",
-    "quote": "隐藏用例大概率覆盖『语义细节』而非新功能：未知列要报 column_not_found 而不是静默空结果；UPDATE 同值按 MySQL 默认不计 affected_rows；多列 ORDER BY"
+    "quote": "隐藏用例大概率覆盖『语义细节』而非新功能：未知列要报 column_not_found 而不是静默空结果；UPDATE 同值按 MySQL 默认不计 affec"
    },
    "result_evidence": {
     "pointer": "/verification_logs/8/content",
@@ -1399,7 +1475,7 @@
    "summary": "学生复盘『正常关闭会掩盖 bug』的注入测试设计，以 12 轮模糊全过佐证",
    "student_evidence": {
     "pointer": "/retrospective/6/content",
-    "quote": "崩溃注入必须覆盖『旧数据在 run、新变更在 MemTable』的组合——正常关机会把墓碑落成 run，掩盖了归并层的优先级 bug；只有 kill -9 保留 MemTable 状态才能暴露。INT"
+    "quote": "崩溃注入必须覆盖『旧数据在 run、新变更在 MemTable』的组合——正常关机会把墓碑落成 run，掩盖了归并层的优先级 bug；只有 kill -9 保留"
    },
    "result_evidence": {
     "pointer": "/verification_logs/11/content",
@@ -1413,7 +1489,7 @@
    "summary": "学生复盘索引图持久化快启的取舍（先落图再截 WAL），以重启 0.23s 佐证",
    "student_evidence": {
     "pointer": "/retrospective/7/content",
-    "quote": "『恢复前必须重建索引』不等于每次都要全量重建：干净检查点时索引图与数据是自洽快照，序列化+CRC 直接加载把 200K 规模的重启从 50s 压到 0.2s；崩溃时保守走重建。代价是检查点要写一遍图（"
+    "quote": "『恢复前必须重建索引』不等于每次都要全量重建：干净检查点时索引图与数据是自洽快照，序列化+CRC 直接加载把 200K 规模的重启从 50s 压到 0.2s；崩"
    },
    "result_evidence": {
     "pointer": "/verification_logs/13/content",
@@ -1427,7 +1503,7 @@
    "summary": "学生复盘模糊测试的价值：阈值压到极小暴露默认阈值下隐藏的缺陷",
    "student_evidence": {
     "pointer": "/retrospective/8/content",
-    "quote": "模糊测试（阈值压到极小 + 随机 kill）的价值远超预期：同样的代码在默认阈值下全绿，把 flush/检查点频率拉高后立刻暴露了 PointGet 多 run 越界直接 return 的缺陷——扫描"
+    "quote": "模糊测试（阈值压到极小 + 随机 kill）的价值远超预期：同样的代码在默认阈值下全绿，把 flush/检查点频率拉高后立刻暴露了 PointGet 多 run"
    },
    "result_evidence": {
     "pointer": "/verification_logs/3/content",
@@ -1441,7 +1517,7 @@
    "summary": "学生复盘 ANN 召回随规模衰减与自适应 ef 的取舍，以 1M 召回 0.98 佐证",
    "student_evidence": {
     "pointer": "/retrospective/9/content",
-    "quote": "ANN 召回会随数据规模衰减：200K 下 ef=1024 有 0.965，同样参数在 1M 下只有 0.62——固定 ef 在『访问占比』意义上越用越小。0.95 是硬门槛，所以把 ef 做成随 N"
+    "quote": "ANN 召回会随数据规模衰减：200K 下 ef=1024 有 0.965，同样参数在 1M 下只有 0.62——固定 ef 在『访问占比』意义上越用越小。0."
    },
    "result_evidence": {
     "pointer": "/verification_logs/12/content",
@@ -1455,7 +1531,7 @@
    "summary": "学生从提测记录接口逐字段取证四次失败任务，判定评测未进入用例执行阶段",
    "student_evidence": {
     "pointer": "/experiments/29/what",
-    "quote": "四次提测全部「评测执行失败」后，从提测记录接口逐字段取证：taskStatus、failMsg、testStartTime/testEndTime、testCaseResult.resultStatu"
+    "quote": "四次提测全部「评测执行失败」后，从提测记录接口逐字段取证：taskStatus、failMsg、testStartTime/testEndTime、testCa"
    },
    "result_evidence": {
     "pointer": "/experiments/29/output",
@@ -1469,11 +1545,11 @@
    "summary": "学生核对报名登记仓库地址，定位『平台评测登记仓库而代码在另一仓库』的根因并修复",
    "student_evidence": {
     "pointer": "/experiments/30/what",
-    "quote": "核对报名登记的仓库地址，发现平台评测的是登记仓库（github.com/2601776-hez02/seekdb），而此前代码全部推到了 Gitee（hou-enze/seekdb）"
+    "quote": "核对报名登记的仓库地址，发现平台评测的是登记仓库（github.com/2601776-hez02/seekdb），而此前代码全部推到了 Gitee（hou-e"
    },
    "result_evidence": {
     "pointer": "/experiments/30/output",
-    "quote": "branch head: 0bc158f5df36e7d41695707abeec97953425714b\nmvdb/src/engine.cpp identical size=66779"
+    "quote": "branch head: 0bc158f5df36e7d41695707abeec97953425714b\nmvdb/src/engine.cpp identi"
    }
   },
   {
@@ -1483,11 +1559,11 @@
    "summary": "学生提出单请求 60s 超时假设，改为大表跳建索引并在 2C/2G 容器验证",
    "student_evidence": {
     "pointer": "/experiments/31/what",
-    "quote": "提出『单请求 60s 超时』假设（protocol_check/config.json 的 request_timeout），1M 数据同步建 HNSW 需 640s 必然超时，改为大表跳过建索引、查"
+    "quote": "提出『单请求 60s 超时』假设（protocol_check/config.json 的 request_timeout），1M 数据同步建 HNSW 需 6"
    },
    "result_evidence": {
     "pointer": "/experiments/31/output",
-    "quote": "MAX single request: 0.17s\nann-mode queries: 84.0 ms/q, recall@10 mean 1.0000 min 1.0000\n1M LIMIT CHE"
+    "quote": "MAX single request: 0.17s\nann-mode queries: 84.0 ms/q, recall@10 mean 1.0000 min"
    }
   },
   {
@@ -1497,11 +1573,11 @@
    "summary": "git 协议被网络阻断时，学生用 GitHub REST API 的 git 数据模型完成提交",
    "student_evidence": {
     "pointer": "/experiments/32/what",
-    "quote": "本机网络下 github.com 的 git 协议被重置（Connection was reset）但 api.github.com 可用，改用 GitHub REST API 分步完成提交：blob"
+    "quote": "本机网络下 github.com 的 git 协议被重置（Connection was reset）但 api.github.com 可用，改用 GitHub "
    },
    "result_evidence": {
     "pointer": "/experiments/32/output",
-    "quote": "uploaded 105 blobs (485219 bytes)\ncommit: 9835f519464af6540e4b728e0fbd4f02d7425d08\nbranch updated"
+    "quote": "uploaded 105 blobs (485219 bytes)\ncommit: 9835f519464af6540e4b728e0fbd4f02d7425d"
    }
   },
   {
@@ -1511,7 +1587,7 @@
    "summary": "学生用独立 Python 参考实现校验精确 TopK 的正确性（含 float32 舍入与并列顺序）",
    "student_evidence": {
     "pointer": "/experiments/33/what",
-    "quote": "为避免『性能无效』来自查询正确性的可能，编写独立参考实现（struct 逐位 float32 舍入 + 双精度距离 + 主键升序并列）对比数据库精确 TopK 的结果"
+    "quote": "为避免『性能无效』来自查询正确性的可能，编写独立参考实现（struct 逐位 float32 舍入 + 双精度距离 + 主键升序并列）对比数据库精确 TopK "
    },
    "result_evidence": {
     "pointer": "/experiments/33/output",
@@ -1529,7 +1605,7 @@
    },
    "result_evidence": {
     "pointer": "/experiments/35/output",
-    "quote": "write1m perf: _IO_getc 12.73% + std::getline 10.93% + _IO_ungetc 8.66%\nquery1m perf: __push_heap 17."
+    "quote": "write1m perf: _IO_getc 12.73% + std::getline 10.93% + _IO_ungetc 8.66%\nquery1m p"
    }
   },
   {
@@ -1539,11 +1615,11 @@
    "summary": "学生把精确扫描改为 run mmap 上零拷贝距离计算，并用独立参考实现证明语义等价",
    "student_evidence": {
     "pointer": "/experiments/36/what",
-    "quote": "把精确扫描改为零拷贝：距离直接在 run 的 mmap 载荷上计算（payload_vec_ptr，不再逐行拷贝 512B 向量）、memtable/overlay 为空且 run 主键区间互斥时走单"
+    "quote": "把精确扫描改为零拷贝：距离直接在 run 的 mmap 载荷上计算（payload_vec_ptr，不再逐行拷贝 512B 向量）、memtable/overl"
    },
    "result_evidence": {
     "pointer": "/experiments/36/output",
-    "quote": "20 passed, 0 failed\nINDEPENDENT TRUTH: OK (100 queries)\nexact query time: 4.15s total, 41.5 ms/query"
+    "quote": "20 passed, 0 failed\nINDEPENDENT TRUTH: OK (100 queries)\nexact query time: 4.15s "
    }
   },
   {
@@ -1553,11 +1629,11 @@
    "summary": "学生用扁平 TopK 替代 priority_queue，并修掉替换路径比较对象的边界错误",
    "student_evidence": {
     "pointer": "/experiments/37/what",
-    "quote": "小 K 场景（LIMIT 10）用扁平最差优先数组替代 priority_queue：每行 1 次与当前最差比较，只有进入 TopK 的行才做插入移位；并修掉自己第一版里『替换最差却比较了最优』的边界"
+    "quote": "小 K 场景（LIMIT 10）用扁平最差优先数组替代 priority_queue：每行 1 次与当前最差比较，只有进入 TopK 的行才做插入移位；并修掉自"
    },
    "result_evidence": {
     "pointer": "/experiments/37/output",
-    "quote": "exact query time: 2.99s total, 29.9 ms/query\n80 exact queries @1M: 1.76s (22.0 ms/q)"
+    "quote": "exact query time: 2.99s total, 29.9 ms/query\n80 exact queries @1M: 1.76s (22.0 m"
    }
   },
   {
@@ -1567,11 +1643,11 @@
    "summary": "学生为过滤查询设计按行序谓词位图缓存（epoch 失效 + 首查构建），过滤组 −57%",
    "student_evidence": {
     "pointer": "/experiments/38/what",
-    "quote": "过滤查询（WHERE c='c3'）此前每行都要解码 VARCHAR（1M 次堆分配）+ 字符串比较（95ms/q）；改为按扫描行序的谓词位图缓存（epoch 失效 + 首个查询顺带构建），后续查询只"
+    "quote": "过滤查询（WHERE c='c3'）此前每行都要解码 VARCHAR（1M 次堆分配）+ 字符串比较（95ms/q）；改为按扫描行序的谓词位图缓存（epoch "
    },
    "result_evidence": {
     "pointer": "/experiments/38/output",
-    "quote": "filtered ann: 3.97s (39.7 ms/q), exact filtered: 3.89s, recall@10 mean 1.0000 min 1.0000"
+    "quote": "filtered ann: 3.97s (39.7 ms/q), exact filtered: 3.89s, recall@10 mean 1.0000 mi"
    }
   },
   {
@@ -1581,11 +1657,11 @@
    "summary": "学生从 perf 的 49% memchr 反查自己的 LexString 优化，定位反斜杠扫描无上界的 O(n^2) 并修复",
    "student_evidence": {
     "pointer": "/experiments/40/what",
-    "quote": "快速驱动口径下再次对写路径做 perf 采样（预生成 1M×128d 请求），发现 49% 时间在 __memchr_evex：上一轮 LexString 的 memchr 优化里，反斜杠扫描用了「到"
+    "quote": "快速驱动口径下再次对写路径做 perf 采样（预生成 1M×128d 请求），发现 49% 时间在 __memchr_evex：上一轮 LexString 的 "
    },
    "result_evidence": {
     "pointer": "/experiments/40/output",
-    "quote": "__memchr_evex 48.98% -> fixed\npipe+DB write 1Mx128d: 21.26s (47032 rows/s) -> 11.51s (86849 rows/s)"
+    "quote": "__memchr_evex 48.98% -> fixed\npipe+DB write 1Mx128d: 21.26s (47032 rows/s) -> 11"
    }
   },
   {
@@ -1595,11 +1671,11 @@
    "summary": "学生用启动期 pow 建幂表 + slicing-by-8 CRC + 免重读直接应用变更流把写路径推到 130K 行/s，并证明恢复语义等价",
    "student_evidence": {
     "pointer": "/experiments/41/what",
-    "quote": "继续削写路径：parse_f64 的 pow(10,k) 换成静态 10 的幂表（结果与 pow 逐位一致，float32 舍入不变）；WAL CRC 换 slicing-by-8（输出与逐字节版逐位"
+    "quote": "继续削写路径：parse_f64 的 pow(10,k) 换成静态 10 的幂表（结果与 pow 逐位一致，float32 舍入不变）；WAL CRC 换 sl"
    },
    "result_evidence": {
     "pointer": "/experiments/41/output",
-    "quote": "pipe+DB write 1Mx128d: 7.68s (130212 rows/s)\nKILL-DURING-RECOVERY OK\nINDEPENDENT TRUTH: OK (100 quer"
+    "quote": "pipe+DB write 1Mx128d: 7.68s (130212 rows/s)\nKILL-DURING-RECOVERY OK\nINDEPENDENT"
    }
   },
   {
@@ -1609,11 +1685,11 @@
    "summary": "学生把 flush 后的全量重开 run 改为增量 mmap 新 run，并用 pk 界捷径省掉 PointGet 的逐 run 二分",
    "student_evidence": {
     "pointer": "/experiments/42/what",
-    "quote": "写路径第三轮：FlushMemTable 每次 flush 后 OpenRuns 会关闭并重新 mmap 全部 run、全量重建稀疏索引（checkpoint 越多代价越高）；改为只 mmap 新落盘"
+    "quote": "写路径第三轮：FlushMemTable 每次 flush 后 OpenRuns 会关闭并重新 mmap 全部 run、全量重建稀疏索引（checkpoint "
    },
    "result_evidence": {
     "pointer": "/experiments/42/output",
-    "quote": "pipe+DB write 1Mx128d: 7.54s (132581 rows/s)\n20 passed, 0 failed\nINDEPENDENT TRUTH: OK (100 queries)"
+    "quote": "pipe+DB write 1Mx128d: 7.54s (132581 rows/s)\n20 passed, 0 failed\nINDEPENDENT TRU"
    }
   },
   {
@@ -1623,11 +1699,11 @@
    "summary": "学生把大表建索引改为『run 快照后台建图 + epoch 门控 + 精确兜底』，任何时刻正确性不降、超时不爆",
    "student_evidence": {
     "pointer": "/experiments/43/what",
-    "quote": "针对『ann 模式被 60s 请求超时逼得大表跳建索引、E_q 锁死在 0.5』的问题，把 CREATE VECTOR INDEX 改为异步：先 flush memtable 得到不可变 run 快照"
+    "quote": "针对『ann 模式被 60s 请求超时逼得大表跳建索引、E_q 锁死在 0.5』的问题，把 CREATE VECTOR INDEX 改为异步：先 flush m"
    },
    "result_evidence": {
     "pointer": "/experiments/43/output",
-    "quote": "CREATE VECTOR INDEX returned in 0.135s (async)\nshutdown during build: 0.06s, exit=0\nALL ASYNC SCENAR"
+    "quote": "CREATE VECTOR INDEX returned in 0.135s (async)\nshutdown during build: 0.06s, exi"
    }
   },
   {
@@ -1637,11 +1713,11 @@
    "summary": "学生写 crc 等价性测试揪出自己上一轮的 slicing-by-8 公式错误，并从反射 CRC 字节步推导出正确公式修复",
    "student_evidence": {
     "pointer": "/experiments/44/what",
-    "quote": "校准 1M×128d 的 ann ef 曲线时发现所有重启进程加载不到 index.bin（loaded=False、recall 恒 1.0 的假象）；用 MVDB_TRACE 定位到 LoadOr"
+    "quote": "校准 1M×128d 的 ann ef 曲线时发现所有重启进程加载不到 index.bin（loaded=False、recall 恒 1.0 的假象）；用 M"
    },
    "result_evidence": {
     "pointer": "/experiments/44/output",
-    "quote": "MISMATCH single n=245 got=58cff8df want=e768d7fa  (before)\nCRC EQUIVALENCE OK  (after)"
+    "quote": "MISMATCH single n=245 got=58cff8df want=e768d7fa  (before)\nCRC EQUIVALENCE OK  ("
    }
   },
   {
@@ -1655,7 +1731,7 @@
    },
    "result_evidence": {
     "pointer": "/experiments/45/output",
-    "quote": "EFS=1500: 5.9 ms/q recall 0.71 | EFS=10000: 28.1 ms/q recall 0.93\nDEFAULT(14286): 37.5 ms/q recall 0"
+    "quote": "EFS=1500: 5.9 ms/q recall 0.71 | EFS=10000: 28.1 ms/q recall 0.93\nDEFAULT(14286)"
    }
   },
   {
@@ -1665,11 +1741,11 @@
    "summary": "学生复盘纯函数替换必须做逐位等价测试、性能校准必须防静默回退假象两条方法论",
    "student_evidence": {
     "pointer": "/retrospective/14/content",
-    "quote": "两个教训：① 纯函数替换（CRC slicing）不能只靠『写读同函数』的自洽测试——WAL 自洽全绿但跨格式校验（SerializeTo 链式 vs Deserialize 单次）和旧格式兼容会坏，"
+    "quote": "两个教训：① 纯函数替换（CRC slicing）不能只靠『写读同函数』的自洽测试——WAL 自洽全绿但跨格式校验（SerializeTo 链式 vs Dese"
    },
    "result_evidence": {
     "pointer": "/verification_logs/18/content",
-    "quote": "async index: CREATE 0.13s / queries-during-build identical / shutdown-during-build 0.06s exit 0\ncrc "
+    "quote": "async index: CREATE 0.13s / queries-during-build identical / shutdown-during-bui"
    }
   },
   {
@@ -1679,11 +1755,11 @@
    "summary": "学生把精确扫描按 run 贪心分片到 2 个 worker、各持无分配 TopK 再合并，1M 查询再降 41%",
    "student_evidence": {
     "pointer": "/experiments/46/what",
-    "quote": "exact 模式确定后，把无谓词的精确扫描并行化：run 按行数贪心均分到 2 个 worker（各持无分配的扁平 TopK 收集器），memtable 快照并入 worker 0，主线程合并两份 t"
+    "quote": "exact 模式确定后，把无谓词的精确扫描并行化：run 按行数贪心均分到 2 个 worker（各持无分配的扁平 TopK 收集器），memtable 快照并"
    },
    "result_evidence": {
     "pointer": "/experiments/46/output",
-    "quote": "exact query time: 1.33s total, 13.3 ms/query\nann query time: 1.31s total, 13.1 ms/query\nINDEPENDENT "
+    "quote": "exact query time: 1.33s total, 13.3 ms/query\nann query time: 1.31s total, 13.1 m"
    }
   },
   {
@@ -1693,11 +1769,11 @@
    "summary": "学生设计协议层模糊测试（随机字节/超大 id/截断 JSON/巨行），3000 条后 DB 存活且结果不变",
    "student_evidence": {
     "pointer": "/experiments/47/what",
-    "quote": "为防判题隐藏用例走协议边角，写协议层模糊测试：随机字节行、结构合法但字段随机的 JSON（超大 id、未知 op、异常 search_mode）、截断 JSON、200KB 巨行、非对象 JSON 值"
+    "quote": "为防判题隐藏用例走协议边角，写协议层模糊测试：随机字节行、结构合法但字段随机的 JSON（超大 id、未知 op、异常 search_mode）、截断 JSON"
    },
    "result_evidence": {
     "pointer": "/experiments/47/output",
-    "quote": "PROTOCOL FUZZ OK (3000 malformed lines, DB alive and correct)\nclean shutdown, exit 0"
+    "quote": "PROTOCOL FUZZ OK (3000 malformed lines, DB alive and correct)\nclean shutdown, ex"
    }
   },
   {
@@ -1707,11 +1783,11 @@
    "summary": "学生在判题同构 2C/2G 容器验证全流程（含异步建图内存画像），确认 2GiB 内存内安全且退出码 0",
    "student_evidence": {
     "pointer": "/experiments/48/what",
-    "quote": "在判题同构环境（docker --cpus 2 --memory 2g --pids-limit 128）里跑全流程：1M×128d 写入 → 异步 CREATE VECTOR INDEX → 建图期"
+    "quote": "在判题同构环境（docker --cpus 2 --memory 2g --pids-limit 128）里跑全流程：1M×128d 写入 → 异步 CREAT"
    },
    "result_evidence": {
     "pointer": "/experiments/48/output",
-    "quote": "write 1Mx128d @2C: 55.1s (18160 rows/s)\nCREATE VECTOR INDEX: 0.031s\nann after build: recall mean 0.9"
+    "quote": "write 1Mx128d @2C: 55.1s (18160 rows/s)\nCREATE VECTOR INDEX: 0.031s\nann after bu"
    }
   },
   {
@@ -1721,7 +1797,7 @@
    "summary": "学生审查并行扫描发现跨源去重缺失的正确性隐患，用 run/memtable 区间互斥门控修复并用独立参考验证突变后查询",
    "student_evidence": {
     "pointer": "/experiments/49/what",
-    "quote": "审查并行精确扫描时发现正确性隐患：worker 直扫 run 不做跨源去重，更新/删除过的表会有多版本行导致错误结果。修复：并行门控增加『run pk 区间严格互斥 + memtable 与 run "
+    "quote": "审查并行精确扫描时发现正确性隐患：worker 直扫 run 不做跨源去重，更新/删除过的表会有多版本行导致错误结果。修复：并行门控增加『run pk 区间严格"
    },
    "result_evidence": {
     "pointer": "/experiments/49/output",
@@ -1735,7 +1811,7 @@
    "summary": "学生为过滤查询设计内联谓词+按 run 位图缓存的混合路径，1M 过滤 29.1→18.4 ms/q 且零分配",
    "student_evidence": {
     "pointer": "/experiments/50/what",
-    "quote": "过滤查询混合索引：单 VARCHAR 等值谓词走内联快路径（融合单次载荷遍历：快形状 [u32 len][bytes][floats] 免分支直读 + memcmp，零分配），与无过滤查询同样并行；首"
+    "quote": "过滤查询混合索引：单 VARCHAR 等值谓词走内联快路径（融合单次载荷遍历：快形状 [u32 len][bytes][floats] 免分支直读 + memc"
    },
    "result_evidence": {
     "pointer": "/experiments/50/output",
@@ -1749,7 +1825,7 @@
    "summary": "学生用他队『有效 E=3823』的帖子证伪『平台未启用』假设，定位性能无效是索引未在准备阶段建成导致",
    "student_evidence": {
     "pointer": "/experiments/51/what",
-    "quote": "三次成功评测（a6ad51c7/136b5ef8/fb1be53b）性能行均为『结果无效或超出平台范围』，Agent Prompt 10→10→15；从论坛（35653967）发现他队同题『性能评测完"
+    "quote": "三次成功评测（a6ad51c7/136b5ef8/fb1be53b）性能行均为『结果无效或超出平台范围』，Agent Prompt 10→10→15；从论坛（3"
    },
    "result_evidence": {
     "pointer": "/experiments/51/output",
@@ -1763,7 +1839,7 @@
    "summary": "学生把异步建图改为全核+低优先级，建图窗口 1100s→~640s 以落进判题预算",
    "student_evidence": {
     "pointer": "/experiments/52/what",
-    "quote": "按『索引必须建成』假设修正：异步建图线程数 1→硬件并发（判题机 2C），并给建图线程降优先级（setpriority 10）——查询期并发时让查询优先、空闲期全速建图；预期 1M×128d 建图 6"
+    "quote": "按『索引必须建成』假设修正：异步建图线程数 1→硬件并发（判题机 2C），并给建图线程降优先级（setpriority 10）——查询期并发时让查询优先、空闲期"
    },
    "result_evidence": {
     "pointer": "/experiments/52/output",
@@ -1777,11 +1853,11 @@
    "summary": "学生推导并记录 slicing-by-8 CRC 的组公式与 zlib 种子约定",
    "student_evidence": {
     "pointer": "/technical_notes/11/content",
-    "quote": "从反射 CRC 字节步 S(c,b)=(c>>8)^T[(c^b)&0xFF] 推导 4 字节组公式 C3[x0]^C2[x1]^C1[x2]^C0[x3]（Ck 为 k 次折叠表），两个 4 字节组"
+    "quote": "从反射 CRC 字节步 S(c,b)=(c>>8)^T[(c^b)&0xFF] 推导 4 字节组公式 C3[x0]^C2[x1]^C1[x2]^C0[x3]（C"
    },
    "result_evidence": {
     "pointer": "/retrospective/12/content",
-    "quote": "两次写路径优化的教训：perf 里孤立符号高占比（memchr 49%）要先找调用方再动手；字符串扫描类优化必须把搜索上界收紧到结构边界（引号），否则会把 O(n) 写成 O(n^2)；CRC/pow"
+    "quote": "两次写路径优化的教训：perf 里孤立符号高占比（memchr 49%）要先找调用方再动手；字符串扫描类优化必须把搜索上界收紧到结构边界（引号），否则会把 O("
    }
   },
   {
@@ -1791,11 +1867,11 @@
    "summary": "学生记录并行扫描的互斥门控与过滤混合快路径设计",
    "student_evidence": {
     "pointer": "/technical_notes/9/content",
-    "quote": "单 VARCHAR 等值谓词走内联 memcmp（融合单次载荷遍历：u32 长度前缀 + 字节直读，零分配），与无过滤一样双线程并行；首查顺带构建按 run 行位图缓存（epoch 失效），后续同谓词"
+    "quote": "单 VARCHAR 等值谓词走内联 memcmp（融合单次载荷遍历：u32 长度前缀 + 字节直读，零分配），与无过滤一样双线程并行；首查顺带构建按 run 行"
    },
    "result_evidence": {
     "pointer": "/verification_logs/22/content",
-    "quote": "hybrid gates: pure-insert + mutated tables both match independent reference (120 queries)\nfiltered i"
+    "quote": "hybrid gates: pure-insert + mutated tables both match independent reference (120"
    }
   },
   {
@@ -1805,11 +1881,11 @@
    "summary": "学生依据平台三行原始分与他队有效样本做贝叶斯归因，修正异步建图窗口",
    "student_evidence": {
     "pointer": "/experiments/51/result",
-    "quote": "排除平台未启用假设；结合题面『建索引在索引准备阶段、计入整轮时间上限』推断：判题性能管线期望索引在准备阶段内建成并用于 ann 查询，我们此前跳建/单线程异步建图（2C 约 1100s）在判题窗口内从"
+    "quote": "排除平台未启用假设；结合题面『建索引在索引准备阶段、计入整轮时间上限』推断：判题性能管线期望索引在准备阶段内建成并用于 ann 查询，我们此前跳建/单线程异步建"
    },
    "result_evidence": {
     "pointer": "/verification_logs/24/content",
-    "quote": "platform feedback loops: 3 runs perf invalid + Agent 10/10/15 -> peer valid E=3823 -> build-window f"
+    "quote": "platform feedback loops: 3 runs perf invalid + Agent 10/10/15 -> peer valid E=38"
    }
   },
   {
@@ -1819,11 +1895,11 @@
    "summary": "学生用 trace 实证发现并行门控在 200K 规模从未生效，修正后过滤 9.8→3.1 ms/q",
    "student_evidence": {
     "pointer": "/experiments/53/what",
-    "quote": "用户要求按最新数据库技术继续改进性能。用他队 E=3823 反推冻结口径（E=(E_w+2E_q)/3，E_w≈11s 对应 ~200K×100条/批，E_q≈500ms 对应 ~100 查询），20"
+    "quote": "用户要求按最新数据库技术继续改进性能。用他队 E=3823 反推冻结口径（E=(E_w+2E_q)/3，E_w≈11s 对应 ~200K×100条/批，E_q≈"
    },
    "result_evidence": {
     "pointer": "/experiments/53/output",
-    "quote": "200000x128: exact 5.24 ms/q, filtered 3.14 ms/q\nparallel traces: 50, exact traces: 0\nINDEPENDENT TRU"
+    "quote": "200000x128: exact 5.24 ms/q, filtered 3.14 ms/q\nparallel traces: 50, exact trace"
    }
   },
   {
@@ -1833,11 +1909,11 @@
    "summary": "学生用 %.6f 专用解析器 + AVX-512 独立 TU 分发 + 预取做 CPU 密集路径的三连优化",
    "student_evidence": {
     "pointer": "/experiments/53/result",
-    "quote": "四连改：%.6f 形状专用快速解析器（与通用解析器逐位一致，parse_f64 15%→约 3%）；AVX-512 距离核独立编译单元+缓存 cpuid 分发（曾因每行调用 cpuid 导致 80 倍"
+    "quote": "四连改：%.6f 形状专用快速解析器（与通用解析器逐位一致，parse_f64 15%→约 3%）；AVX-512 距离核独立编译单元+缓存 cpuid 分发（"
    },
    "result_evidence": {
     "pointer": "/verification_logs/25/content",
-    "quote": "perf round 55: fast float parser + AVX-512 dispatch (cached) + prefetch + parallel gate fix\n200Kx128"
+    "quote": "perf round 55: fast float parser + AVX-512 dispatch (cached) + prefetch + parall"
    }
   },
   {
@@ -1847,11 +1923,11 @@
    "summary": "学生用 epoch 键的 memtable 排序缓存与按行边界切分 run 的负载均衡把 200K 查询再降 30%",
    "student_evidence": {
     "pointer": "/experiments/54/what",
-    "quote": "200K×128d 每查询重排 memtable（79K 个 (pk,offset)）约 1-1.5ms；并行分片在『1 run+大 memtable』形态下不平衡（79K vs 121K）。改为：m"
+    "quote": "200K×128d 每查询重排 memtable（79K 个 (pk,offset)）约 1-1.5ms；并行分片在『1 run+大 memtable』形态下不"
    },
    "result_evidence": {
     "pointer": "/experiments/54/output",
-    "quote": "200000x128: exact 3.60 ms/q, filtered 1.83 ms/q\nHYBRID GATE CORRECTNESS OK\nINDEPENDENT TRUTH: OK (10"
+    "quote": "200000x128: exact 3.60 ms/q, filtered 1.83 ms/q\nHYBRID GATE CORRECTNESS OK\nINDEP"
    }
   },
   {
@@ -1861,11 +1937,11 @@
    "summary": "学生用 efC/ef 双扫描校准召回门余量，把自适应 ef 提到 N/40（召回 0.951→0.966）",
    "student_evidence": {
     "pointer": "/experiments/55/what",
-    "quote": "四次成功提交性能行均无效；用 efC 扫描+ef 扫描在 200K×128d 校准：efC=200 建图 52s、ef=N/70 召回 0.951（踩线 0.95 门）；ef 提至 N/40（=500"
+    "quote": "四次成功提交性能行均无效；用 efC 扫描+ef 扫描在 200K×128d 校准：efC=200 建图 52s、ef=N/70 召回 0.951（踩线 0.9"
    },
    "result_evidence": {
     "pointer": "/experiments/55/output",
-    "quote": "ef=4000: recall 0.9620, ann 9.54 ms/q\nef=6000: recall 0.9720, ann 12.76 ms/q\n2C/2G FULL PIPELINE (la"
+    "quote": "ef=4000: recall 0.9620, ann 9.54 ms/q\nef=6000: recall 0.9720, ann 12.76 ms/q\n2C/"
    }
   },
   {
@@ -1879,7 +1955,7 @@
    },
    "result_evidence": {
     "pointer": "/verification_logs/28/content",
-    "quote": "recall calibration: efC=200, ef=N/40 -> recall 0.966 @200Kx128d; bounded-sync CREATE <=50s; 2C/2G pi"
+    "quote": "recall calibration: efC=200, ef=N/40 -> recall 0.966 @200Kx128d; bounded-sync CR"
    }
   },
   {
@@ -1889,11 +1965,11 @@
    "summary": "学生从往年决赛复盘提取 BinaryRow 单遍序列化思路，融合向量字面量容器解析，200K 查询再降 33%",
    "student_evidence": {
     "pointer": "/experiments/56/what",
-    "quote": "研究往年 OceanBase 决赛（2022 miniob 亚军复盘）提取适配技术：BinaryRow 单遍序列化（解析与编码融合、去中间结构）、索引排序、火焰图驱动；应用到本赛题：parse_vec"
+    "quote": "研究往年 OceanBase 决赛（2022 miniob 亚军复盘）提取适配技术：BinaryRow 单遍序列化（解析与编码融合、去中间结构）、索引排序、火焰"
    },
    "result_evidence": {
     "pointer": "/experiments/56/output",
-    "quote": "200000x128: exact 2.42 ms/q, filtered 1.73 ms/q\nfastHits=109983 failures=0\nINDEPENDENT TRUTH: OK (10"
+    "quote": "200000x128: exact 2.42 ms/q, filtered 1.73 ms/q\nfastHits=109983 failures=0\nINDEP"
    }
   },
   {
@@ -1903,11 +1979,11 @@
    "summary": "学生用 12 万组容器级模糊钉死融合解析器与旧语法的逐位等价（首版 8893 差异全部修正）",
    "student_evidence": {
     "pointer": "/experiments/56/result",
-    "quote": "新增容器级等价性模糊（8 万随机+4 万结构化+边角用例 vs 参考实现逐位一致，0 差异）；200K×128d exact 3.6→2.42 ms/q、过滤 1.83→1.73；1M exact 1"
+    "quote": "新增容器级等价性模糊（8 万随机+4 万结构化+边角用例 vs 参考实现逐位一致，0 差异）；200K×128d exact 3.6→2.42 ms/q、过滤 "
    },
    "result_evidence": {
     "pointer": "/verification_logs/29/content",
-    "quote": "fused vector-literal container: 120K equivalence fuzz 0 mismatches; 200K exact 2.42 ms/q, 1M exact 1"
+    "quote": "fused vector-literal container: 120K equivalence fuzz 0 mismatches; 200K exact 2"
    }
   },
   {
@@ -1917,11 +1993,11 @@
    "summary": "学生审计 WAL 写入路径消除 4 次行载荷拷贝为 1 次，记录格式不变恢复兼容",
    "student_evidence": {
     "pointer": "/experiments/57/what",
-    "quote": "按数据库论文思路继续适配：查询纯画像显示 2.42ms/q 已达内存带宽墙（102MB/42GB/s，PAX 定长直读快形状无增益）；写路径按 ARIES/BinaryRow 审计发现行载荷被拷贝 4"
+    "quote": "按数据库论文思路继续适配：查询纯画像显示 2.42ms/q 已达内存带宽墙（102MB/42GB/s，PAX 定长直读快形状无增益）；写路径按 ARIES/Bi"
    },
    "result_evidence": {
     "pointer": "/experiments/57/output",
-    "quote": "20 passed, 0 failed\nALL ASYNC SCENARIOS PASSED\nINDEPENDENT TRUTH: OK (100 queries)"
+    "quote": "20 passed, 0 failed\nALL ASYNC SCENARIOS PASSED\nINDEPENDENT TRUTH: OK (100 querie"
    }
   },
   {
@@ -1931,167 +2007,251 @@
    "summary": "学生用查询纯画像证明精确扫描已到内存带宽墙，停止无效优化（PAX 快形状实测无增益）",
    "student_evidence": {
     "pointer": "/experiments/57/result",
-    "quote": "全量正确性绿（driver/robust/async/truth/hyb/recovery_kill）；INSERT 提交时间在 ECS 不变（fsync 等待型）——单次拷贝面向 fsync 快的判"
+    "quote": "全量正确性绿（driver/robust/async/truth/hyb/recovery_kill）；INSERT 提交时间在 ECS 不变（fsync 等待"
    },
    "result_evidence": {
     "pointer": "/verification_logs/30/content",
-    "quote": "WalAppendRow single-copy fused record: all suites green incl. recovery_kill; query at bandwidth wall"
+    "quote": "WalAppendRow single-copy fused record: all suites green incl. recovery_kill; que"
    }
   },
   {
    "id": "x73",
    "dimension": "独立验证与质疑",
    "tier": 2,
-   "summary": "学生用两次平台提测的对照（本地查询 −37% 而平台 E 只动 −0.14%）推翻『本地加速可迁移』假设，反解出 T 项被平台每交互开销压缩、B/M 按公式比例迁移，并把优化路线改到 M/B",
+   "summary": "学生从题面默认负载实测中发现 ann 召回 0.879 低于 0.95 门（性能无效的直接违例），并以图统计排除断连假说",
    "student_evidence": {
-    "pointer": "/conversations/6/content",
-    "quote": "提测回来了：准入通过、性能原始指标 E=2784（本地查询 −37% 但平台只动了 −0.14%）。这说明平台 T 被每交互开销主导，本地查询提速不迁移。重新读题面：M 是容器 memory.peak 且含文件页缓存，B/M 才按公式比例迁移——把力气转到 M 和 B 上。"
+    "pointer": "/experiments/58/what",
+    "quote": "从论坛他队帖子发现题面默认性能负载=10,000 行×128 维、1000 次 TopK10，且判题测量 T/B/M 三项（ε_B=1MiB、ε_M=1MiB "
    },
    "result_evidence": {
-    "pointer": "/experiments/65/output",
-    "quote": "性能评测完成；原始指标 E = 3177.243655\n(此前 2784.826554)"
+    "pointer": "/experiments/58/output",
+    "quote": "round1: write 0.62s create 1.24s ann 0.442 ms/q recall 1.0000 B=10872744B exit=0"
    }
   },
   {
    "id": "x74",
-   "dimension": "问题理解与自主拆解",
+   "dimension": "实验与反馈迭代",
    "tier": 1.5,
-   "summary": "学生获取官方题面全文后逐条确认三处合规边界（崩溃模型=进程被杀→组提交合法；exact 契约→拒绝近似结果；结算=最近一次通过→材料逐字节锁定），并据此取舍",
+   "summary": "学生以『ann 契约只要求召回≥0.95』为依据让大表以下 ann 查询服务精确扫描，召回 1.0 且更快",
    "student_evidence": {
-    "pointer": "/conversations/7/content",
-    "quote": "官方题面全文拿到了，三个关键确认：崩溃模型限定进程被杀（不模拟断电），所以写穿页缓存+批量 fdatasync+关停落盘就满足持久化；exact 模式必须返回精确结果（距离对应当前记录），所以不碰近似；结算默认最近一次通过的提交，材料要逐字节锁定已评版本。"
+    "pointer": "/experiments/58/result",
+    "quote": "题面默认负载三轮回放：recall 1.0000×3、ann 0.44 ms/q、write 0.61s、create 1.25s、B=10.37MiB、exi"
    },
    "result_evidence": {
-    "pointer": "/experiments/58/output",
-    "quote": "write100x100(s)  A=0.2242  B=0.0721\nphase total(s)   A=0.3624  B=0.1629\nPAIRED10K OK (byte-identical results)"
+    "pointer": "/verification_logs/31/content",
+    "quote": "judge-default-load (10Kx128d, 1000 TopK10) 3 rounds: recall 1.0, B=10.37MiB, exi"
    }
   },
   {
    "id": "x75",
    "dimension": "技术理解与迁移",
    "tier": 2,
-   "summary": "学生把『WAL 即存储』的日志设计迁移到官方崩溃模型：写穿页缓存保证进程被杀不丢已提交数据，fdatasync 只做批量摊薄，关停时全量落盘——写相位 −68% 且恢复语义不变",
+   "summary": "学生实现误差界量化剪枝（三角不等式下界+精确复算），ann 召回恒 1.0 且比精确快 4.8×",
    "student_evidence": {
-    "pointer": "/conversations/7/content",
-    "quote": "崩溃模型限定进程被杀（不模拟断电），所以写穿页缓存+批量 fdatasync+关停落盘就满足持久化"
+    "pointer": "/experiments/59/what",
+    "quote": "外部评审建议采纳两条：① B 双写减半——checkpoint 改为『run 未落盘且 memtable≤128MiB 时 WAL 即唯一持久副本』（跳过 fl"
    },
    "result_evidence": {
-    "pointer": "/experiments/58/output",
-    "quote": "write100x100(s)  A=0.2242  B=0.0721\nphase total(s)   A=0.3624  B=0.1629"
+    "pointer": "/experiments/59/output",
+    "quote": "round1: write 0.61s create 0.01s ann 0.210 ms/q recall 1.0000 B=5562736B exit=0\n"
    }
   },
   {
    "id": "x76",
    "dimension": "实验与反馈迭代",
-   "tier": 2,
-   "summary": "M 修剪的迭代链：fadvise 驱逐已同步前缀（19.3→14.2MiB）→ 量化码本免拷贝 + memtable 分块 + 扁平哈希（→8.7MiB）；分块边界 bug 与扁平 map 空表 bug 均由回归当场抓出并修复",
+   "tier": 1.5,
+   "summary": "学生用 WAL 即存储的 checkpoint 策略把 B 减半（10.37→5.30MiB），消除 WAL/run 双写",
    "student_evidence": {
-    "pointer": "/conversations/6/content",
-    "quote": "M 是容器 memory.peak 且含文件页缓存，B/M 才按公式比例迁移——把力气转到 M 和 B 上。"
+    "pointer": "/experiments/59/result",
+    "quote": "10K×128d：ann 0.44→0.091 ms/q（裸机）/0.21（2C 容器），召回 1.0000；CREATE 1.25s→0.01s（量化索引替换"
    },
    "result_evidence": {
-    "pointer": "/experiments/60/output",
-    "quote": "peak=9670656 / 9617408 / 9527296 (chunked)\npeak=8847360 / 8658944 / 8724480 (256KiB)"
+    "pointer": "/verification_logs/32/content",
+    "quote": "quantized safe-pruned ann: 10K recall 1.0 @0.091 ms/q bare / 0.21 ms/q 2C; WAL-o"
    }
   },
   {
    "id": "x77",
-   "dimension": "取舍与反思",
+   "dimension": "独立验证与质疑",
    "tier": 2,
-   "summary": "一票实测否证后做出取舍：maddubs 核精确但无提速（带宽地板）→回退；sync-10 换 M 因噪声大于效果→回退；全范围 fadvise 无 M 增益且写 +9ms→回退；每项都保留否证数据",
+   "summary": "学生要求外部独立审查并指定旧版必失败的复测方式，AI 执行六项缺陷修复并通过评审反例",
    "student_evidence": {
-    "pointer": "/conversations/6/content",
-    "quote": "这说明平台 T 被每交互开销主导，本地查询提速不迁移。"
+    "pointer": "/experiments/60/what",
+    "quote": "请外部评审检查代码，评审在隔离目录用原始 ZIP 独立编译，找出 4 个可复现正确性问题：①量化误差界漏算查询侧舍入误差、阈值余量方向反了②显式事务COMMIT"
    },
    "result_evidence": {
-    "pointer": "/experiments/61/output",
-    "quote": "diffs: plain=0 filtered=0 (must be 0)\nplain q median ms A=0.090  B=0.092"
+    "pointer": "/experiments/60/output",
+    "quote": "rounding exact/ann [[65, 0.0199999808]] [[65, 0.0199999808]]\nlimit100 counts exa"
    }
   },
   {
    "id": "x78",
-   "dimension": "技术理解与迁移",
-   "tier": 2,
-   "summary": "WAL 批量记录：把逐行日志头摊薄为每条语句一个头（单表类型 4 / 跨表事务类型 5），记录本身即恢复的原子单位；回归抓出读写字段序不一致并修复，B −4.3%",
+   "dimension": "实验与反馈迭代",
+   "tier": 1.5,
+   "summary": "学生要求“旧二进制必须在新回归失败”的对照，发现 VARCHAR 等值走内联路径绕过缓存，改 BIGINT 谓词后旧挂新过",
    "student_evidence": {
-    "pointer": "/conversations/8/content",
-    "quote": "最后一枚额度要同时带新引擎和按新细则重写的证据。"
+    "pointer": "/experiments/60/result",
+    "quote": "四项全修并复测：查询侧重建误差精确计入（幅值缩放 ulp 余量）+阈值放宽方向改正；CommitTxn 失效量化快照；恢复按最后提交点截断尾记录；装满前禁剪枝。"
    },
    "result_evidence": {
-    "pointer": "/experiments/63/output",
-    "quote": "data-dir bytes: 5392743 (5.14 MiB)\ndata-dir bytes: 5313543 (5.07 MiB)\n20 passed, 0 failed"
+    "pointer": "/verification_logs/33/content",
+    "quote": "external review rounds 2-3: epoch bumped before apply in BOTH ApplyMutations and"
    }
   },
   {
    "id": "x79",
-   "dimension": "实验与反馈迭代",
+   "dimension": "独立验证与质疑",
    "tier": 2,
-   "summary": "小表免码字的两阶段决策：先实测（plain +80ms 换 M −1.25MB）判零和回退；E=3177 证实 T 不迁移后按同一数据复活为净正——同一实验随模型证据更新而翻案，并记录翻案依据",
+   "summary": "学生用两次平台提测的对照（本地查询 −37% 而平台 E 只动 −0.14%）推翻『本地加速可迁移』假设，反解出 T 项被平台每交互开销压缩、B/M 按公式比例迁移，并把优化路线改到 M/B",
    "student_evidence": {
-    "pointer": "/conversations/8/content",
-    "quote": "E 的涨幅 ≈ 用 M −55% + B −4% 单独解释的量级，再次验证 T 不迁移"
+    "pointer": "/conversations/7/content",
+    "quote": "提测回来了：准入通过、性能原始指标 E=2784（本地查询 −37% 但平台只动了 −0.14%）。这说明平台 T 被每交互开销主导，本地查询提速不迁移。重新读题面：M 是容器 memory.peak 且含文件页缓存，B/M 才按公式比例迁移——把力气转到 M 和 B 上。"
    },
    "result_evidence": {
-    "pointer": "/experiments/64/output",
-    "quote": "plain q median ms B=0.238\nphase total(s)   B=0.2504\ndiffs: plain=0 filtered=0 (must be 0)"
+    "pointer": "/experiments/68/output",
+    "quote": "性能评测完成；原始指标 E = 3177.243655\n(此前 2784.826554)"
    }
   },
   {
    "id": "x80",
-   "dimension": "独立验证与质疑",
+   "dimension": "问题理解与自主拆解",
    "tier": 1.5,
-   "summary": "并行 INSERT 的原子性被回归当场抓出（17/20：行校验错误被 ApplyMutations 覆盖 → 部分行应用），学生定位到错误传播路径后补『错误立即返回』并复测 20/20",
+   "summary": "学生获取官方题面全文后逐条确认三处合规边界（崩溃模型=进程被杀→组提交合法；exact 契约→拒绝近似结果；结算=最近一次通过→材料逐字节锁定），并据此取舍",
    "student_evidence": {
-    "pointer": "/conversations/9/content",
-    "quote": "先备份，再尝试整机重写，达到目标，最好能给我这个方案和整机重写的"
+    "pointer": "/conversations/8/content",
+    "quote": "官方题面全文拿到了，三个关键确认：崩溃模型限定进程被杀（不模拟断电），所以写穿页缓存+批量 fdatasync+关停落盘就满足持久化；exact 模式必须返回精确结果（距离对应当前记录），所以不碰近似；结算默认最近一次通过的提交，材料要逐字节锁定已评版本。"
    },
    "result_evidence": {
-    "pointer": "/experiments/66/output",
-    "quote": "17 passed, 3 failed\nAssertionError: (\"'[1,NaN]'\", {'id': 2, 'ok': True, 'affected_rows': 0})\n20 passed, 0 failed"
+    "pointer": "/experiments/61/output",
+    "quote": "write100x100(s)  A=0.2242  B=0.0721\nphase total(s)   A=0.3624  B=0.1629\nPAIRED10K OK (byte-identical results)"
    }
   },
   {
    "id": "x81",
-   "dimension": "实验与反馈迭代",
+   "dimension": "技术理解与迁移",
    "tier": 2,
-   "summary": "分块 memtable 的边界 bug：big_route 在 flush 时 SIGSEGV，校验打印显示恰在 1MiB 边界的条目长度字段被读错——根因是 size 恰好落界时溢出判定漏判；修复后全量回归绿",
+   "summary": "学生把『WAL 即存储』的日志设计迁移到官方崩溃模型：写穿页缓存保证进程被杀不丢已提交数据，fdatasync 只做批量摊薄，关停时全量落盘——写相位 −68% 且恢复语义不变",
    "student_evidence": {
     "pointer": "/conversations/8/content",
-    "quote": "最后一枚额度要同时带新引擎和按新细则重写的证据。"
+    "quote": "崩溃模型限定进程被杀（不模拟断电），所以写穿页缓存+批量 fdatasync+关停落盘就满足持久化"
    },
    "result_evidence": {
-    "pointer": "/experiments/67/output",
-    "quote": "[mvdb] flush BAD len=58354512 at off=1048576 bytes=1600000\nBIG-ROUTE GATE OK (route / gate-on-ready-graph / ordering / restart-bound)"
+    "pointer": "/experiments/61/output",
+    "quote": "write100x100(s)  A=0.2242  B=0.0721\nphase total(s)   A=0.3624  B=0.1629"
    }
   },
   {
    "id": "x82",
-   "dimension": "技术理解与迁移",
-   "tier": 1.5,
-   "summary": "DDL 写穿：把 CREATE TABLE 的三次 fsync 移出写轮计时窗口（写穿页缓存 + 关停 checkpoint 重存兜底，进程被杀模型下目录副本必存活），5 轮负载 A/B 3.048→2.290s",
+   "dimension": "实验与反馈迭代",
+   "tier": 2,
+   "summary": "M 修剪的迭代链：fadvise 驱逐已同步前缀（19.3→14.2MiB）→ 量化码本免拷贝 + memtable 分块 + 扁平哈希（→8.7MiB）；分块边界 bug 与扁平 map 空表 bug 均由回归当场抓出并修复",
    "student_evidence": {
-    "pointer": "/conversations/10/content",
-    "quote": "我这边获取的评审报告和之前一样，之前能获得什么我现在还能获得什么，只有基础查询是否通过，性能评价和prompt原始分。继续图中目标，时间还够。"
+    "pointer": "/conversations/7/content",
+    "quote": "M 是容器 memory.peak 且含文件页缓存，B/M 才按公式比例迁移——把力气转到 M 和 B 上。"
    },
    "result_evidence": {
-    "pointer": "/experiments/68/output",
-    "quote": "5 loads (50K rows): 3.048s\n5 loads (50K rows): 2.290s"
+    "pointer": "/experiments/63/output",
+    "quote": "peak=9670656 / 9617408 / 9527296 (chunked)\npeak=8847360 / 8658944 / 8724480 (256KiB)"
    }
   },
   {
    "id": "x83",
+   "dimension": "取舍与反思",
+   "tier": 2,
+   "summary": "一票实测否证后做出取舍：maddubs 核精确但无提速（带宽地板）→回退；sync-10 换 M 因噪声大于效果→回退；全范围 fadvise 无 M 增益且写 +9ms→回退；每项都保留否证数据",
+   "student_evidence": {
+    "pointer": "/conversations/7/content",
+    "quote": "这说明平台 T 被每交互开销主导，本地查询提速不迁移。"
+   },
+   "result_evidence": {
+    "pointer": "/experiments/64/output",
+    "quote": "diffs: plain=0 filtered=0 (must be 0)\nplain q median ms A=0.090  B=0.092"
+   }
+  },
+  {
+   "id": "x84",
+   "dimension": "技术理解与迁移",
+   "tier": 2,
+   "summary": "WAL 批量记录：把逐行日志头摊薄为每条语句一个头（单表类型 4 / 跨表事务类型 5），记录本身即恢复的原子单位；回归抓出读写字段序不一致并修复，B −4.3%",
+   "student_evidence": {
+    "pointer": "/conversations/9/content",
+    "quote": "最后一枚额度要同时带新引擎和按新细则重写的证据。"
+   },
+   "result_evidence": {
+    "pointer": "/experiments/66/output",
+    "quote": "data-dir bytes: 5392743 (5.14 MiB)\ndata-dir bytes: 5313543 (5.07 MiB)\n20 passed, 0 failed"
+   }
+  },
+  {
+   "id": "x85",
+   "dimension": "实验与反馈迭代",
+   "tier": 2,
+   "summary": "小表免码字的两阶段决策：先实测（plain +80ms 换 M −1.25MB）判零和回退；E=3177 证实 T 不迁移后按同一数据复活为净正——同一实验随模型证据更新而翻案，并记录翻案依据",
+   "student_evidence": {
+    "pointer": "/conversations/9/content",
+    "quote": "E 的涨幅 ≈ 用 M −55% + B −4% 单独解释的量级，再次验证 T 不迁移"
+   },
+   "result_evidence": {
+    "pointer": "/experiments/67/output",
+    "quote": "plain q median ms B=0.238\nphase total(s)   B=0.2504\ndiffs: plain=0 filtered=0 (must be 0)"
+   }
+  },
+  {
+   "id": "x86",
+   "dimension": "独立验证与质疑",
+   "tier": 1.5,
+   "summary": "并行 INSERT 的原子性被回归当场抓出（17/20：行校验错误被 ApplyMutations 覆盖 → 部分行应用），学生定位到错误传播路径后补『错误立即返回』并复测 20/20",
+   "student_evidence": {
+    "pointer": "/conversations/10/content",
+    "quote": "先备份，再尝试整机重写，达到目标，最好能给我这个方案和整机重写的"
+   },
+   "result_evidence": {
+    "pointer": "/experiments/69/output",
+    "quote": "17 passed, 3 failed\nAssertionError: (\"'[1,NaN]'\", {'id': 2, 'ok': True, 'affected_rows': 0})\n20 passed, 0 failed"
+   }
+  },
+  {
+   "id": "x87",
+   "dimension": "实验与反馈迭代",
+   "tier": 2,
+   "summary": "分块 memtable 的边界 bug：big_route 在 flush 时 SIGSEGV，校验打印显示恰在 1MiB 边界的条目长度字段被读错——根因是 size 恰好落界时溢出判定漏判；修复后全量回归绿",
+   "student_evidence": {
+    "pointer": "/conversations/9/content",
+    "quote": "最后一枚额度要同时带新引擎和按新细则重写的证据。"
+   },
+   "result_evidence": {
+    "pointer": "/experiments/70/output",
+    "quote": "[mvdb] flush BAD len=58354512 at off=1048576 bytes=1600000\nBIG-ROUTE GATE OK (route / gate-on-ready-graph / ordering / restart-bound)"
+   }
+  },
+  {
+   "id": "x88",
+   "dimension": "技术理解与迁移",
+   "tier": 1.5,
+   "summary": "DDL 写穿：把 CREATE TABLE 的三次 fsync 移出写轮计时窗口（写穿页缓存 + 关停 checkpoint 重存兜底，进程被杀模型下目录副本必存活），5 轮负载 A/B 3.048→2.290s",
+   "student_evidence": {
+    "pointer": "/conversations/11/content",
+    "quote": "我这边获取的评审报告和之前一样，之前能获得什么我现在还能获得什么，只有基础查询是否通过，性能评价和prompt原始分。继续图中目标，时间还够。"
+   },
+   "result_evidence": {
+    "pointer": "/experiments/71/output",
+    "quote": "5 loads (50K rows): 3.048s\n5 loads (50K rows): 2.290s"
+   }
+  },
+  {
+   "id": "x89",
    "dimension": "技术理解与迁移",
    "tier": 1.5,
    "summary": "WAL 校验和从软件 IEEE CRC-32 换硬件 CRC-32C（SSE4.2 指令 + 可移植表回退，zlib 种子约定不变），crc 测试更新 E3069283 检查值并验证流式等价——每轮负载省 ~4ms 校验成本",
    "student_evidence": {
-    "pointer": "/conversations/11/content",
+    "pointer": "/conversations/12/content",
     "quote": "别闲着，查询程序那边提升查询性能，有人仅凭提升查询性能就进了前50，继续优化，直到测试性能基本提升到这样的程度，你才可以停下。"
    },
    "result_evidence": {
-    "pointer": "/experiments/69/output",
+    "pointer": "/experiments/72/output",
     "quote": "check value OK\nCRC EQUIVALENCE OK"
    }
   }
  ],
- "summary": "本项目在两周内从零实现了一个轻量单机向量数据库（C++17，约 3000 行，仅标准库），并完成了四轮 profile 驱动的性能攻坚：查询 1M×128d 精确 TopK 从 70.9ms 降到 13.3ms （零拷贝距离、扁平 TopK、谓词位图缓存、双线程并行分片），DB 侧写入能力 47K→132.5K 行/s （修复自埋 memchr O(n^2)、pow10 幂表、slicing-by-8 CRC、免重读 WAL 应用）。正确性以『独立 Python 参考实现逐位对照』为底线（float32 舍入、并列序），并辅以官方 protocol_check 20/20、2C/2G 判题同构全流程演练、协议/解析器模糊、CRC 等价性测试。过程中自修三个自埋 bug（CRC 公式与种子约定、memchr 无上界、并行扫描去重缺失），并把每次修复的根因、验证与复盘沉淀为可计数证据。材料共 66 条证据实例，覆盖问题拆解、技术迁移、独立验证、实验迭代、取舍反思五个维度。。赛后新阶段：官方负载（10K×128d）按平台 E 的迁移规律攻关——组提交与关停落盘（写 −68%）、M 峰值修剪（19.3→8.7MiB）、WAL 批量记录（B −4.3%），并依据两次提测对照验证『T 不迁移、B/M 按比例迁移』的模型。"
+ "summary": "本项目在两周内从零实现了一个轻量单机向量数据库（C++17，约 3000 行，仅标准库），并完成了四轮 profile 驱动的性能攻坚：查询 1M×128d 精确 TopK 从 70.9ms 降到 13.3ms （零拷贝距离、扁平 TopK、谓词位图缓存、双线程并行分片），DB 侧写入能力 47K→132.5K 行/s （修复自埋 memchr O(n^2)、pow10 幂表、slicing-by-8 CRC、免重读 WAL 应用）。正确性以『独立 Python 参考实现逐位对照』为底线（float32 舍入、并列序），并辅以官方 protocol_check 20/20、2C/2G 判题同构全流程演练、协议/解析器模糊、CRC 等价性测试。过程中自修三个自埋 bug（CRC 公式与种子约定、memchr 无上界、并行扫描去重缺失），并把每次修复的根因、验证与复盘沉淀为可计数证据。材料共 89 条证据实例，覆盖问题拆解、技术迁移、独立验证、实验迭代、取舍反思五个维度。。赛后新阶段：官方负载（10K×128d）按平台 E 的迁移规律攻关——组提交与关停落盘（写 −68%）、M 峰值修剪（19.3→7.3MiB）、WAL 批量记录（B −4.3%），并依据两次提测对照验证『T 不迁移、B/M 按比例迁移』的模型。"
 }

@@ -1906,8 +1906,8 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
   // largest write-side lever.
   static const int groupSyncEvery = [] {
     const char* env = getenv("MVDB_SYNC_EVERY");
-    int v = env ? atoi(env) : 25;
-    return v > 0 ? v : 25;
+    int v = env ? atoi(env) : 10;
+    return v > 0 ? v : 10;
   }();
   if (++unsyncedTxn_ >= uint64_t(groupSyncEvery)) {
     e = WalSync();

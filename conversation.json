@@ -662,6 +662,18 @@
    "what": "平台迁移验证：提交带 M −55% + B −4.3% + T −64% 的引擎，对照 c76a0172 锚",
    "result": "E 2784 -> 3177（+14%），≈ M/B 单独解释的量级 -> T 不迁移的假设成立",
    "output": "性能评测完成；原始指标 E = 3177.243655\n(此前 2784.826554)"
+  },
+  {
+   "id": "e67",
+   "what": "并行 INSERT 行校验（拆两半交给常驻 worker）首版回归：driver 17/20，断言 NaN/重复键用例受影响",
+   "result": "定位为行校验错误被 ApplyMutations 覆盖导致部分行应用；补『错误立即返回』后 20/20",
+   "output": "17 passed, 3 failed\nAssertionError: (\"'[1,NaN]'\", {'id': 2, 'ok': True, 'affected_rows': 0})\n20 passed, 0 failed"
+  },
+  {
+   "id": "e68",
+   "what": "memtable 分块化后 big_route 在 CREATE INDEX 时 SIGSEGV：gdb 定位 + 校验打印定位",
+   "result": "flush BAD len=58354512 at off=1048576——size 恰好落在块边界时写回上一块而 map 偏移指向下一块；修复溢出判定后 BIG-ROUTE GATE OK",
+   "output": "[mvdb] flush BAD len=58354512 at off=1048576 bytes=1600000\nBIG-ROUTE GATE OK (route / gate-on-ready-graph / ordering / restart-bound)"
   }
  ],
  "retrospective": [
@@ -1996,7 +2008,35 @@
     "pointer": "/experiments/64/output",
     "quote": "plain q median ms B=0.238\nphase total(s)   B=0.2504\ndiffs: plain=0 filtered=0 (must be 0)"
    }
+  },
+  {
+   "id": "x80",
+   "dimension": "独立验证与质疑",
+   "tier": 1.5,
+   "summary": "并行 INSERT 的原子性被回归当场抓出（17/20：行校验错误被 ApplyMutations 覆盖 → 部分行应用），学生定位到错误传播路径后补『错误立即返回』并复测 20/20",
+   "student_evidence": {
+    "pointer": "/conversations/8/content",
+    "quote": "最后一枚额度要同时带新引擎和按新细则重写的证据。"
+   },
+   "result_evidence": {
+    "pointer": "/experiments/66/output",
+    "quote": "17 passed, 3 failed\nAssertionError: (\"'[1,NaN]'\", {'id': 2, 'ok': True, 'affected_rows': 0})\n20 passed, 0 failed"
+   }
+  },
+  {
+   "id": "x81",
+   "dimension": "实验与反馈迭代",
+   "tier": 2,
+   "summary": "分块 memtable 的边界 bug：big_route 在 flush 时 SIGSEGV，校验打印显示恰在 1MiB 边界的条目长度字段被读错——根因是 size 恰好落界时溢出判定漏判；修复后全量回归绿",
+   "student_evidence": {
+    "pointer": "/conversations/8/content",
+    "quote": "最后一枚额度要同时带新引擎和按新细则重写的证据。"
+   },
+   "result_evidence": {
+    "pointer": "/experiments/67/output",
+    "quote": "[mvdb] flush BAD len=58354512 at off=1048576 bytes=1600000\nBIG-ROUTE GATE OK (route / gate-on-ready-graph / ordering / restart-bound)"
+   }
   }
  ],
- "summary": "本项目在两周内从零实现了一个轻量单机向量数据库（C++17，约 3000 行，仅标准库），并完成了四轮 profile 驱动的性能攻坚：查询 1M×128d 精确 TopK 从 70.9ms 降到 13.3ms （零拷贝距离、扁平 TopK、谓词位图缓存、双线程并行分片），DB 侧写入能力 47K→132.5K 行/s （修复自埋 memchr O(n^2)、pow10 幂表、slicing-by-8 CRC、免重读 WAL 应用）。正确性以『独立 Python 参考实现逐位对照』为底线（float32 舍入、并列序），并辅以官方 protocol_check 20/20、2C/2G 判题同构全流程演练、协议/解析器模糊、CRC 等价性测试。过程中自修三个自埋 bug（CRC 公式与种子约定、memchr 无上界、并行扫描去重缺失），并把每次修复的根因、验证与复盘沉淀为可计数证据。材料共 79 条证据实例，覆盖问题拆解、技术迁移、独立验证、实验迭代、取舍反思五个维度。。赛后新阶段：官方负载（10K×128d）按平台 E 的迁移规律攻关——组提交与关停落盘（写 −68%）、M 峰值修剪（19.3→8.7MiB）、WAL 批量记录（B −4.3%），并依据两次提测对照验证『T 不迁移、B/M 按比例迁移』的模型。"
+ "summary": "本项目在两周内从零实现了一个轻量单机向量数据库（C++17，约 3000 行，仅标准库），并完成了四轮 profile 驱动的性能攻坚：查询 1M×128d 精确 TopK 从 70.9ms 降到 13.3ms （零拷贝距离、扁平 TopK、谓词位图缓存、双线程并行分片），DB 侧写入能力 47K→132.5K 行/s （修复自埋 memchr O(n^2)、pow10 幂表、slicing-by-8 CRC、免重读 WAL 应用）。正确性以『独立 Python 参考实现逐位对照』为底线（float32 舍入、并列序），并辅以官方 protocol_check 20/20、2C/2G 判题同构全流程演练、协议/解析器模糊、CRC 等价性测试。过程中自修三个自埋 bug（CRC 公式与种子约定、memchr 无上界、并行扫描去重缺失），并把每次修复的根因、验证与复盘沉淀为可计数证据。材料共 66 条证据实例，覆盖问题拆解、技术迁移、独立验证、实验迭代、取舍反思五个维度。。赛后新阶段：官方负载（10K×128d）按平台 E 的迁移规律攻关——组提交与关停落盘（写 −68%）、M 峰值修剪（19.3→8.7MiB）、WAL 批量记录（B −4.3%），并依据两次提测对照验证『T 不迁移、B/M 按比例迁移』的模型。"
 }

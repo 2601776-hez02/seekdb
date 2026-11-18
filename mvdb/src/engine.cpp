@@ -669,22 +669,43 @@ Err Engine::WalRecover() {
       if (e2 != Err::OK) return e2;
     } else if (type == 4) {
       // fused single-table batch: [type][txn i64][count u32][table i64]
-      // [rows: flags u8|pk i64|plen u32|payload]
+      // [rows: flags u8|pk0 i64|pk deltas (zigzag varint)|plen u32|payload]
       if (head.size() < 21) break;
       int64_t tid = 0;
       uint32_t count = 0;
       std::memcpy(&count, head.data() + 9, 4);
       std::memcpy(&tid, head.data() + 13, 8);
       size_t pos = 21;
+      int64_t prevPk = 0;
       for (uint32_t i = 0; i < count; i++) {
-        if (pos + 13 > head.size()) break;
+        if (pos + 5 > head.size()) break;
+        uint8_t flags = head[size_t(pos)];
+        pos += 1;
         int64_t pk = 0;
-        uint8_t flags = 0;
+        if (i == 0) {
+          if (pos + 8 > head.size()) break;
+          std::memcpy(&pk, head.data() + pos, 8);
+          pos += 8;
+        } else {
+          uint64_t zz = 0;
+          int shift = 0;
+          bool ok = false;
+          while (pos < head.size() && shift < 64) {
+            uint8_t b = head[size_t(pos)];
+            pos += 1;
+            zz |= uint64_t(b & 0x7F) << shift;
+            if (!(b & 0x80)) { ok = true; break; }
+            shift += 7;
+          }
+          if (!ok) break;
+          int64_t d = int64_t(zz >> 1) ^ -int64_t(zz & 1);
+          pk = prevPk + d;
+        }
+        prevPk = pk;
+        if (pos + 4 > head.size()) break;
         uint32_t pl = 0;
-        std::memcpy(&flags, head.data() + pos, 1);
-        std::memcpy(&pk, head.data() + pos + 1, 8);
-        std::memcpy(&pl, head.data() + pos + 9, 4);
-        pos += 13;
+        std::memcpy(&pl, head.data() + pos, 4);
+        pos += 4;
         if (pos + pl > head.size()) break;
         Err e2 = applyRow(tid, flags, pk, head.substr(pos, pl));
         if (e2 != Err::OK) return e2;
@@ -692,21 +713,43 @@ Err Engine::WalRecover() {
       }
     } else if (type == 5) {
       // fused multi-table batch (explicit-txn commits): [type][txn i64]
-      // [count u32][rows: tid i64|flags u8|pk i64|plen u32|payload]
+      // [count u32][rows: tid i64|flags u8|pk0 i64|pk deltas varint|plen u32|payload]
       if (head.size() < 13) break;
       size_t pos = 13;
       uint32_t count = 0;
       std::memcpy(&count, head.data() + 9, 4);
+      int64_t prevPk = 0;
       for (uint32_t i = 0; i < count; i++) {
-        if (pos + 21 > head.size()) break;
+        if (pos + 13 > head.size()) break;
         int64_t tid = 0, pk = 0;
         uint8_t flags = 0;
         uint32_t pl = 0;
         std::memcpy(&tid, head.data() + pos, 8);
         std::memcpy(&flags, head.data() + pos + 8, 1);
-        std::memcpy(&pk, head.data() + pos + 9, 8);
-        std::memcpy(&pl, head.data() + pos + 17, 4);
-        pos += 21;
+        pos += 9;
+        if (i == 0) {
+          if (pos + 8 > head.size()) break;
+          std::memcpy(&pk, head.data() + pos, 8);
+          pos += 8;
+        } else {
+          uint64_t zz = 0;
+          int shift = 0;
+          bool ok = false;
+          while (pos < head.size() && shift < 64) {
+            uint8_t b = head[size_t(pos)];
+            pos += 1;
+            zz |= uint64_t(b & 0x7F) << shift;
+            if (!(b & 0x80)) { ok = true; break; }
+            shift += 7;
+          }
+          if (!ok) break;
+          int64_t d = int64_t(zz >> 1) ^ -int64_t(zz & 1);
+          pk = prevPk + d;
+        }
+        prevPk = pk;
+        if (pos + 4 > head.size()) break;
+        std::memcpy(&pl, head.data() + pos, 4);
+        pos += 4;
         if (pos + pl > head.size()) break;
         Err e2 = applyRow(tid, flags, pk, head.substr(pos, pl));
         if (e2 != Err::OK) return e2;
@@ -1860,8 +1903,23 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
     }
     size_t body = 1 + 8 + 4;  // type | txn | count
     if (singleTbl) body += 8;
-    for (const Mut& m : batch) {
-      body += (singleTbl ? 0 : 8) + 1 + 8 + 4 + m.payload.size();
+    {
+      // pk delta encoding: the first row keeps the full i64, the rest carry
+      // zigzag varints of the pk delta (sequential benchmark pks -> 1 byte)
+      int64_t prevPk = 0;
+      bool first = true;
+      for (const Mut& m : batch) {
+        body += (singleTbl ? 0 : 8) + 1 + 4 + m.payload.size();
+        if (first) {
+          body += 8;
+        } else {
+          body += 1;
+          uint64_t zz = (uint64_t(m.pk - prevPk) << 1) ^ uint64_t((m.pk - prevPk) >> 63);
+          while (zz > 0x7F) { body++; zz >>= 7; }
+        }
+        prevPk = m.pk;
+        first = false;
+      }
     }
     uint32_t payLen = uint32_t(body);
     size_t s2 = walBuf_.size();
@@ -1877,14 +1935,29 @@ Err Engine::ApplyMutations(const std::function<Err(Mut&, bool&)>& gen) {
     uint32_t count = uint32_t(batch.size());
     walBuf_.append((const char*)&count, 4);
     if (singleTbl) walBuf_.append((const char*)&tbl0, 8);
-    for (const Mut& m : batch) {
-      if (!singleTbl) walBuf_.append((const char*)&m.tableId, 8);
-      uint8_t flags = m.tomb ? 1 : 0;
-      walBuf_.append((const char*)&flags, 1);
-      walBuf_.append((const char*)&m.pk, 8);
-      uint32_t pl = uint32_t(m.payload.size());
-      walBuf_.append((const char*)&pl, 4);
-      walBuf_.append(m.payload);
+    {
+      int64_t prevPk = 0;
+      bool first = true;
+      for (const Mut& m : batch) {
+        if (!singleTbl) walBuf_.append((const char*)&m.tableId, 8);
+        uint8_t flags = m.tomb ? 1 : 0;
+        walBuf_.append((const char*)&flags, 1);
+        if (first) {
+          walBuf_.append((const char*)&m.pk, 8);
+          first = false;
+        } else {
+          int64_t d = m.pk - prevPk;
+          uint64_t zz = (uint64_t(d) << 1) ^ uint64_t(d >> 63);
+          char vb[10];
+          int n = 0;
+          do { vb[n++] = char(zz & 0x7F) | (zz > 0x7F ? 0x80 : 0); zz >>= 7; } while (zz);
+          walBuf_.append(vb, n);
+        }
+        prevPk = m.pk;
+        uint32_t pl = uint32_t(m.payload.size());
+        walBuf_.append((const char*)&pl, 4);
+        walBuf_.append(m.payload);
+      }
     }
     uint32_t c = crc32(walBuf_.data() + s2 + 12, size_t(payLen));
     std::memcpy(&walBuf_[s2 + 8], &c, 4);

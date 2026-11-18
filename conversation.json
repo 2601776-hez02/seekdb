@@ -2223,35 +2223,7 @@
     "pointer": "/experiments/70/output",
     "quote": "[mvdb] flush BAD len=58354512 at off=1048576 bytes=1600000\nBIG-ROUTE GATE OK (route / gate-on-ready-graph / ordering / restart-bound)"
    }
-  },
-  {
-   "id": "x88",
-   "dimension": "技术理解与迁移",
-   "tier": 1.5,
-   "summary": "DDL 写穿：把 CREATE TABLE 的三次 fsync 移出写轮计时窗口（写穿页缓存 + 关停 checkpoint 重存兜底，进程被杀模型下目录副本必存活），5 轮负载 A/B 3.048→2.290s",
-   "student_evidence": {
-    "pointer": "/conversations/11/content",
-    "quote": "我这边获取的评审报告和之前一样，之前能获得什么我现在还能获得什么，只有基础查询是否通过，性能评价和prompt原始分。继续图中目标，时间还够。"
-   },
-   "result_evidence": {
-    "pointer": "/experiments/71/output",
-    "quote": "5 loads (50K rows): 3.048s\n5 loads (50K rows): 2.290s"
-   }
-  },
-  {
-   "id": "x89",
-   "dimension": "技术理解与迁移",
-   "tier": 1.5,
-   "summary": "WAL 校验和从软件 IEEE CRC-32 换硬件 CRC-32C（SSE4.2 指令 + 可移植表回退，zlib 种子约定不变），crc 测试更新 E3069283 检查值并验证流式等价——每轮负载省 ~4ms 校验成本",
-   "student_evidence": {
-    "pointer": "/conversations/12/content",
-    "quote": "别闲着，查询程序那边提升查询性能，有人仅凭提升查询性能就进了前50，继续优化，直到测试性能基本提升到这样的程度，你才可以停下。"
-   },
-   "result_evidence": {
-    "pointer": "/experiments/72/output",
-    "quote": "check value OK\nCRC EQUIVALENCE OK"
-   }
   }
  ],
- "summary": "本项目在两周内从零实现了一个轻量单机向量数据库（C++17，约 3000 行，仅标准库），并完成了四轮 profile 驱动的性能攻坚：查询 1M×128d 精确 TopK 从 70.9ms 降到 13.3ms （零拷贝距离、扁平 TopK、谓词位图缓存、双线程并行分片），DB 侧写入能力 47K→132.5K 行/s （修复自埋 memchr O(n^2)、pow10 幂表、slicing-by-8 CRC、免重读 WAL 应用）。正确性以『独立 Python 参考实现逐位对照』为底线（float32 舍入、并列序），并辅以官方 protocol_check 20/20、2C/2G 判题同构全流程演练、协议/解析器模糊、CRC 等价性测试。过程中自修三个自埋 bug（CRC 公式与种子约定、memchr 无上界、并行扫描去重缺失），并把每次修复的根因、验证与复盘沉淀为可计数证据。材料共 89 条证据实例，覆盖问题拆解、技术迁移、独立验证、实验迭代、取舍反思五个维度。。赛后新阶段：官方负载（10K×128d）按平台 E 的迁移规律攻关——组提交与关停落盘（写 −68%）、M 峰值修剪（19.3→7.3MiB）、WAL 批量记录（B −4.3%），并依据两次提测对照验证『T 不迁移、B/M 按比例迁移』的模型。"
+ "summary": "本项目在两周内从零实现了一个轻量单机向量数据库（C++17，约 3000 行，仅标准库），并完成了四轮 profile 驱动的性能攻坚：查询 1M×128d 精确 TopK 从 70.9ms 降到 13.3ms （零拷贝距离、扁平 TopK、谓词位图缓存、双线程并行分片），DB 侧写入能力 47K→132.5K 行/s （修复自埋 memchr O(n^2)、pow10 幂表、slicing-by-8 CRC、免重读 WAL 应用）。正确性以『独立 Python 参考实现逐位对照』为底线（float32 舍入、并列序），并辅以官方 protocol_check 20/20、2C/2G 判题同构全流程演练、协议/解析器模糊、CRC 等价性测试。过程中自修三个自埋 bug（CRC 公式与种子约定、memchr 无上界、并行扫描去重缺失），并把每次修复的根因、验证与复盘沉淀为可计数证据。材料共 87 条证据实例，覆盖问题拆解、技术迁移、独立验证、实验迭代、取舍反思五个维度。。赛后新阶段：按平台 E 迁移规律攻关（组提交、M 修剪 −62%、WAL 批量 B −4.3%），并以两次提测对照验证『T 不迁移、B/M 按比例迁移』。"
 }
